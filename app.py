@@ -200,7 +200,6 @@ def find_local_database(spelform):
     if not kandidater:
         return None
         
-    # Prioritera filer som har räknats ut med True Rank!
     for k in kandidater:
         if "med_rank" in k.lower():
             return os.path.join(mapp, k)
@@ -212,7 +211,6 @@ def load_database(filepath, antal_matcher):
     if filepath.endswith('.xlsx'):
         global_db = pd.read_excel(filepath)
     else:
-        # Säker inläsning för att klara kommatecken ELLER semikolon
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 first_line = f.readline()
@@ -230,30 +228,23 @@ def load_database(filepath, antal_matcher):
 
     prob_vectors = []
     valid_rows = []
-    bank_counts = []
 
     for idx, row in global_db.iterrows():
         try:
             p_vec = []
-            n_bank = 0
             for m in range(1, antal_matcher + 1):
                 p1 = float(str(row[f'M{m}-1']).replace(',', '.'))
                 px = float(str(row[f'M{m}-X']).replace(',', '.'))
                 p2 = float(str(row[f'M{m}-2']).replace(',', '.'))
                 p_vec.extend([p1, px, p2])
-                if p1 >= 70 or px >= 70 or p2 >= 70: n_bank += 1
             prob_vectors.append(p_vec)
-            bank_counts.append(n_bank)
             valid_rows.append(True)
         except:
             prob_vectors.append([])
-            bank_counts.append(0)
             valid_rows.append(False)
 
     global_db['Prob_Vector'] = prob_vectors
-    global_db['Antal_Bankar'] = bank_counts
     
-    # Hitta rätt utdelnings-kolumn oavsett stora/små bokstäver
     target_payout = f"{antal_matcher} rätt".lower()
     payout_col = next((col for col in global_db.columns if str(col).lower() == target_payout), None)
     
@@ -299,9 +290,9 @@ with st.sidebar:
     slider_u_count = st.slider("Antal Topp-Favoriter (U-tecken)", 1, antal_matcher, min(3, antal_matcher), step=1)
     
     st.subheader("Avancerade Filter")
-    p_opts = [0, 500, 1000, 5000, 10000, 50000, 100000, 500000, 1000000, 5000000]
+    # UPPDATERAD LISTA MED NYA KRAV
+    p_opts = [0, 500, 1000, 5000, 10000, 50000, 75000, 100000, 250000, 500000, 750000, 1000000, 2500000, 5000000, 10000000]
     slider_payout = st.select_slider("Utdelnings-krav (kr)", options=p_opts, value=(0, p_opts[-1]))
-    slider_bankar = st.slider("Antal Bankar i omgången (>=70%)", 0, antal_matcher, (0, antal_matcher))
     
     st.subheader("Mallen - Aktiva Filter")
     cb_payout = st.checkbox("Utdelning", value=True)
@@ -338,7 +329,7 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
         fil_sökväg = find_local_database(spelform)
         
         if fil_sökväg is None:
-            st.error(f"❌ Hittade ingen fil för {spelform} i mappen! Se till att filnamnet stämmer överens med spelet (t.ex. 'Europatips _Med_Rank.csv').")
+            st.error(f"❌ Hittade ingen fil för {spelform} i mappen!")
             st.stop()
             
         with st.spinner(f"Laddar in databasen: {os.path.basename(fil_sökväg)} ..."):
@@ -348,9 +339,6 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
             if len(input_vec) != krav_odds: 
                 st.error(f"⚠️ Fel: {spelform} kräver exakt {krav_odds} värden. Hittade {len(input_vec)}.")
                 st.stop()
-
-            current_bankers = sum(1 for v in input_vec if v >= 70)
-            st.success(f"✅ Auto-laddade: **{os.path.basename(fil_sökväg)}** ({len(global_db)} omgångar). Hittade {current_bankers} st bankar (>=70%) i din rad.")
 
             input_compare = get_structural_vector(input_vec) if cb_structure else input_vec
             weights_arr = np.array([w for i in range(0, krav_odds, 3) for w in [(max(input_compare[i:i+3])/100.0)**2]*3])
@@ -363,14 +351,14 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
             
             pay_min, pay_max = slider_payout
             if cb_payout: v_m = v_m[(v_m['Payout'] >= pay_min) & (v_m['Payout'] <= pay_max)]
-            v_m = v_m[(v_m['Antal_Bankar'] >= slider_bankar[0]) & (v_m['Antal_Bankar'] <= slider_bankar[1])]
 
             if len(v_m) == 0: 
                 st.error("❌ Inga matcher kvar efter filtrering. Testa att lätta på Utdelningskravet.")
                 st.stop()
 
-            # Dynamisk tabell som letar efter Datum/ID_Omg, krashar ej om de saknas!
             visnings_kolumner = [c for c in ['Datum', 'ID_Omg'] if c in v_m.columns] + ['Payout', 'Sim']
+            
+            st.success(f"✅ Auto-laddade: **{os.path.basename(fil_sökväg)}**. Exakt {len(v_m)} liknande omgångar hittades efter filtret.")
             
             st.subheader(f"📋 Historiska Omgångar ({len(v_m)} st)")
             st.dataframe(v_m[visnings_kolumner].rename(columns={'Payout':f'Utdelning ({antal_matcher}r)', 'Sim':'Likhet'}).style.format({f'Utdelning ({antal_matcher}r)': '{:.0f} kr', 'Likhet': '{:.2f}'}), use_container_width=True)
@@ -536,12 +524,12 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
             else:
                 st.info("💡 Exakt uträkning är inaktiverad för 13 matcher (1.59 miljoner rader) för att appen ska svara snabbt. Mallen ovan är färdig att använda!")
 
-            # --- GRAF-MOTOR ---
+            # --- GRAF-MOTOR (Uppdaterad 2x3 layout) ---
             st.markdown("---")
             st.subheader("📊 Datadistribution")
-            fig = plt.figure(figsize=(18, 16))
+            fig = plt.figure(figsize=(18, 12))  # Kortat ner höjden för 2 rader istället för 3
             def smart_plot(data_list, col_idx, color, title, xlabel, is_active, val_min, val_max):
-                plt.subplot(3, 3, col_idx)
+                plt.subplot(2, 3, col_idx) # Nytt 2x3 rutnät!
                 valid_data = [d for d in data_list if not pd.isna(d)]
                 if not valid_data: plt.text(0.5, 0.5, 'Ingen data', ha='center', va='center'); plt.title(title); return
                 d_min, d_max = min(valid_data), max(valid_data)
@@ -564,12 +552,11 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
                     plt.legend()
 
             smart_plot([r for r in ai_ranks if r > 0], 1, 'skyblue', 'AI-Rank', 'AI-Rank', cb_aimatrix, active_ai_min, active_ai_max)
-            smart_plot(v_m['Payout'].tolist(), 2, 'lightgreen', f'Utdelning ({antal_matcher}r)', 'Utdelning (kr)', cb_payout, pay_min, pay_max)
-            smart_plot(sft_sums, 3, 'coral', 'SFT Summa', 'SFT Summa', cb_sft, c_sft[0], c_sft[1])
-            smart_plot(fat_sums, 4, 'gold', 'FAT Summa', 'FAT Summa', cb_fat, c_fatsum[0], c_fatsum[1])
-            smart_plot(points_vals, 5, 'mediumpurple', 'Poängfilter', 'Poäng', cb_points, c_points[0], c_points[1])
-            smart_plot(minus_sums, 6, 'tan', '100-minus Summa', '100-minus', cb_100minus, c_minus[0], c_minus[1])
-            smart_plot(rank24_sums, 7, 'lightpink', 'Rank Summa', 'Rank Summa', cb_rank24, c_rank24[0], c_rank24[1])
+            smart_plot(sft_sums, 2, 'coral', 'SFT Summa', 'SFT Summa', cb_sft, c_sft[0], c_sft[1])
+            smart_plot(fat_sums, 3, 'gold', 'FAT Summa', 'FAT Summa', cb_fat, c_fatsum[0], c_fatsum[1])
+            smart_plot(points_vals, 4, 'mediumpurple', 'Poängfilter', 'Poäng', cb_points, c_points[0], c_points[1])
+            smart_plot(minus_sums, 5, 'tan', '100-minus Summa', '100-minus', cb_100minus, c_minus[0], c_minus[1])
+            smart_plot(rank24_sums, 6, 'lightpink', 'Rank Summa', 'Rank Summa', cb_rank24, c_rank24[0], c_rank24[1])
             plt.tight_layout(pad=2.0, h_pad=2.0)
             
             st.pyplot(fig)
