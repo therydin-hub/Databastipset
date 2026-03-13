@@ -5,8 +5,7 @@ import re
 import os
 import itertools
 import bisect
-import plotly.express as px
-import plotly.graph_objects as go
+import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
 
@@ -291,7 +290,6 @@ with st.sidebar:
     slider_u_count = st.slider("Antal Topp-Favoriter (U-tecken)", 1, antal_matcher, min(3, antal_matcher), step=1)
     
     st.subheader("Avancerade Filter")
-    # UPPDATERAD LISTA MED NYA KRAV
     p_opts = [0, 500, 1000, 5000, 10000, 50000, 75000, 100000, 250000, 500000, 750000, 1000000, 2500000, 5000000, 10000000]
     slider_payout = st.select_slider("Utdelnings-krav (kr)", options=p_opts, value=(0, p_opts[-1]))
     
@@ -513,7 +511,7 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
                         if not (c_trip1[0] <= t1_c <= c_trip1[1] and c_tripx[0] <= tx_c <= c_tripx[1] and c_trip2[0] <= t2_c <= c_trip2[1] and c_triptot[0] <= triptot_c <= c_triptot[1]): continue
                     if cb_occur:
                         o1_c, ox_c, o2_c, occtot_c, _ = get_occurrences(tr)
-                        if not (c_occ1[0] <= o1_c <= c_occ1[1] and c_occx[0] <= ox_c <= c_occx[1] and c_occ2[0] <= o2_c <= c_occ2[1] and c_occtot[0] <= occtot_c <= c_occtot[1]): continue
+                        if not (c_occ1[0] <= o1_c <= c_occ1[1] and c_occx[0] <= occx[i] <= c_occx[1] and c_occ2[0] <= o2_c <= c_occ2[1] and c_occtot[0] <= occtot_c <= c_occtot[1]): continue
                     if cb_points and not (c_points[0] <= get_rank_points(tr, input_compare) <= c_points[1]): continue
                     if cb_100minus and not (c_minus[0] <= get_100_minus_sum(tr, input_compare) <= c_minus[1]): continue
                     if cb_rank24 and not (c_rank24[0] <= get_rank_sum(tr, input_compare) <= c_rank24[1]): continue
@@ -525,70 +523,39 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
             else:
                 st.info("💡 Exakt uträkning är inaktiverad för 13 matcher (1.59 miljoner rader) för att appen ska svara snabbt. Mallen ovan är färdig att använda!")
 
-            # --- INTERAKTIV GRAF-MOTOR (PLOTLY) ---
+            # --- GRAF-MOTOR (Uppdaterad 2x3 layout) ---
             st.markdown("---")
-            st.subheader("📊 Interaktiv Datadistribution")
-            st.markdown("💡 *Håll muspekaren över staplarna för exakta siffror. Dra med musen för att zooma!*")
-
-            def create_interactive_plot(data_list, color, title, xlabel, is_active, val_min, val_max):
+            st.subheader("📊 Datadistribution")
+            fig = plt.figure(figsize=(18, 12))
+            def smart_plot(data_list, col_idx, color, title, xlabel, is_active, val_min, val_max):
+                plt.subplot(2, 3, col_idx) 
                 valid_data = [d for d in data_list if not pd.isna(d)]
+                if not valid_data: plt.text(0.5, 0.5, 'Ingen data', ha='center', va='center'); plt.title(title); return
+                d_min, d_max = min(valid_data), max(valid_data)
+                d_range = d_max - d_min
+                bins = np.arange(np.floor(d_min)-0.5, np.ceil(d_max)+1.5, 1) if d_range <= 40 else int(d_range) if d_range <= 150 else 25
+                plt.hist(valid_data, bins=bins, color=color, edgecolor='black', alpha=0.8)
+                plt.title(title, fontweight='bold'); plt.xlabel(xlabel); plt.ylabel('Antal')
                 
-                # Om datan är tom
-                if not valid_data:
-                    fig = go.Figure()
-                    fig.update_layout(title=f"<b>{title}</b>", annotations=[dict(text="Ingen data hittades", showarrow=False, xref="paper", yref="paper", x=0.5, y=0.5)])
-                    return fig
+                if d_range == 0: ticks = [d_min]
+                elif d_range <= 20: ticks = np.arange(np.floor(d_min), np.ceil(d_max) + 1, 1)
+                elif d_range <= 60: ticks = np.arange(np.floor(d_min), np.ceil(d_max) + 2, 2)
+                elif d_range <= 150: ticks = np.arange(np.floor(d_min), np.ceil(d_max) + 5, 5)
+                elif d_range <= 400: ticks = np.arange(np.floor(d_min), np.ceil(d_max) + 10, 10)
+                else: ticks = np.linspace(d_min, d_max, 10).astype(int)
                 
-                # Skapa histogrammet
-                fig = px.histogram(x=valid_data, nbins=25, color_discrete_sequence=[color])
-                
-                # Designa grafen
-                fig.update_layout(
-                    title=f"<b>{title}</b>",
-                    xaxis_title=xlabel,
-                    yaxis_title="Antal omgångar",
-                    showlegend=False,
-                    margin=dict(l=20, r=20, t=50, b=20),
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    hovermode="x unified"
-                )
-                
-                # Fixa snygga rutnät
-                fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
-                fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)')
-                
-                # Rita ut dina Mall-krav som röda streckade linjer
+                plt.xticks(ticks, rotation=45); plt.grid(axis='y', linestyle='--', alpha=0.5)
                 if is_active:
-                    fig.add_vline(x=val_min, line_width=2, line_dash="dash", line_color="red", annotation_text=" Min")
-                    fig.add_vline(x=val_max, line_width=2, line_dash="dash", line_color="darkred", annotation_text=" Max")
-                
-                return fig
+                    plt.axvline(val_min, color='red', linestyle='dashed', linewidth=2, label='Mallen Min')
+                    plt.axvline(val_max, color='darkred', linestyle='dashed', linewidth=2, label='Mallen Max')
+                    plt.legend()
 
-            # Skapa ett snyggt rutnät i Streamlit med kolumner
-            row1_col1, row1_col2, row1_col3 = st.columns(3)
-            row2_col1, row2_col2, row2_col3 = st.columns(3)
-
-            with row1_col1:
-                fig1 = create_interactive_plot([r for r in ai_ranks if r > 0], '#87CEEB', 'AI-Rank', 'Rank-placering', cb_aimatrix, active_ai_min, active_ai_max)
-                st.plotly_chart(fig1, use_container_width=True)
+            smart_plot([r for r in ai_ranks if r > 0], 1, 'skyblue', 'AI-Rank', 'AI-Rank', cb_aimatrix, active_ai_min, active_ai_max)
+            smart_plot(sft_sums, 2, 'coral', 'SFT Summa', 'SFT Summa', cb_sft, c_sft[0], c_sft[1])
+            smart_plot(fat_sums, 3, 'gold', 'FAT Summa', 'FAT Summa', cb_fat, c_fatsum[0], c_fatsum[1])
+            smart_plot(points_vals, 4, 'mediumpurple', 'Poängfilter', 'Poäng', cb_points, c_points[0], c_points[1])
+            smart_plot(minus_sums, 5, 'tan', '100-minus Summa', '100-minus', cb_100minus, c_minus[0], c_minus[1])
+            smart_plot(rank24_sums, 6, 'lightpink', 'Rank Summa', 'Rank Summa', cb_rank24, c_rank24[0], c_rank24[1])
+            plt.tight_layout(pad=2.0, h_pad=2.0)
             
-            with row1_col2:
-                fig2 = create_interactive_plot(sft_sums, '#FF7F50', 'SFT Summa', 'Summa', cb_sft, c_sft[0], c_sft[1])
-                st.plotly_chart(fig2, use_container_width=True)
-                
-            with row1_col3:
-                fig3 = create_interactive_plot(fat_sums, '#FFD700', 'FAT Summa', 'Summa', cb_fat, c_fatsum[0], c_fatsum[1])
-                st.plotly_chart(fig3, use_container_width=True)
-                
-            with row2_col1:
-                fig4 = create_interactive_plot(points_vals, '#9370DB', 'Poängfilter', 'Poäng', cb_points, c_points[0], c_points[1])
-                st.plotly_chart(fig4, use_container_width=True)
-                
-            with row2_col2:
-                fig5 = create_interactive_plot(minus_sums, '#D2B48C', '100-minus Summa', 'Summa', cb_100minus, c_minus[0], c_minus[1])
-                st.plotly_chart(fig5, use_container_width=True)
-                
-            with row2_col3:
-                fig6 = create_interactive_plot(rank24_sums, '#FFB6C1', f'Rank 1-{krav_odds} Summa', 'Summa', cb_rank24, c_rank24[0], c_rank24[1])
-                st.plotly_chart(fig6, use_container_width=True)
+            st.pyplot(fig)
