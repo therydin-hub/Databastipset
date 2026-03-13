@@ -495,69 +495,88 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
             st.markdown("---")
             st.info(f"📈 **HISTORISK TRÄFFSÄKERHET:** {mall_hits} av {len(v_m)} rader ({mall_hits/len(v_m)*100:.1f}%) fick tillräckligt med poäng ({slider_pass_req} poäng) för att passera Soft-filtret.")
 
-            # --- AI:NS HISTORISKA RAM (MACHINE LEARNING) ---
+           # --- AI:NS HISTORISKA RAM (MACHINE LEARNING) ---
             if antal_matcher == 8:
                 st.markdown("---")
-                st.subheader("🧠 AI:ns Historiska Ram (Baserad på tvillingar)")
-                st.markdown(f"Här struntar AI:n i vad oddsen säger idag, och tittar istället enbart på vad det **faktiska resultatet** blev i de {len(v_m)} historiska omgångar som är mest lika dagens kupong.")
+                st.subheader("🧠 AI:ns Historiska Systemram (216 rader)")
+                st.markdown(f"Här tvingar AI:n fram en perfekt struktur (2 Spikar, 3 Halva, 3 Hela) baserat **enbart på vad det faktiska resultatet blev** i de {len(v_m)} historiska tvilling-omgångarna. Den letar även efter lägen där oddsen idag lurar dig!")
                 
-                ai_frame = []
-                # Gå igenom match för match (0 till 7 för Topptips)
+                hist_stats = []
                 for m in range(8):
-                    # Hämta alla historiska rätta tecken för just den här matchen i tvilling-omgångarna
                     historiska_utfall = [row['Correct_Row'][m] for _, row in v_m.iterrows() if len(row['Correct_Row']) == 8]
-                    
-                    if not historiska_utfall:
-                        continue
+                    if not historiska_utfall: continue
                         
                     tot = len(historiska_utfall)
-                    c1 = historiska_utfall.count('1')
-                    cx = historiska_utfall.count('X')
-                    c2 = historiska_utfall.count('2')
-                    
-                    # Procentuellt historiskt utfall
+                    c1, cx, c2 = historiska_utfall.count('1'), historiska_utfall.count('X'), historiska_utfall.count('2')
                     p1, px, p2 = (c1/tot)*100, (cx/tot)*100, (c2/tot)*100
                     
-                    # AI:ns logik för att bygga ramen baserat på verkligheten
-                    # Om ett tecken historiskt suttit i över 55% av fallen -> SPIK
-                    if p1 >= 55: tecken = "  1  "
-                    elif p2 >= 55: tecken = "  2  "
-                    # Om krysset dominerar extremt (ovanligt)
-                    elif px >= 50: tecken = "  X  "
+                    # Sortera historiskt utfall
+                    utfall = [('1', p1), ('X', px), ('2', p2)]
+                    utfall.sort(key=lambda x: x[1], reverse=True)
                     
-                    # Annars, om matchen historiskt skrällt mycket -> HELGARDERA
-                    elif p1 < 40 and px < 40 and p2 < 40: 
-                        tecken = " 1X2 "
-                        
-                    # Annars plockar vi de två tecken som oftast gick in (HALVGARDERING)
-                    else:
-                        utfall = [('1', p1), ('X', px), ('2', p2)]
-                        utfall.sort(key=lambda x: x[1], reverse=True)
-                        bästa_två = sorted([utfall[0][0], utfall[1][0]])
-                        tecken_str = ''.join(bästa_två)
-                        if tecken_str == '12': tecken = " 1 2 "
-                        else: tecken = f" {tecken_str}  "
+                    # Kolla vad dagens oddssättare tror
+                    odds_idag = [('1', input_vec[m*3]), ('X', input_vec[m*3+1]), ('2', input_vec[m*3+2])]
+                    odds_idag.sort(key=lambda x: x[0], reverse=True)
+                    dagens_fav = odds_idag[0][0]
                     
-                    ai_frame.append({
-                        'match': m+1, 
-                        'odds_idag': f"{int(input_vec[m*3])}-{int(input_vec[m*3+1])}-{int(input_vec[m*3+2])}",
-                        'hist_utfall': f"1:{int(p1)}%  X:{int(px)}%  2:{int(p2)}%",
-                        'rekommendation': tecken
+                    hist_fav = utfall[0][0]
+                    max_p = utfall[0][1]
+                    diff = utfall[0][1] - utfall[2][1] # Skillnad mellan historiskt bäst och sämst
+                    
+                    # Skrällvarning! (Historiken säger något helt annat än oddsen idag)
+                    varning = ""
+                    if hist_fav != dagens_fav and max_p >= 40:
+                        varning = f"🔥 VÄRDE! (Spelbolagen säger {dagens_fav}, historiken säger {hist_fav})"
+                    
+                    hist_stats.append({
+                        'match': m+1,
+                        'max_p': max_p,
+                        'diff': diff,
+                        'hist_fav': hist_fav,
+                        'utfall': utfall,
+                        'odds_str': f"{int(input_vec[m*3])}-{int(input_vec[m*3+1])}-{int(input_vec[m*3+2])}",
+                        'hist_str': f"1:{int(p1)}%  X:{int(px)}%  2:{int(p2)}%",
+                        'varning': varning
                     })
+
+                # --- BYGG RAMEN ---
+                # 1. Hitta 2 Spikar (Matcherna med starkast historiskt tecken)
+                sorted_by_max = sorted(hist_stats, key=lambda x: x['max_p'], reverse=True)
+                banker_ids = [x['match'] for x in sorted_by_max[:2]]
                 
-                # Skriv ut ramen snyggt
-                col_frame, col_data = st.columns([1, 2])
+                # 2. Hitta 3 Helgarderingar (Matcherna med lägst historisk diff = jämnast)
+                rem_matches = [x for x in hist_stats if x['match'] not in banker_ids]
+                sorted_by_diff = sorted(rem_matches, key=lambda x: x['diff'])
+                full_ids = [x['match'] for x in sorted_by_diff[:3]]
+                
+                # 3. Sätt rekommendationerna
+                for item in hist_stats:
+                    if item['match'] in banker_ids:
+                        rek = f"  {item['hist_fav']}  "
+                    elif item['match'] in full_ids:
+                        rek = " 1X2 "
+                    else:
+                        bästa_två = sorted([item['utfall'][0][0], item['utfall'][1][0]])
+                        tecken_str = ''.join(bästa_två)
+                        rek = " 1 2 " if tecken_str == '12' else f" {tecken_str}  "
+                    item['rekommendation'] = rek
+
+                # Skriv ut
+                hist_stats.sort(key=lambda x: x['match'])
+                col_frame, col_data = st.columns([1, 2.5])
+                
                 with col_frame:
-                    st.markdown("**AI:ns Systemram:**")
+                    st.markdown("**AI:ns Ram:**")
                     ram_str = ""
-                    for rad in ai_frame:
-                        ram_str += f"Match {rad['match']}:  {rad['rekommendation']}\n"
+                    for rad in hist_stats:
+                        ram_str += f"M{rad['match']}:  {rad['rekommendation']}\n"
                     st.code(ram_str)
                     
                 with col_data:
-                    st.markdown("**Historisk fakta bakom valet:**")
-                    for rad in ai_frame:
-                        st.write(f"**M{rad['match']}** (Odds idag {rad['odds_idag']}) ➡️ Historiskt satt: *{rad['hist_utfall']}*")
+                    st.markdown("**Historisk Analys:**")
+                    for rad in hist_stats:
+                        warn_text = f" {rad['varning']}" if rad['varning'] else ""
+                        st.write(f"**M{rad['match']}** (Odds: {rad['odds_str']}) ➡️ Satt: *{rad['hist_str']}*{warn_text}")
             
             # --- GRAF-MOTOR (Uppdaterad 2x3 layout) ---
             st.markdown("---")
