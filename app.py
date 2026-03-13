@@ -185,13 +185,13 @@ def find_local_database(spelform):
 
     kandidater = []
     if spelform == "Stryktips":
-        kandidater = [f for f in alla_filer if match(f, ["stryk"], ["topptips", "tt"])]
+        kandidater = [f for f in alla_filer if match(f, ["stryk"], ["topp"])]
     elif spelform == "Europatips":
-        kandidater = [f for f in alla_filer if match(f, ["europa"], ["topptips", "tt"])]
+        kandidater = [f for f in alla_filer if match(f, ["europa"], ["topp"])]
     elif spelform == "Topptips ST":
-        kandidater = [f for f in alla_filer if match(f, ["topp", "stryk"], [])]
+        kandidater = [f for f in alla_filer if match(f, ["topp", "st"], [])]
     elif spelform == "Topptips EU":
-        kandidater = [f for f in alla_filer if match(f, ["topp", "europa"], [])]
+        kandidater = [f for f in alla_filer if match(f, ["topp", "eu"], [])]
     elif spelform == "Topptips Övrigt":
         kandidater = [f for f in alla_filer if match(f, ["topp", "övrig"], [])]
     elif spelform == "Powerplay":
@@ -212,10 +212,17 @@ def load_database(filepath, antal_matcher):
     if filepath.endswith('.xlsx'):
         global_db = pd.read_excel(filepath)
     else:
+        # Säker inläsning för att klara kommatecken ELLER semikolon
         try:
-            global_db = pd.read_csv(filepath, sep=None, engine='python', encoding='utf-8', on_bad_lines='skip')
-        except UnicodeDecodeError:
-            global_db = pd.read_csv(filepath, sep=None, engine='python', encoding='latin-1', on_bad_lines='skip')
+            with open(filepath, 'r', encoding='utf-8') as f:
+                first_line = f.readline()
+            sep = ';' if ';' in first_line else ','
+            global_db = pd.read_csv(filepath, sep=sep, encoding='utf-8', on_bad_lines='skip')
+        except:
+            with open(filepath, 'r', encoding='latin-1') as f:
+                first_line = f.readline()
+            sep = ';' if ';' in first_line else ','
+            global_db = pd.read_csv(filepath, sep=sep, encoding='latin-1', on_bad_lines='skip')
 
     col_m = [f'M{i}' for i in range(1, antal_matcher + 1)]
     if all(c in global_db.columns for c in col_m):
@@ -246,13 +253,15 @@ def load_database(filepath, antal_matcher):
     global_db['Prob_Vector'] = prob_vectors
     global_db['Antal_Bankar'] = bank_counts
     
-    payout_col = f'{antal_matcher} rätt'
-    if payout_col not in global_db.columns: 
-        if '13 rätt' in global_db.columns: payout_col = '13 rätt'
-        elif '8 rätt' in global_db.columns: payout_col = '8 rätt'
-        else: global_db[payout_col] = 0
+    # Hitta rätt utdelnings-kolumn oavsett stora/små bokstäver
+    target_payout = f"{antal_matcher} rätt".lower()
+    payout_col = next((col for col in global_db.columns if str(col).lower() == target_payout), None)
+    
+    if payout_col:
+        global_db['Payout'] = pd.to_numeric(global_db[payout_col].astype(str).str.replace(' ', '').str.replace(',', '.'), errors='coerce').fillna(0)
+    else:
+        global_db['Payout'] = 0
         
-    global_db['Payout'] = pd.to_numeric(global_db[payout_col].astype(str).str.replace(' ', '').str.replace(',', '.'), errors='coerce').fillna(0)
     return global_db[valid_rows]
 
 
@@ -264,7 +273,6 @@ col_header1, col_header2 = st.columns([2, 1])
 with col_header1:
     st.title("🎯 Tipset AI-Analys")
 with col_header2:
-    # NY MENY MED ALLA ALTERNATIV!
     spelform = st.selectbox("⚽ Välj Spelform:", [
         "Stryktips", 
         "Europatips", 
@@ -314,7 +322,7 @@ with st.sidebar:
     
     cb_aimatrix = st.checkbox("AI-Matrix Rank", value=True)
     cb_manual_ai_rank = st.checkbox("Styr AI-Rank manuellt", value=False)
-    max_rank = 3**antal_matcher # 6561 för Topptips, 1.59 milj för Stryk
+    max_rank = 3**antal_matcher
     if cb_manual_ai_rank:
         slider_ai_rank = st.slider("AI-Rank Slider", 1, max_rank, (1, max_rank))
     
@@ -327,11 +335,10 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
     if not input_text:
         st.error(f"⚠️ Vänligen klistra in {krav_odds} oddsvärden först!")
     else:
-        # LETA UPP FILEN AUTOMATISKT
         fil_sökväg = find_local_database(spelform)
         
         if fil_sökväg is None:
-            st.error(f"❌ Hittade ingen fil för {spelform} i mappen! Se till att filnamnet stämmer överens med guiden.")
+            st.error(f"❌ Hittade ingen fil för {spelform} i mappen! Se till att filnamnet stämmer överens med spelet (t.ex. 'Europatips _Med_Rank.csv').")
             st.stop()
             
         with st.spinner(f"Laddar in databasen: {os.path.basename(fil_sökväg)} ..."):
@@ -362,8 +369,11 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
                 st.error("❌ Inga matcher kvar efter filtrering. Testa att lätta på Utdelningskravet.")
                 st.stop()
 
+            # Dynamisk tabell som letar efter Datum/ID_Omg, krashar ej om de saknas!
+            visnings_kolumner = [c for c in ['Datum', 'ID_Omg'] if c in v_m.columns] + ['Payout', 'Sim']
+            
             st.subheader(f"📋 Historiska Omgångar ({len(v_m)} st)")
-            st.dataframe(v_m[['Datum', 'ID_Omg', 'Payout', 'Sim']].rename(columns={'Payout':f'Utdelning ({antal_matcher}r)', 'Sim':'Likhet'}).style.format({f'Utdelning ({antal_matcher}r)': '{:.0f} kr', 'Likhet': '{:.2f}'}), use_container_width=True)
+            st.dataframe(v_m[visnings_kolumner].rename(columns={'Payout':f'Utdelning ({antal_matcher}r)', 'Sim':'Likhet'}).style.format({f'Utdelning ({antal_matcher}r)': '{:.0f} kr', 'Likhet': '{:.2f}'}), use_container_width=True)
 
             ones, draws, twos = [], [], []
             s1, sx, s2, g1, gx, g2 = [], [], [], [], [], []
@@ -377,8 +387,7 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
             for _, row in v_m.iterrows():
                 r, p = row['Correct_Row'], row['Prob_Vector']
                 
-                # Hämtar AI-rank direkt från filen om du har kört True-Rank scriptet, annars beräknas den.
-                if 'True_Rank' in row and row['True_Rank'] > 0:
+                if 'True_Rank' in row and pd.notna(row['True_Rank']) and row['True_Rank'] > 0:
                     ai_ranks.append(row['True_Rank'])
                 else:
                     h_matrix, h_scores_asc, h_tot = calculate_ai_matrix_from_values(p)
@@ -525,7 +534,7 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
                     sim_hits += 1
                 st.success(f"🎯 **EXAKT KVARVARANDE RADANTAL:** {sim_hits} st (Skurit bort {100 - ((sim_hits / 6561) * 100):.2f}%)")
             else:
-                st.info("💡 Exakt uträkning är inaktiverad för 13 matcher (1.59 miljoner möjliga rader) för att appen ska svara blixtsnabbt. Mallen ovanför är färdig att använda i Copéma!")
+                st.info("💡 Exakt uträkning är inaktiverad för 13 matcher (1.59 miljoner rader) för att appen ska svara snabbt. Mallen ovan är färdig att använda!")
 
             # --- GRAF-MOTOR ---
             st.markdown("---")
