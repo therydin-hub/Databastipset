@@ -526,26 +526,58 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
 # --- AI:NS TOPP 5 RAMAR ---
             st.markdown("---")
             st.subheader("🔮 AI:ns 5 Troligaste Scenarion (Närmaste tvillingarna)")
-            st.markdown("Dessa 5 historiska omgångar hade en oddsprofil som var **nästan identisk** med dagens kupong. Titta på deras struktur för att få en matematisk fingervisning om hur en bra ram kan se ut idag!")
+            st.markdown("Dessa 5 historiska omgångar hade en oddsprofil som var **nästan identisk** med dagens kupong. Titta på deras detaljerade struktur för att bygga en perfekt ram!")
             
-            # Sortera ut de 5 absolut mest lika (lägst Sim-värde)
             top_5 = v_m.sort_values('Sim', ascending=True).head(5)
             
             for i, (_, r_data) in enumerate(top_5.iterrows(), 1):
                 r_str = r_data['Correct_Row']
+                p_vec = r_data['Prob_Vector']
                 payout = r_data['Payout']
                 datum = r_data.get('Datum', 'Okänt')
                 sim_score = r_data['Sim']
                 
-                # Bryt ner strukturen
-                c1 = r_str.count('1')
-                cx = r_str.count('X')
-                c2 = r_str.count('2')
-                fav_wins = get_top_n_favs_wins(r_str, r_data['Prob_Vector'], slider_u_count)
+                # Räkna ut allt för denna specifika rad
+                c1, cx, c2 = r_str.count('1'), r_str.count('X'), r_str.count('2')
+                fav_wins = get_top_n_favs_wins(r_str, p_vec, slider_u_count)
+                sft = get_sft_sum(r_str, p_vec)
+                f, a, t, f_sum = get_fat(r_str, p_vec)
+                pts = get_rank_points(r_str, p_vec)
+                minus = get_100_minus_sum(r_str, p_vec)
+                r_sum = get_rank_sum(r_str, p_vec)
+                s1, sx, s2, _ = get_streaks(r_str)
+                g1, gx, g2, _ = get_gaps(r_str)
+                si1, six, si2, si_tot, _ = get_singles(r_str)
                 
-                # Skapa en snygg box för varje scenario
-                with st.expander(f"⭐ Scenario {i} (Likhet: {sim_score:.2f}) | {datum} | Utdelning: {payout:.0f} kr", expanded=True):
-                    st.code(f"RÄTT RAD: {r_str}\n\nSTRUKTUR-ANALYS:\n• Tecken: {c1} st 1:or  |  {cx} st X  |  {c2} st 2:or\n• Favoriter: {fav_wins} av de {slider_u_count} största favoriterna vann")
+                # Hämta eller räkna ut AI-rank för raden
+                if 'True_Rank' in r_data and pd.notna(r_data['True_Rank']) and r_data['True_Rank'] > 0:
+                    ai_r = r_data['True_Rank']
+                else:
+                    h_matrix, h_scores_asc, h_tot = calculate_ai_matrix_from_values(p_vec)
+                    ai_r, _ = get_exact_rank(r_str, h_matrix, h_scores_asc, h_tot)
+                
+                # Skapa en utfällbar ruta med 3 snygga kolumner inuti
+                with st.expander(f"⭐ Scenario {i} (Likhet: {sim_score:.2f}) | {datum} | Utdelning: {payout:.0f} kr", expanded=(i==1)):
+                    st.code(f"RÄTT RAD: {r_str}")
+                    
+                    sc_col1, sc_col2, sc_col3 = st.columns(3)
+                    with sc_col1:
+                        st.markdown("**💰 Värde & Svårighet**")
+                        st.write(f"• **AI-Rank:** {ai_r}")
+                        st.write(f"• **Rank Summa:** {r_sum:.1f}")
+                        st.write(f"• **SFT Summa:** {sft:.1f}")
+                        st.write(f"• **100-minus:** {minus:.1f}")
+                        st.write(f"• **Poäng:** {pts}")
+                    with sc_col2:
+                        st.markdown("**⚽ Kärn-Struktur**")
+                        st.write(f"• **1X2:** {c1}-{cx}-{c2}")
+                        st.write(f"• **Topp {slider_u_count} Favs:** {fav_wins} st vann")
+                        st.write(f"• **FAT:** F:{f} A:{a} T:{t} (Summa: {f_sum})")
+                        st.write(f"• **Singlar:** {si_tot} st")
+                    with sc_col3:
+                        st.markdown("**🧩 Sviter & Luckor**")
+                        st.write(f"• **Sviter (1-X-2):** {s1}-{sx}-{s2}")
+                        st.write(f"• **Luckor (1-X-2):** {g1}-{gx}-{g2}")
             
             # --- GRAF-MOTOR (Uppdaterad 2x3 layout) ---
             st.markdown("---")
