@@ -523,6 +523,30 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
             else:
                 st.info("💡 Exakt uträkning är inaktiverad för 13 matcher (1.59 miljoner rader) för att appen ska svara snabbt. Mallen ovan är färdig att använda!")
 
+# --- AI:NS TOPP 5 RAMAR ---
+            st.markdown("---")
+            st.subheader("🔮 AI:ns 5 Troligaste Scenarion (Närmaste tvillingarna)")
+            st.markdown("Dessa 5 historiska omgångar hade en oddsprofil som var **nästan identisk** med dagens kupong. Titta på deras struktur för att få en matematisk fingervisning om hur en bra ram kan se ut idag!")
+            
+            # Sortera ut de 5 absolut mest lika (lägst Sim-värde)
+            top_5 = v_m.sort_values('Sim', ascending=True).head(5)
+            
+            for i, (_, r_data) in enumerate(top_5.iterrows(), 1):
+                r_str = r_data['Correct_Row']
+                payout = r_data['Payout']
+                datum = r_data.get('Datum', 'Okänt')
+                sim_score = r_data['Sim']
+                
+                # Bryt ner strukturen
+                c1 = r_str.count('1')
+                cx = r_str.count('X')
+                c2 = r_str.count('2')
+                fav_wins = get_top_n_favs_wins(r_str, r_data['Prob_Vector'], slider_u_count)
+                
+                # Skapa en snygg box för varje scenario
+                with st.expander(f"⭐ Scenario {i} (Likhet: {sim_score:.2f}) | {datum} | Utdelning: {payout:.0f} kr", expanded=True):
+                    st.code(f"RÄTT RAD: {r_str}\n\nSTRUKTUR-ANALYS:\n• Tecken: {c1} st 1:or  |  {cx} st X  |  {c2} st 2:or\n• Favoriter: {fav_wins} av de {slider_u_count} största favoriterna vann")
+            
             # --- GRAF-MOTOR (Uppdaterad 2x3 layout) ---
             st.markdown("---")
             st.subheader("📊 Datadistribution")
