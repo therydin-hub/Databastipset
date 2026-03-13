@@ -576,6 +576,7 @@ if 'analys_klar' in st.session_state and st.session_state['analys_klar']:
         st.markdown("**Historisk Analys:**")
         for rad in hist_stats:
             st.write(f"**M{rad['match']}** ({rad['odds_str']}) ➡️ *{rad['hist_str']}*{' ' + rad['varning'] if rad['varning'] else ''}")
+            
             # --- GRAF-MOTOR (Uppdaterad 2x3 layout) ---
             st.markdown("---")
             st.subheader("📊 Datadistribution")
