@@ -495,12 +495,7 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
             st.markdown("---")
             st.info(f"📈 **HISTORISK TRÄFFSÄKERHET:** {mall_hits} av {len(v_m)} rader ({mall_hits/len(v_m)*100:.1f}%) fick tillräckligt med poäng ({slider_pass_req} poäng) för att passera Soft-filtret.")
 
-          # --- VISA RESULTAT OM ANALYS ÄR KÖRD ---
-if 'analys_klar' in st.session_state and st.session_state['analys_klar']:
-    v_m = st.session_state['v_m']
-    input_vec = st.session_state['input_vec']
-
-# --- AI:NS HISTORISKA RAM (MACHINE LEARNING) ---
+     # --- AI:NS HISTORISKA RAM (MACHINE LEARNING) ---
             st.markdown("---")
             st.subheader("🧠 AI:ns Historiska Systemram")
             
