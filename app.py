@@ -175,7 +175,6 @@ def get_top_n_favs_wins(row_str, prob_vector, top_n):
 # ==========================================
 
 def find_local_database(spelform):
-    """Letar automatiskt i mappen efter rätt fil baserat på namn"""
     mapp = os.path.dirname(os.path.abspath(__file__)) if '__file__' in locals() else '.'
     alla_filer = [f for f in os.listdir(mapp) if f.endswith('.csv') or f.endswith('.xlsx')]
     
@@ -318,6 +317,20 @@ with st.sidebar:
     
     cb_structure = st.checkbox("Matcha Struktur (Viktad)", value=True)
 
+    # SOFT FILTERING - DYNAMISK SLIDER
+    st.markdown("---")
+    st.subheader("🎯 Soft Filtering (Poängsystem)")
+    st.markdown("Tvinga inte rader att klara precis *allt*. Hur många av kraven ovan räcker det med att en rad klarar för att den ska behållas?")
+    
+    # Räkna aktiva filter
+    active_filters_list = [cb_u_favs, cb_sft, cb_fat, cb_points, cb_100minus, cb_rank24, cb_base, cb_streak, cb_gap, cb_single, cb_doublet, cb_triplet, cb_occur, cb_aimatrix]
+    total_active = sum(active_filters_list)
+    
+    if total_active > 0:
+        slider_pass_req = st.slider("Minsta antal uppfyllda krav", 1, total_active, total_active)
+    else:
+        slider_pass_req = 0
+
 # --- MAIN AREA ---
 input_text = st.text_area(f"Klistra in VÄRDEN ({krav_odds} st oddsprocent för {spelform}):", height=120)
 
@@ -457,73 +470,32 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
                 if cb_triplet: st.write(f"**Tripplar:** 1: {c_trip1[0]}-{c_trip1[1]} | X: {c_tripx[0]}-{c_tripx[1]} | 2: {c_trip2[0]}-{c_trip2[1]} | Tot: {c_triptot[0]}-{c_triptot[1]}")
                 if cb_occur: st.write(f"**Uppkomster:** 1: {c_occ1[0]}-{c_occ1[1]} | X: {c_occx[0]}-{c_occx[1]} | 2: {c_occ2[0]}-{c_occ2[1]} | Tot: {c_occtot[0]}-{c_occtot[1]}")
 
+            # --- POÄNGBERÄKNING PÅ HISTORIKEN (SOFT FILTERING) ---
             mall_hits = 0
             for i in range(len(v_m)):
-                ok = True
-                if cb_base and not (c_ones[0] <= ones[i] <= c_ones[1] and c_draws[0] <= draws[i] <= c_draws[1] and c_twos[0] <= twos[i] <= c_twos[1]): ok = False
-                if cb_u_favs and not (c_u[0] <= u_wins[i] <= c_u[1]): ok = False
-                if cb_sft and not (c_sft[0] <= sft_sums[i] <= c_sft[1]): ok = False
-                if cb_fat and not (c_fatf[0] <= fat_f[i] <= c_fatf[1] and c_fata[0] <= fat_a[i] <= c_fata[1] and c_fatt[0] <= fat_t[i] <= c_fatt[1] and c_fatsum[0] <= fat_sums[i] <= c_fatsum[1]): ok = False
-                if cb_streak and not (c_s1[0] <= s1[i] <= c_s1[1] and c_sx[0] <= sx[i] <= c_sx[1] and c_s2[0] <= s2[i] <= c_s2[1]): ok = False
-                if cb_gap and not (c_g1[0] <= g1[i] <= c_g1[1] and c_gx[0] <= gx[i] <= c_gx[1] and c_g2[0] <= g2[i] <= c_g2[1]): ok = False
-                if cb_single and not (c_sing1[0] <= sing1[i] <= c_sing1[1] and c_singx[0] <= singx[i] <= c_singx[1] and c_sing2[0] <= sing2[i] <= c_sing2[1] and c_singtot[0] <= sing_tot[i] <= c_singtot[1]): ok = False
-                if cb_doublet and not (c_dub1[0] <= dub1[i] <= c_dub1[1] and c_dubx[0] <= dubx[i] <= c_dubx[1] and c_dub2[0] <= dub2[i] <= c_dub2[1] and c_dubtot[0] <= dub_tot[i] <= c_dubtot[1]): ok = False
-                if cb_triplet and not (c_trip1[0] <= trip1[i] <= c_trip1[1] and c_tripx[0] <= tripx[i] <= c_tripx[1] and c_trip2[0] <= trip2[i] <= c_trip2[1] and c_triptot[0] <= trip_tot[i] <= c_triptot[1]): ok = False
-                if cb_occur and not (c_occ1[0] <= occ1[i] <= c_occ1[1] and c_occx[0] <= occx[i] <= c_occx[1] and c_occ2[0] <= occ2[i] <= c_occ2[1] and c_occtot[0] <= occ_tot[i] <= c_occtot[1]): ok = False 
-                if cb_points and not (c_points[0] <= points_vals[i] <= c_points[1]): ok = False
-                if cb_100minus and not (c_minus[0] <= minus_sums[i] <= c_minus[1]): ok = False
-                if cb_rank24 and not (c_rank24[0] <= rank24_sums[i] <= c_rank24[1]): ok = False
-                if cb_aimatrix and not (active_ai_min <= ai_ranks[i] <= active_ai_max): ok = False
-                if ok: mall_hits += 1
+                pts = 0
+                if cb_base and (c_ones[0] <= ones[i] <= c_ones[1] and c_draws[0] <= draws[i] <= c_draws[1] and c_twos[0] <= twos[i] <= c_twos[1]): pts += 1
+                if cb_u_favs and (c_u[0] <= u_wins[i] <= c_u[1]): pts += 1
+                if cb_sft and (c_sft[0] <= sft_sums[i] <= c_sft[1]): pts += 1
+                if cb_fat and (c_fatf[0] <= fat_f[i] <= c_fatf[1] and c_fata[0] <= fat_a[i] <= c_fata[1] and c_fatt[0] <= fat_t[i] <= c_fatt[1] and c_fatsum[0] <= fat_sums[i] <= c_fatsum[1]): pts += 1
+                if cb_streak and (c_s1[0] <= s1[i] <= c_s1[1] and c_sx[0] <= sx[i] <= c_sx[1] and c_s2[0] <= s2[i] <= c_s2[1]): pts += 1
+                if cb_gap and (c_g1[0] <= g1[i] <= c_g1[1] and c_gx[0] <= gx[i] <= c_gx[1] and c_g2[0] <= g2[i] <= c_g2[1]): pts += 1
+                if cb_single and (c_sing1[0] <= sing1[i] <= c_sing1[1] and c_singx[0] <= singx[i] <= c_singx[1] and c_sing2[0] <= sing2[i] <= c_sing2[1] and c_singtot[0] <= sing_tot[i] <= c_singtot[1]): pts += 1
+                if cb_doublet and (c_dub1[0] <= dub1[i] <= c_dub1[1] and c_dubx[0] <= dubx[i] <= c_dubx[1] and c_dub2[0] <= dub2[i] <= c_dub2[1] and c_dubtot[0] <= dub_tot[i] <= c_dubtot[1]): pts += 1
+                if cb_triplet and (c_trip1[0] <= trip1[i] <= c_trip1[1] and c_tripx[0] <= tripx[i] <= c_tripx[1] and c_trip2[0] <= trip2[i] <= c_trip2[1] and c_triptot[0] <= trip_tot[i] <= c_triptot[1]): pts += 1
+                if cb_occur and (c_occ1[0] <= occ1[i] <= c_occ1[1] and c_occx[0] <= occx[i] <= c_occx[1] and c_occ2[0] <= occ2[i] <= c_occ2[1] and c_occtot[0] <= occ_tot[i] <= c_occtot[1]): pts += 1
+                if cb_points and (c_points[0] <= points_vals[i] <= c_points[1]): pts += 1
+                if cb_100minus and (c_minus[0] <= minus_sums[i] <= c_minus[1]): pts += 1
+                if cb_rank24 and (c_rank24[0] <= rank24_sums[i] <= c_rank24[1]): pts += 1
+                if cb_aimatrix and (active_ai_min <= ai_ranks[i] <= active_ai_max): pts += 1
+                
+                if pts >= slider_pass_req: 
+                    mall_hits += 1
 
             st.markdown("---")
-            st.info(f"📈 **HISTORISK TRÄFFSÄKERHET:** {mall_hits} av {len(v_m)} rader ({mall_hits/len(v_m)*100:.1f}%) klarade alla ovanstående krav i kombination.")
+            st.info(f"📈 **HISTORISK TRÄFFSÄKERHET:** {mall_hits} av {len(v_m)} rader ({mall_hits/len(v_m)*100:.1f}%) fick tillräckligt med poäng ({slider_pass_req} poäng) för att passera Soft-filtret.")
 
-            # --- EXAKT UTRÄKNING ---
-            sim_hits = 0
-            if antal_matcher == 8:
-                st.markdown("---")
-                st.subheader("🎲 EXAKT UTRÄKNING (6 561 rader)")
-                all_possible_rows = [''.join(tup) for tup in itertools.product(['1','X','2'], repeat=8)]
-                ai_matrix, ai_scores_asc, ai_tot = calculate_ai_matrix_from_values(input_compare)
-                
-                for tr in all_possible_rows:
-                    if cb_base and not (c_ones[0] <= tr.count('1') <= c_ones[1] and c_draws[0] <= tr.count('X') <= c_draws[1] and c_twos[0] <= tr.count('2') <= c_twos[1]): continue
-                    if cb_u_favs and not (c_u[0] <= get_top_n_favs_wins(tr, input_compare, slider_u_count) <= c_u[1]): continue
-                    if cb_sft and not (c_sft[0] <= get_sft_sum(tr, input_compare) <= c_sft[1]): continue
-                    if cb_fat:
-                        f_c, a_c, t_c, fsum_c = get_fat(tr, input_compare)
-                        if not (c_fatf[0] <= f_c <= c_fatf[1] and c_fata[0] <= a_c <= c_fata[1] and c_fatt[0] <= t_c <= c_fatt[1] and c_fatsum[0] <= fsum_c <= c_fatsum[1]): continue
-                    if cb_streak:
-                        s1_c, sx_c, s2_c, _ = get_streaks(tr)
-                        if not (c_s1[0] <= s1_c <= c_s1[1] and c_sx[0] <= sx_c <= c_sx[1] and c_s2[0] <= s2_c <= c_s2[1]): continue
-                    if cb_gap:
-                        g1_c, gx_c, g2_c, _ = get_gaps(tr)
-                        if not (c_g1[0] <= g1_c <= c_g1[1] and c_gx[0] <= gx_c <= c_gx[1] and c_g2[0] <= g2_c <= c_g2[1]): continue
-                    if cb_single:
-                        si1_c, six_c, si2_c, singtot_c, _ = get_singles(tr)
-                        if not (c_sing1[0] <= si1_c <= c_sing1[1] and c_singx[0] <= six_c <= c_singx[1] and c_sing2[0] <= si2_c <= c_sing2[1] and c_singtot[0] <= singtot_c <= c_singtot[1]): continue
-                    if cb_doublet:
-                        d1_c, dx_c, d2_c, dubtot_c, _ = get_doublets(tr)
-                        if not (c_dub1[0] <= d1_c <= c_dub1[1] and c_dubx[0] <= dx_c <= c_dubx[1] and c_dub2[0] <= d2_c <= c_dub2[1] and c_dubtot[0] <= dubtot_c <= c_dubtot[1]): continue
-                    if cb_triplet:
-                        t1_c, tx_c, t2_c, triptot_c, _ = get_triplets(tr)
-                        if not (c_trip1[0] <= t1_c <= c_trip1[1] and c_tripx[0] <= tx_c <= c_tripx[1] and c_trip2[0] <= t2_c <= c_trip2[1] and c_triptot[0] <= triptot_c <= c_triptot[1]): continue
-                    if cb_occur:
-                        o1_c, ox_c, o2_c, occtot_c, _ = get_occurrences(tr)
-                        if not (c_occ1[0] <= o1_c <= c_occ1[1] and c_occx[0] <= occx[i] <= c_occx[1] and c_occ2[0] <= o2_c <= c_occ2[1] and c_occtot[0] <= occtot_c <= c_occtot[1]): continue
-                    if cb_points and not (c_points[0] <= get_rank_points(tr, input_compare) <= c_points[1]): continue
-                    if cb_100minus and not (c_minus[0] <= get_100_minus_sum(tr, input_compare) <= c_minus[1]): continue
-                    if cb_rank24 and not (c_rank24[0] <= get_rank_sum(tr, input_compare) <= c_rank24[1]): continue
-                    if cb_aimatrix:
-                        rank_c, _ = get_exact_rank(tr, ai_matrix, ai_scores_asc, ai_tot)
-                        if not (active_ai_min <= rank_c <= active_ai_max): continue
-                    sim_hits += 1
-                st.success(f"🎯 **EXAKT KVARVARANDE RADANTAL:** {sim_hits} st (Skurit bort {100 - ((sim_hits / 6561) * 100):.2f}%)")
-            else:
-                st.info("💡 Exakt uträkning är inaktiverad för 13 matcher (1.59 miljoner rader) för att appen ska svara snabbt. Mallen ovan är färdig att använda!")
-
-# --- AI:NS TOPP 5 RAMAR ---
+            # --- AI:NS TOPP 5 RAMAR ---
             st.markdown("---")
             st.subheader("🔮 AI:ns 5 Troligaste Scenarion (Närmaste tvillingarna)")
             st.markdown("Dessa 5 historiska omgångar hade en oddsprofil som var **nästan identisk** med dagens kupong. Titta på deras detaljerade struktur för att bygga en perfekt ram!")
@@ -537,26 +509,23 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
                 datum = r_data.get('Datum', 'Okänt')
                 sim_score = r_data['Sim']
                 
-                # Räkna ut allt för denna specifika rad
                 c1, cx, c2 = r_str.count('1'), r_str.count('X'), r_str.count('2')
                 fav_wins = get_top_n_favs_wins(r_str, p_vec, slider_u_count)
                 sft = get_sft_sum(r_str, p_vec)
                 f, a, t, f_sum = get_fat(r_str, p_vec)
-                pts = get_rank_points(r_str, p_vec)
+                pts_val = get_rank_points(r_str, p_vec)
                 minus = get_100_minus_sum(r_str, p_vec)
                 r_sum = get_rank_sum(r_str, p_vec)
                 s1, sx, s2, _ = get_streaks(r_str)
                 g1, gx, g2, _ = get_gaps(r_str)
                 si1, six, si2, si_tot, _ = get_singles(r_str)
                 
-                # Hämta eller räkna ut AI-rank för raden
                 if 'True_Rank' in r_data and pd.notna(r_data['True_Rank']) and r_data['True_Rank'] > 0:
                     ai_r = r_data['True_Rank']
                 else:
                     h_matrix, h_scores_asc, h_tot = calculate_ai_matrix_from_values(p_vec)
                     ai_r, _ = get_exact_rank(r_str, h_matrix, h_scores_asc, h_tot)
                 
-                # Skapa en utfällbar ruta med 3 snygga kolumner inuti
                 with st.expander(f"⭐ Scenario {i} (Likhet: {sim_score:.2f}) | {datum} | Utdelning: {payout:.0f} kr", expanded=(i==1)):
                     st.code(f"RÄTT RAD: {r_str}")
                     
@@ -567,7 +536,7 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
                         st.write(f"• **Rank Summa:** {r_sum:.1f}")
                         st.write(f"• **SFT Summa:** {sft:.1f}")
                         st.write(f"• **100-minus:** {minus:.1f}")
-                        st.write(f"• **Poäng:** {pts}")
+                        st.write(f"• **Poäng:** {pts_val}")
                     with sc_col2:
                         st.markdown("**⚽ Kärn-Struktur**")
                         st.write(f"• **1X2:** {c1}-{cx}-{c2}")
@@ -578,7 +547,55 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
                         st.markdown("**🧩 Sviter & Luckor**")
                         st.write(f"• **Sviter (1-X-2):** {s1}-{sx}-{s2}")
                         st.write(f"• **Luckor (1-X-2):** {g1}-{gx}-{g2}")
-            
+
+            # --- EXAKT UTRÄKNING (SOFT FILTERING) ---
+            sim_hits = 0
+            if antal_matcher == 8:
+                st.markdown("---")
+                st.subheader("🎲 EXAKT UTRÄKNING (6 561 rader)")
+                all_possible_rows = [''.join(tup) for tup in itertools.product(['1','X','2'], repeat=8)]
+                ai_matrix, ai_scores_asc, ai_tot = calculate_ai_matrix_from_values(input_compare)
+                
+                for tr in all_possible_rows:
+                    pts = 0
+                    if cb_base and (c_ones[0] <= tr.count('1') <= c_ones[1] and c_draws[0] <= tr.count('X') <= c_draws[1] and c_twos[0] <= tr.count('2') <= c_twos[1]): pts += 1
+                    if cb_u_favs and (c_u[0] <= get_top_n_favs_wins(tr, input_compare, slider_u_count) <= c_u[1]): pts += 1
+                    if cb_sft and (c_sft[0] <= get_sft_sum(tr, input_compare) <= c_sft[1]): pts += 1
+                    if cb_fat:
+                        f_c, a_c, t_c, fsum_c = get_fat(tr, input_compare)
+                        if (c_fatf[0] <= f_c <= c_fatf[1] and c_fata[0] <= a_c <= c_fata[1] and c_fatt[0] <= t_c <= c_fatt[1] and c_fatsum[0] <= fsum_c <= c_fatsum[1]): pts += 1
+                    if cb_streak:
+                        s1_c, sx_c, s2_c, _ = get_streaks(tr)
+                        if (c_s1[0] <= s1_c <= c_s1[1] and c_sx[0] <= sx_c <= c_sx[1] and c_s2[0] <= s2_c <= c_s2[1]): pts += 1
+                    if cb_gap:
+                        g1_c, gx_c, g2_c, _ = get_gaps(tr)
+                        if (c_g1[0] <= g1_c <= c_g1[1] and c_gx[0] <= gx_c <= c_gx[1] and c_g2[0] <= g2_c <= c_g2[1]): pts += 1
+                    if cb_single:
+                        si1_c, six_c, si2_c, singtot_c, _ = get_singles(tr)
+                        if (c_sing1[0] <= si1_c <= c_sing1[1] and c_singx[0] <= six_c <= c_singx[1] and c_sing2[0] <= si2_c <= c_sing2[1] and c_singtot[0] <= singtot_c <= c_singtot[1]): pts += 1
+                    if cb_doublet:
+                        d1_c, dx_c, d2_c, dubtot_c, _ = get_doublets(tr)
+                        if (c_dub1[0] <= d1_c <= c_dub1[1] and c_dubx[0] <= dx_c <= c_dubx[1] and c_dub2[0] <= d2_c <= c_dub2[1] and c_dubtot[0] <= dubtot_c <= c_dubtot[1]): pts += 1
+                    if cb_triplet:
+                        t1_c, tx_c, t2_c, triptot_c, _ = get_triplets(tr)
+                        if (c_trip1[0] <= t1_c <= c_trip1[1] and c_tripx[0] <= tx_c <= c_tripx[1] and c_trip2[0] <= t2_c <= c_trip2[1] and c_triptot[0] <= triptot_c <= c_triptot[1]): pts += 1
+                    if cb_occur:
+                        o1_c, ox_c, o2_c, occtot_c, _ = get_occurrences(tr)
+                        if (c_occ1[0] <= o1_c <= c_occ1[1] and c_occx[0] <= ox_c <= c_occx[1] and c_occ2[0] <= o2_c <= c_occ2[1] and c_occtot[0] <= occtot_c <= c_occtot[1]): pts += 1
+                    if cb_points and (c_points[0] <= get_rank_points(tr, input_compare) <= c_points[1]): pts += 1
+                    if cb_100minus and (c_minus[0] <= get_100_minus_sum(tr, input_compare) <= c_minus[1]): pts += 1
+                    if cb_rank24 and (c_rank24[0] <= get_rank_sum(tr, input_compare) <= c_rank24[1]): pts += 1
+                    if cb_aimatrix:
+                        rank_c, _ = get_exact_rank(tr, ai_matrix, ai_scores_asc, ai_tot)
+                        if (active_ai_min <= rank_c <= active_ai_max): pts += 1
+                    
+                    if pts >= slider_pass_req:
+                        sim_hits += 1
+                        
+                st.success(f"🎯 **EXAKT KVARVARANDE RADANTAL:** {sim_hits} st (Skurit bort {100 - ((sim_hits / 6561) * 100):.2f}%) med Soft Filtering.")
+            else:
+                st.info("💡 Exakt uträkning är inaktiverad för 13 matcher för att appen ska svara snabbt. Mallen ovan är färdig att använda i Helgradering!")
+
             # --- GRAF-MOTOR (Uppdaterad 2x3 layout) ---
             st.markdown("---")
             st.subheader("📊 Datadistribution")
