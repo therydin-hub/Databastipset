@@ -495,6 +495,70 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
             st.markdown("---")
             st.info(f"📈 **HISTORISK TRÄFFSÄKERHET:** {mall_hits} av {len(v_m)} rader ({mall_hits/len(v_m)*100:.1f}%) fick tillräckligt med poäng ({slider_pass_req} poäng) för att passera Soft-filtret.")
 
+            # --- AI:NS HISTORISKA RAM (MACHINE LEARNING) ---
+            if antal_matcher == 8:
+                st.markdown("---")
+                st.subheader("🧠 AI:ns Historiska Ram (Baserad på tvillingar)")
+                st.markdown(f"Här struntar AI:n i vad oddsen säger idag, och tittar istället enbart på vad det **faktiska resultatet** blev i de {len(v_m)} historiska omgångar som är mest lika dagens kupong.")
+                
+                ai_frame = []
+                # Gå igenom match för match (0 till 7 för Topptips)
+                for m in range(8):
+                    # Hämta alla historiska rätta tecken för just den här matchen i tvilling-omgångarna
+                    historiska_utfall = [row['Correct_Row'][m] for _, row in v_m.iterrows() if len(row['Correct_Row']) == 8]
+                    
+                    if not historiska_utfall:
+                        continue
+                        
+                    tot = len(historiska_utfall)
+                    c1 = historiska_utfall.count('1')
+                    cx = historiska_utfall.count('X')
+                    c2 = historiska_utfall.count('2')
+                    
+                    # Procentuellt historiskt utfall
+                    p1, px, p2 = (c1/tot)*100, (cx/tot)*100, (c2/tot)*100
+                    
+                    # AI:ns logik för att bygga ramen baserat på verkligheten
+                    # Om ett tecken historiskt suttit i över 55% av fallen -> SPIK
+                    if p1 >= 55: tecken = "  1  "
+                    elif p2 >= 55: tecken = "  2  "
+                    # Om krysset dominerar extremt (ovanligt)
+                    elif px >= 50: tecken = "  X  "
+                    
+                    # Annars, om matchen historiskt skrällt mycket -> HELGARDERA
+                    elif p1 < 40 and px < 40 and p2 < 40: 
+                        tecken = " 1X2 "
+                        
+                    # Annars plockar vi de två tecken som oftast gick in (HALVGARDERING)
+                    else:
+                        utfall = [('1', p1), ('X', px), ('2', p2)]
+                        utfall.sort(key=lambda x: x[1], reverse=True)
+                        bästa_två = sorted([utfall[0][0], utfall[1][0]])
+                        tecken_str = ''.join(bästa_två)
+                        if tecken_str == '12': tecken = " 1 2 "
+                        else: tecken = f" {tecken_str}  "
+                    
+                    ai_frame.append({
+                        'match': m+1, 
+                        'odds_idag': f"{int(input_vec[m*3])}-{int(input_vec[m*3+1])}-{int(input_vec[m*3+2])}",
+                        'hist_utfall': f"1:{int(p1)}%  X:{int(px)}%  2:{int(p2)}%",
+                        'rekommendation': tecken
+                    })
+                
+                # Skriv ut ramen snyggt
+                col_frame, col_data = st.columns([1, 2])
+                with col_frame:
+                    st.markdown("**AI:ns Systemram:**")
+                    ram_str = ""
+                    for rad in ai_frame:
+                        ram_str += f"Match {rad['match']}:  {rad['rekommendation']}\n"
+                    st.code(ram_str)
+                    
+                with col_data:
+                    st.markdown("**Historisk fakta bakom valet:**")
+                    for rad in ai_frame:
+                        st.write(f"**M{rad['match']}** (Odds idag {rad['odds_idag']}) ➡️ Historiskt satt: *{rad['hist_utfall']}*")
+            
             # --- GRAF-MOTOR (Uppdaterad 2x3 layout) ---
             st.markdown("---")
             st.subheader("📊 Datadistribution")
