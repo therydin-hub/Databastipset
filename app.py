@@ -510,22 +510,22 @@ if st.button("🚀 KÖR ANALYS", use_container_width=True):
                     c1, cx, c2 = historiska_utfall.count('1'), historiska_utfall.count('X'), historiska_utfall.count('2')
                     p1, px, p2 = (c1/tot)*100, (cx/tot)*100, (c2/tot)*100
                     
-                    # Sortera historiskt utfall
+                    # Sortera historiskt utfall (sorterar på procenten, index 1)
                     utfall = [('1', p1), ('X', px), ('2', p2)]
                     utfall.sort(key=lambda x: x[1], reverse=True)
                     
-                    # Kolla vad dagens oddssättare tror
+                    # Kolla vad dagens oddssättare tror (sorterar på procenten, index 1)
                     odds_idag = [('1', input_vec[m*3]), ('X', input_vec[m*3+1]), ('2', input_vec[m*3+2])]
-                    odds_idag.sort(key=lambda x: x[0], reverse=True)
+                    odds_idag.sort(key=lambda x: x[1], reverse=True) 
                     dagens_fav = odds_idag[0][0]
                     
                     hist_fav = utfall[0][0]
                     max_p = utfall[0][1]
                     diff = utfall[0][1] - utfall[2][1] # Skillnad mellan historiskt bäst och sämst
                     
-                    # Skrällvarning! (Historiken säger något helt annat än oddsen idag)
+                    # Skrällvarning! (Historiken säger något annat än oddsen idag)
                     varning = ""
-                    if hist_fav != dagens_fav and max_p >= 40:
+                    if hist_fav != dagens_fav and max_p >= 35:
                         varning = f"🔥 VÄRDE! (Spelbolagen säger {dagens_fav}, historiken säger {hist_fav})"
                     
                     hist_stats.append({
