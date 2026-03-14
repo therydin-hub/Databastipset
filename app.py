@@ -496,37 +496,7 @@ if st.session_state.get('har_kort_analys') and input_text:
         st.markdown("---")
         st.info(f"📈 **HISTORISK TRÄFFSÄKERHET:** {mall_hits} av {len(v_m)} rader ({mall_hits/len(v_m)*100:.1f}%) fick tillräckligt med poäng ({slider_pass_req} poäng) för att passera Soft-filtret.")
 
-        # --- AI:NS TOPP 5 SCENARION ---
-        st.markdown("---")
-        st.subheader("🔮 AI:ns 5 Troligaste Scenarion (Närmaste tvillingarna)")
-        top_5 = v_m.sort_values('Sim', ascending=True).head(5)
-        for i, (_, r_data) in enumerate(top_5.iterrows(), 1):
-            r_str, p_vec, payout = r_data['Correct_Row'], r_data['Prob_Vector'], r_data['Payout']
-            datum, sim_score = r_data.get('Datum', 'Okänt'), r_data['Sim']
-            
-            c1, cx, c2 = r_str.count('1'), r_str.count('X'), r_str.count('2')
-            fav_wins = get_top_n_favs_wins(r_str, p_vec, slider_u_count)
-            f, a, t, f_sum = get_fat(r_str, p_vec)
-            s1, sx, s2, _ = get_streaks(r_str)
-            g1, gx, g2, _ = get_gaps(r_str)
-            si1, six, si2, si_tot, _ = get_singles(r_str)
-            
-            if 'True_Rank' in r_data and pd.notna(r_data['True_Rank']) and r_data['True_Rank'] > 0: ai_r = r_data['True_Rank']
-            else:
-                h_matrix, h_scores_asc, h_tot = calculate_ai_matrix_from_values(p_vec)
-                ai_r, _ = get_exact_rank(r_str, h_matrix, h_scores_asc, h_tot)
-            
-            with st.expander(f"⭐ Scenario {i} (Likhet: {sim_score:.2f}) | {datum} | Utdelning: {payout:.0f} kr", expanded=(i==1)):
-                st.code(f"RÄTT RAD: {r_str}")
-                sc_col1, sc_col2, sc_col3 = st.columns(3)
-                with sc_col1:
-                    st.write(f"• **AI-Rank:** {ai_r}\n• **SFT Summa:** {get_sft_sum(r_str, p_vec):.1f}\n• **100-minus:** {get_100_minus_sum(r_str, p_vec):.1f}")
-                with sc_col2:
-                    st.write(f"• **1X2:** {c1}-{cx}-{c2}\n• **FAT:** F:{f} A:{a} T:{t}\n• **Singlar:** {si_tot} st")
-                with sc_col3:
-                    st.write(f"• **Sviter:** {s1}-{sx}-{s2}\n• **Luckor:** {g1}-{gx}-{g2}")
-
-        # --- AI:NS HISTORISKA RAM ---
+                # --- AI:NS HISTORISKA RAM ---
         st.markdown("---")
         st.subheader(f"🧠 AI:ns Historiska Systemram ({ram_val.split('(')[0]})")
         
