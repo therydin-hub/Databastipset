@@ -499,9 +499,9 @@ if st.session_state.get('har_kort_analys') and input_text:
 # --- 🧬 DAGENS BÄSTA FAT-SEKVENSER ---
         st.markdown("---")
         st.subheader("🧬 Dagens Bästa FAT-Sekvenser (Byggklossar)")
-        st.markdown("Här analyserar AI:n vilka specifika mönster (t.ex. 1=Favorit, 2=Andrahandsfav, 3=Skräll) som har störst chans att sitta i **exakt denna typ av omgång**.")
+        st.markdown("Här analyserar AI:n vilka specifika mönster (1=Fav, 2=Andrahand, 3=Skräll) som bäst täcker in **exakt denna typ av omgång**.")
         
-        # 1. Funktion för att skapa hela FAT-strängen för en rad
+        # 1. Funktion för att skapa hela FAT-strängen
         def get_fat_string(row_str, prob_vector):
             fat_str = ""
             for i, char in enumerate(row_str):
@@ -516,11 +516,10 @@ if st.session_state.get('har_kort_analys') and input_text:
         fat_strings = [get_fat_string(row['Correct_Row'], row['Prob_Vector']) for _, row in v_m.iterrows() if len(row['Correct_Row']) == antal_matcher]
         total_twins = len(fat_strings)
         
-        # 3. Räkna ut och visa de hetaste mönstren just nu
+        # 3. Räkna ut och visa de hetaste mönstren
         if total_twins > 0:
-            col_seq2, col_seq3, col_seq4 = st.columns(3)
+            col_seq2, col_seq3, col_combo = st.columns(3)
             
-            # Ändrat till top_n=5 för att få de 5 bästa
             def calculate_top_seqs(fat_list, length, top_n=5):
                 seqs = [''.join(p) for p in itertools.product('123', repeat=length)]
                 counts = {s: sum(1 for r in fat_list if s in r) for s in seqs}
@@ -530,19 +529,31 @@ if st.session_state.get('har_kort_analys') and input_text:
                 st.markdown("**Två i rad (Längd 2)**")
                 for seq, count in calculate_top_seqs(fat_strings, 2):
                     chans = (count/total_twins)*100
-                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} av {total_twins})")
+                    st.write(f"**{seq}** ➡️ **{chans:.0f}% chans** ({count} st)")
                     
             with col_seq3:
                 st.markdown("**Tre i rad (Längd 3)**")
                 for seq, count in calculate_top_seqs(fat_strings, 3):
                     chans = (count/total_twins)*100
-                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} av {total_twins})")
+                    st.write(f"**{seq}** ➡️ **{chans:.0f}% chans** ({count} st)")
                     
-            with col_seq4:
-                st.markdown("**Fyra i rad (Längd 4)**")
-                for seq, count in calculate_top_seqs(fat_strings, 4):
+            with col_combo:
+                st.markdown("**Dubbelchans (Minst 1 av 2)**")
+                st.caption("Kombinationer av Längd 3")
+                
+                # Räkna ut bästa paret av sekvenser (Union / Eller-villkor)
+                seqs3 = [''.join(p) for p in itertools.product('123', repeat=3)]
+                pair_counts = []
+                for s1, s2 in itertools.combinations(seqs3, 2):
+                    # Räknar omgången OM s1 ELLER s2 finns i strängen
+                    covered = sum(1 for r in fat_strings if s1 in r or s2 in r)
+                    pair_counts.append(((s1, s2), covered))
+                
+                # Sortera och hämta topp 5
+                best_pairs = sorted(pair_counts, key=lambda x: x[1], reverse=True)[:5]
+                for (s1, s2), count in best_pairs:
                     chans = (count/total_twins)*100
-                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} av {total_twins})")
+                    st.write(f"**{s1}** / **{s2}** ➡️ **{chans:.0f}% chans**")
                     
                 # --- AI:NS HISTORISKA RAM ---
         st.markdown("---")
