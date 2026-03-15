@@ -496,6 +496,53 @@ if st.session_state.get('har_kort_analys') and input_text:
         st.markdown("---")
         st.info(f"📈 **HISTORISK TRÄFFSÄKERHET:** {mall_hits} av {len(v_m)} rader ({mall_hits/len(v_m)*100:.1f}%) fick tillräckligt med poäng ({slider_pass_req} poäng) för att passera Soft-filtret.")
 
+# --- 🧬 DAGENS BÄSTA FAT-SEKVENSER ---
+        st.markdown("---")
+        st.subheader("🧬 Dagens Bästa FAT-Sekvenser (Byggklossar)")
+        st.markdown("Här analyserar AI:n vilka specifika mönster (t.ex. 1=Favorit, 2=Andrahandsfav, 3=Skräll) som har störst chans att sitta i **exakt denna typ av omgång**.")
+        
+        # 1. Funktion för att skapa hela FAT-strängen för en rad
+        def get_fat_string(row_str, prob_vector):
+            fat_str = ""
+            for i, char in enumerate(row_str):
+                idx = i * 3
+                ranked = sorted([('1', prob_vector[idx]), ('X', prob_vector[idx+1]), ('2', prob_vector[idx+2])], key=lambda x: x[1], reverse=True)
+                if char == ranked[0][0]: fat_str += '1'
+                elif char == ranked[1][0]: fat_str += '2'
+                else: fat_str += '3'
+            return fat_str
+
+        # 2. Hämta FAT-strängarna för alla Tvilling-omgångar
+        fat_strings = [get_fat_string(row['Correct_Row'], row['Prob_Vector']) for _, row in v_m.iterrows() if len(row['Correct_Row']) == antal_matcher]
+        total_twins = len(fat_strings)
+        
+        # 3. Räkna ut och visa de hetaste mönstren just nu
+        if total_twins > 0:
+            col_seq3, col_seq4, col_seq5 = st.columns(3)
+            
+            def calculate_top_seqs(fat_list, length, top_n=3):
+                seqs = [''.join(p) for p in itertools.product('123', repeat=length)]
+                counts = {s: sum(1 for r in fat_list if s in r) for s in seqs}
+                return sorted(counts.items(), key=lambda x: x[1], reverse=True)[:top_n]
+
+            with col_seq3:
+                st.markdown("**Tre i rad (Längd 3)**")
+                for seq, count in calculate_top_seqs(fat_strings, 3):
+                    chans = (count/total_twins)*100
+                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} av {total_twins} omg)")
+                    
+            with col_seq4:
+                st.markdown("**Fyra i rad (Längd 4)**")
+                for seq, count in calculate_top_seqs(fat_strings, 4):
+                    chans = (count/total_twins)*100
+                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} av {total_twins} omg)")
+                    
+            with col_seq5:
+                st.markdown("**Fem i rad (Längd 5)**")
+                for seq, count in calculate_top_seqs(fat_strings, 5):
+                    chans = (count/total_twins)*100
+                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} av {total_twins} omg)")
+        
                 # --- AI:NS HISTORISKA RAM ---
         st.markdown("---")
         st.subheader(f"🧠 AI:ns Historiska Systemram ({ram_val.split('(')[0]})")
