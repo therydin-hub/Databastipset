@@ -518,31 +518,32 @@ if st.session_state.get('har_kort_analys') and input_text:
         
         # 3. Räkna ut och visa de hetaste mönstren just nu
         if total_twins > 0:
-            col_seq3, col_seq4, col_seq5 = st.columns(3)
+            col_seq2, col_seq3, col_seq4 = st.columns(3)
             
-            def calculate_top_seqs(fat_list, length, top_n=3):
+            # Ändrat till top_n=5 för att få de 5 bästa
+            def calculate_top_seqs(fat_list, length, top_n=5):
                 seqs = [''.join(p) for p in itertools.product('123', repeat=length)]
                 counts = {s: sum(1 for r in fat_list if s in r) for s in seqs}
                 return sorted(counts.items(), key=lambda x: x[1], reverse=True)[:top_n]
 
+            with col_seq2:
+                st.markdown("**Två i rad (Längd 2)**")
+                for seq, count in calculate_top_seqs(fat_strings, 2):
+                    chans = (count/total_twins)*100
+                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} av {total_twins})")
+                    
             with col_seq3:
                 st.markdown("**Tre i rad (Längd 3)**")
                 for seq, count in calculate_top_seqs(fat_strings, 3):
                     chans = (count/total_twins)*100
-                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} av {total_twins} omg)")
+                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} av {total_twins})")
                     
             with col_seq4:
                 st.markdown("**Fyra i rad (Längd 4)**")
                 for seq, count in calculate_top_seqs(fat_strings, 4):
                     chans = (count/total_twins)*100
-                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} av {total_twins} omg)")
+                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} av {total_twins})")
                     
-            with col_seq5:
-                st.markdown("**Fem i rad (Längd 5)**")
-                for seq, count in calculate_top_seqs(fat_strings, 5):
-                    chans = (count/total_twins)*100
-                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} av {total_twins} omg)")
-        
                 # --- AI:NS HISTORISKA RAM ---
         st.markdown("---")
         st.subheader(f"🧠 AI:ns Historiska Systemram ({ram_val.split('(')[0]})")
