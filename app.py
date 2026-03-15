@@ -529,13 +529,13 @@ if st.session_state.get('har_kort_analys') and input_text:
                 st.markdown("**Två i rad (Längd 2)**")
                 for seq, count in calculate_top_seqs(fat_strings, 2):
                     chans = (count/total_twins)*100
-                    st.write(f"**{seq}** ➡️ **{chans:.0f}% chans** ({count} st)")
+                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} st)")
                     
             with col_seq3:
                 st.markdown("**Tre i rad (Längd 3)**")
                 for seq, count in calculate_top_seqs(fat_strings, 3):
                     chans = (count/total_twins)*100
-                    st.write(f"**{seq}** ➡️ **{chans:.0f}% chans** ({count} st)")
+                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} st)")
                     
             with col_combo:
                 st.markdown("**Dubbelchans (Minst 1 av 2)**")
@@ -553,7 +553,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                 best_pairs = sorted(pair_counts, key=lambda x: x[1], reverse=True)[:5]
                 for (s1, s2), count in best_pairs:
                     chans = (count/total_twins)*100
-                    st.write(f"**{s1}** / **{s2}** ➡️ **{chans:.0f}% chans**")
+                    st.write(f"**{s1}** / **{s2}** ➡️ **{chans:.1f}%** ({count} st)")
                     
                 # --- AI:NS HISTORISKA RAM ---
         st.markdown("---")
