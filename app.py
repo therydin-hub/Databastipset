@@ -622,29 +622,23 @@ if st.session_state.get('har_kort_analys') and input_text:
             })
 
         # --- SORTERA FRAM KATEGORIERNA ---
-        # 1. Topp 3 Spikar (Högst historisk vinstchans, tie-break på värde)
         spikar_sorted = sorted(match_data, key=lambda x: (x['best_single_pct'], x['value_single']), reverse=True)
         top_3_spikar = spikar_sorted[:3]
         
-        # 2. Topp 3 Lås (Högst täckningsgrad)
         las_sorted = sorted(match_data, key=lambda x: x['best_double_pct'], reverse=True)
         top_3_las = las_sorted[:3]
         
-        # 3. Topp 3 Skrällar (Streckade under 20% idag, men vinner oftast historiskt)
         all_skrallar = []
         for md in match_data:
             all_skrallar.extend(md['skrällar'])
         top_3_skrallar = sorted(all_skrallar, key=lambda x: x['hist_pct'], reverse=True)[:3]
         
-        # 4. Bygg Kärnvillkoren (Unika matcher till Grupp A och Grupp B)
-        # Vi tar ut 2 spikar och 4 halvgarderingar ur det som finns kvar.
         kv_spikar = spikar_sorted[:2]
         used_matches_for_kv = [m['match'] for m in kv_spikar]
         
         kv_las_candidates = [m for m in las_sorted if m['match'] not in used_matches_for_kv]
         kv_las = kv_las_candidates[:4]
         
-        # Skapa Grupperna
         group_a = [kv_spikar[0], kv_las[0], kv_las[1]] if len(kv_las) >= 2 else []
         group_b = [kv_spikar[1], kv_las[2], kv_las[3]] if len(kv_las) >= 4 else []
 
@@ -668,12 +662,11 @@ if st.session_state.get('har_kort_analys') and input_text:
             for sk in top_3_skrallar:
                 st.write(f"**M{sk['match']}: {sk['sign']}** (Vinner {sk['hist_pct']:.0f}%, Streck {sk['odds_idag']:.0f}%)")
 
-       if group_a and group_b:
+        if group_a and group_b:
             st.markdown("---")
             st.markdown("🎯 **Dina Dubbla Kärnvillkor (Reducerings-förslag)**")
             st.markdown("Ställ in dessa som *'U-tecken/Utgångsrad'* i ditt program med kravet att **exakt 2 eller 3 måste sitta**. Genom att kräva detta slipper du helgardera allt, rensar bort massor av skräprader, och behåller ändå en oerhört hög slagkraft.")
             
-            # Smart funktion för att räkna ut kombinerad sannolikhet (Minst 2 av 3)
             def calc_2_of_3_prob(p1, p2, p3):
                 p1, p2, p3 = p1/100.0, p2/100.0, p3/100.0
                 q1, q2, q3 = 1-p1, 1-p2, 1-p3
@@ -681,21 +674,6 @@ if st.session_state.get('har_kort_analys') and input_text:
                 alla_3 = p1 * p2 * p3
                 return (exakt_2 + alla_3) * 100
 
-            # Beräkna sannolikheterna för Grupp A och B
-            if group_a and group_b:
-            st.markdown("---")
-            st.markdown("🎯 **Dina Dubbla Kärnvillkor (Reducerings-förslag)**")
-            st.markdown("Ställ in dessa som *'U-tecken/Utgångsrad'* i ditt program med kravet att **exakt 2 eller 3 måste sitta**. Genom att kräva detta slipper du helgardera allt, rensar bort massor av skräprader, och behåller ändå en oerhört hög slagkraft.")
-            
-            # Smart funktion för att räkna ut kombinerad sannolikhet (Minst 2 av 3)
-            def calc_2_of_3_prob(p1, p2, p3):
-                p1, p2, p3 = p1/100.0, p2/100.0, p3/100.0
-                q1, q2, q3 = 1-p1, 1-p2, 1-p3
-                exakt_2 = (p1 * p2 * q3) + (p1 * p3 * q2) + (p2 * p3 * q1)
-                alla_3 = p1 * p2 * p3
-                return (exakt_2 + alla_3) * 100
-
-            # Beräkna sannolikheterna för Grupp A och B
             prob_a = calc_2_of_3_prob(group_a[0]['best_single_pct'], group_a[1]['best_double_pct'], group_a[2]['best_double_pct'])
             prob_b = calc_2_of_3_prob(group_b[0]['best_single_pct'], group_b[1]['best_double_pct'], group_b[2]['best_double_pct'])
 
@@ -712,7 +690,6 @@ if st.session_state.get('har_kort_analys') and input_text:
                         f"✅ **M{group_b[1]['match']}**: Lås {group_b[1]['best_double_str']} *(Täcker {group_b[1]['best_double_pct']:.0f}%)*\n\n"
                         f"✅ **M{group_b[2]['match']}**: Lås {group_b[2]['best_double_str']} *(Täcker {group_b[2]['best_double_pct']:.0f}%)*\n\n"
                         f"📊 **Chans att villkoret överlever: {prob_b:.1f}%**")
-
 
         if antal_matcher == 8:
             st.markdown("---")
