@@ -668,22 +668,36 @@ if st.session_state.get('har_kort_analys') and input_text:
             for sk in top_3_skrallar:
                 st.write(f"**M{sk['match']}: {sk['sign']}** (Vinner {sk['hist_pct']:.0f}%, Streck {sk['odds_idag']:.0f}%)")
 
-        if group_a and group_b:
+       if group_a and group_b:
             st.markdown("---")
             st.markdown("🎯 **Dina Dubbla Kärnvillkor (Reducerings-förslag)**")
             st.markdown("Ställ in dessa som *'U-tecken/Utgångsrad'* i ditt program med kravet att **exakt 2 eller 3 måste sitta**. Genom att kräva detta slipper du helgardera allt, rensar bort massor av skräprader, och behåller ändå en oerhört hög slagkraft.")
             
+            # Smart funktion för att räkna ut kombinerad sannolikhet (Minst 2 av 3)
+            def calc_2_of_3_prob(p1, p2, p3):
+                p1, p2, p3 = p1/100.0, p2/100.0, p3/100.0
+                q1, q2, q3 = 1-p1, 1-p2, 1-p3
+                exakt_2 = (p1 * p2 * q3) + (p1 * p3 * q2) + (p2 * p3 * q1)
+                alla_3 = p1 * p2 * p3
+                return (exakt_2 + alla_3) * 100
+
+            # Beräkna sannolikheterna för Grupp A och B
+            prob_a = calc_2_of_3_prob(group_a[0]['best_single_pct'], group_a[1]['best_double_pct'], group_a[2]['best_double_pct'])
+            prob_b = calc_2_of_3_prob(group_b[0]['best_single_pct'], group_b[1]['best_double_pct'], group_b[2]['best_double_pct'])
+
             col_kva, col_kvb = st.columns(2)
             with col_kva:
                 st.info(f"🛡️ **Grupp A (Krav: Minst 2 av 3 ska sitta)**\n\n"
                         f"✅ **M{group_a[0]['match']}**: Spik {group_a[0]['best_single_sign']} *(Vinner {group_a[0]['best_single_pct']:.0f}%)*\n\n"
                         f"✅ **M{group_a[1]['match']}**: Lås {group_a[1]['best_double_str']} *(Täcker {group_a[1]['best_double_pct']:.0f}%)*\n\n"
-                        f"✅ **M{group_a[2]['match']}**: Lås {group_a[2]['best_double_str']} *(Täcker {group_a[2]['best_double_pct']:.0f}%)*")
+                        f"✅ **M{group_a[2]['match']}**: Lås {group_a[2]['best_double_str']} *(Täcker {group_a[2]['best_double_pct']:.0f}%)*\n\n"
+                        f"📊 **Chans att villkoret överlever: {prob_a:.1f}%**")
             with col_kvb:
                 st.info(f"⚔️ **Grupp B (Krav: Minst 2 av 3 ska sitta)**\n\n"
                         f"✅ **M{group_b[0]['match']}**: Spik {group_b[0]['best_single_sign']} *(Vinner {group_b[0]['best_single_pct']:.0f}%)*\n\n"
                         f"✅ **M{group_b[1]['match']}**: Lås {group_b[1]['best_double_str']} *(Täcker {group_b[1]['best_double_pct']:.0f}%)*\n\n"
-                        f"✅ **M{group_b[2]['match']}**: Lås {group_b[2]['best_double_str']} *(Täcker {group_b[2]['best_double_pct']:.0f}%)*")
+                        f"✅ **M{group_b[2]['match']}**: Lås {group_b[2]['best_double_str']} *(Täcker {group_b[2]['best_double_pct']:.0f}%)*\n\n"
+                        f"📊 **Chans att villkoret överlever: {prob_b:.1f}%**")
 
 
         if antal_matcher == 8:
