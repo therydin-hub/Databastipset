@@ -682,6 +682,20 @@ if st.session_state.get('har_kort_analys') and input_text:
                 return (exakt_2 + alla_3) * 100
 
             # Beräkna sannolikheterna för Grupp A och B
+            if group_a and group_b:
+            st.markdown("---")
+            st.markdown("🎯 **Dina Dubbla Kärnvillkor (Reducerings-förslag)**")
+            st.markdown("Ställ in dessa som *'U-tecken/Utgångsrad'* i ditt program med kravet att **exakt 2 eller 3 måste sitta**. Genom att kräva detta slipper du helgardera allt, rensar bort massor av skräprader, och behåller ändå en oerhört hög slagkraft.")
+            
+            # Smart funktion för att räkna ut kombinerad sannolikhet (Minst 2 av 3)
+            def calc_2_of_3_prob(p1, p2, p3):
+                p1, p2, p3 = p1/100.0, p2/100.0, p3/100.0
+                q1, q2, q3 = 1-p1, 1-p2, 1-p3
+                exakt_2 = (p1 * p2 * q3) + (p1 * p3 * q2) + (p2 * p3 * q1)
+                alla_3 = p1 * p2 * p3
+                return (exakt_2 + alla_3) * 100
+
+            # Beräkna sannolikheterna för Grupp A och B
             prob_a = calc_2_of_3_prob(group_a[0]['best_single_pct'], group_a[1]['best_double_pct'], group_a[2]['best_double_pct'])
             prob_b = calc_2_of_3_prob(group_b[0]['best_single_pct'], group_b[1]['best_double_pct'], group_b[2]['best_double_pct'])
 
