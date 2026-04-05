@@ -169,12 +169,10 @@ def get_top_n_favs_wins(row_str, prob_vector, top_n):
     top_n_list = match_favs[:top_n]
     return sum(1 for fav in top_n_list if row_str[fav['match_idx']] == fav['sign'])
 
-# NYTT TOTAL DIFF-FILTER (Dynamiskt för både 8 och 13 matcher)
 def calculate_total_diff(match_odds, correct_results):
     col_map = {'1': 0, 'X': 1, '2': 2}
     matcher = len(correct_results)
     
-    # T1
     flat_t1 = []
     for match_idx, odds in enumerate(match_odds):
         max_val = max(odds)
@@ -191,7 +189,6 @@ def calculate_total_diff(match_odds, correct_results):
     t1_table = [[0]*3 for _ in range(matcher)]
     for item in flat_t1: t1_table[item["match_idx"]][item["col_idx"]] = item["rank"]
 
-    # T2
     flat_t2 = []
     for match_idx, odds in enumerate(match_odds):
         min_val = min(odds)
@@ -208,7 +205,6 @@ def calculate_total_diff(match_odds, correct_results):
     t2_table = [[0]*3 for _ in range(matcher)]
     for item in flat_t2: t2_table[item["match_idx"]][item["col_idx"]] = item["rank"]
 
-    # DIFFERENS
     total_diff = 0
     for i in range(matcher):
         correct_sign = str(correct_results[i]).strip().upper()
@@ -338,7 +334,7 @@ if st.session_state['aktuell_spelform'] != spelform:
     st.session_state['har_kort_analys'] = False
     st.session_state['aktuell_spelform'] = spelform
 
-# --- SIDEBAR (INSTÄLLNINGAR & RAM) ---
+# --- SIDEBAR (INSTÄLLNINGAR) ---
 with st.sidebar:
     st.header("⚙️ Inställningar")
     
@@ -384,28 +380,6 @@ with st.sidebar:
     total_active = sum(active_filters_list)
     slider_pass_req = st.slider("Minsta antal uppfyllda krav", 1, total_active, total_active) if total_active > 0 else 0
 
-    st.markdown("---")
-    st.subheader("📋 Systemram (Grund)")
-    if antal_matcher == 8:
-        ram_val = st.selectbox("Välj storlek på TT-ram:", [
-            "144 rader (2 Spikar, 4 Halva, 2 Hela)",
-            "216 rader (2 Spikar, 3 Halva, 3 Hela)",
-            "288 rader (1 Spik, 5 Halva, 2 Hela)",
-            "324 rader (2 Spikar, 2 Halva, 4 Hela)",
-            "432 rader (1 Spik, 4 Halva, 3 Hela)"
-        ], index=1)
-    else:
-        ram_val = st.selectbox("Välj storlek på 13-ram:", [
-            "144 rader (7 Spikar, 4 Halva, 2 Hela)",
-            "288 rader (6 Spikar, 5 Halva, 2 Hela)",
-            "432 rader (6 Spikar, 4 Halva, 3 Hela)",
-            "864 rader (5 Spikar, 5 Halva, 3 Hela)",
-            "1 296 rader (5 Spikar, 4 Halva, 4 Hela)",
-            "2 592 rader (4 Spikar, 5 Halva, 4 Hela)",
-            "3 888 rader (4 Spikar, 4 Halva, 5 Hela)",
-            "7 776 rader (3 Spikar, 5 Halva, 5 Hela)",
-            "11 664 rader (3 Spikar, 4 Halva, 6 Hela)"
-        ], index=4)
 
 # --- MAIN AREA FÖR INMATNING ---
 input_text = st.text_area(f"Klistra in VÄRDEN ({krav_odds} st oddsprocent):", height=120)
@@ -475,7 +449,6 @@ if st.session_state.get('har_kort_analys') and input_text:
             rank24_sums.append(get_rank_sum(r, p))
             u_wins.append(get_top_n_favs_wins(r, p, slider_u_count))
             
-            # Beräkna Total Diff 
             match_odds_list = [p[j:j+3] for j in range(0, len(p), 3)]
             total_diff_vals.append(calculate_total_diff(match_odds_list, list(r)))
 
@@ -601,68 +574,117 @@ if st.session_state.get('har_kort_analys') and input_text:
                     chans = (count/total_twins)*100
                     st.write(f"**{s1}** / **{s2}** ➡️ **{chans:.1f}%** ({count} st)")
                     
+        # ==========================================
+        # NYA AI-STRATEGIN: BYGGKLOSSAR FÖR REDUCERING
+        # ==========================================
         st.markdown("---")
-        st.subheader(f"🧠 AI:ns Historiska Systemram ({ram_val.split('(')[0]})")
+        st.subheader("🧠 AI:ns Strategiska Byggklossar (För reducering)")
         
-        if "144" in ram_val: b_count, f_count = (2, 2) if antal_matcher==8 else (7, 2)
-        elif "216" in ram_val: b_count, f_count = 2, 3
-        elif "288" in ram_val: b_count, f_count = (1, 2) if antal_matcher==8 else (6, 2)
-        elif "324" in ram_val: b_count, f_count = 2, 4
-        elif "432" in ram_val: b_count, f_count = (1, 3) if antal_matcher==8 else (6, 3)
-        elif "864" in ram_val: b_count, f_count = 5, 3
-        elif "1 296" in ram_val: b_count, f_count = 5, 4
-        elif "2 592" in ram_val: b_count, f_count = 4, 4
-        elif "3 888" in ram_val: b_count, f_count = 4, 5
-        elif "7 776" in ram_val: b_count, f_count = 3, 5
-        elif "11 664" in ram_val: b_count, f_count = 3, 6
-
-        hist_stats = []
+        match_data = []
         for m in range(antal_matcher):
-            historiska_utfall = [row['Correct_Row'][m] for _, row in v_m.iterrows() if len(row['Correct_Row']) == antal_matcher]
-            if not historiska_utfall: continue
+            hist_outcomes = [row['Correct_Row'][m] for _, row in v_m.iterrows() if len(row['Correct_Row']) == antal_matcher]
+            if not hist_outcomes: continue
                 
-            tot = len(historiska_utfall)
-            c1, cx, c2 = historiska_utfall.count('1'), historiska_utfall.count('X'), historiska_utfall.count('2')
+            tot = len(hist_outcomes)
+            c1, cx, c2 = hist_outcomes.count('1'), hist_outcomes.count('X'), hist_outcomes.count('2')
             p1, px, p2 = (c1/tot)*100, (cx/tot)*100, (c2/tot)*100
             utfall = [('1', p1), ('X', px), ('2', p2)]
             utfall.sort(key=lambda x: x[1], reverse=True)
             
-            odds_idag = [('1', input_vec[m*3]), ('X', input_vec[m*3+1]), ('2', input_vec[m*3+2])]
-            odds_idag.sort(key=lambda x: x[1], reverse=True) 
-            dagens_fav = odds_idag[0][0]
+            odds_idag = {'1': input_vec[m*3], 'X': input_vec[m*3+1], '2': input_vec[m*3+2]}
             
-            hist_fav, max_p = utfall[0][0], utfall[0][1]
-            diff = utfall[0][1] - utfall[2][1] 
+            # Beräkna Bästa Spik
+            best_single = utfall[0]
+            value_single = best_single[1] - odds_idag[best_single[0]]
             
-            varning = f"🔥 VÄRDE! (Oddsen: {dagens_fav}, Historik: {hist_fav})" if (hist_fav != dagens_fav and max_p >= 35) else ""
-            hist_stats.append({
-                'match': m+1, 'max_p': max_p, 'diff': diff, 'hist_fav': hist_fav, 'utfall': utfall,
-                'odds_str': f"{int(input_vec[m*3])}-{int(input_vec[m*3+1])}-{int(input_vec[m*3+2])}",
-                'hist_str': f"1:{int(p1)}% X:{int(px)}% 2:{int(p2)}%", 'varning': varning
+            # Beräkna Bästa Lås (Två tecken)
+            best_double_signs = sorted([utfall[0][0], utfall[1][0]])
+            best_double_str = "1X" if best_double_signs==['1','X'] else "12" if best_double_signs==['1','2'] else "X2"
+            best_double_pct = utfall[0][1] + utfall[1][1]
+            
+            # Beräkna Skrällar (Dagens odds < 20%)
+            skrällar = []
+            for sign, hist_pct in utfall:
+                if odds_idag[sign] < 20:
+                    skrällar.append({
+                        'match': m+1, 'sign': sign, 'hist_pct': hist_pct, 'odds_idag': odds_idag[sign]
+                    })
+                    
+            match_data.append({
+                'match': m+1,
+                'odds_idag': odds_idag,
+                'best_single_sign': best_single[0],
+                'best_single_pct': best_single[1],
+                'value_single': value_single,
+                'best_double_str': best_double_str,
+                'best_double_pct': best_double_pct,
+                'skrällar': skrällar
             })
 
-        sorted_by_max = sorted(hist_stats, key=lambda x: x['max_p'], reverse=True)
-        banker_ids = [x['match'] for x in sorted_by_max[:b_count]]
-        rem_matches = [x for x in hist_stats if x['match'] not in banker_ids]
-        sorted_by_diff = sorted(rem_matches, key=lambda x: x['diff'])
-        full_ids = [x['match'] for x in sorted_by_diff[:f_count]]
+        # --- SORTERA FRAM KATEGORIERNA ---
+        # 1. Topp 3 Spikar (Högst historisk vinstchans, tie-break på värde)
+        spikar_sorted = sorted(match_data, key=lambda x: (x['best_single_pct'], x['value_single']), reverse=True)
+        top_3_spikar = spikar_sorted[:3]
         
-        for item in hist_stats:
-            if item['match'] in banker_ids: item['rekommendation'] = f"  {item['hist_fav']}  "
-            elif item['match'] in full_ids: item['rekommendation'] = " 1X2 "
-            else:
-                bästa_två = sorted([item['utfall'][0][0], item['utfall'][1][0]])
-                item['rekommendation'] = " 1 2 " if ''.join(bästa_två) == '12' else f" {''.join(bästa_två)}  "
+        # 2. Topp 3 Lås (Högst täckningsgrad)
+        las_sorted = sorted(match_data, key=lambda x: x['best_double_pct'], reverse=True)
+        top_3_las = las_sorted[:3]
+        
+        # 3. Topp 3 Skrällar (Streckade under 20% idag, men vinner oftast historiskt)
+        all_skrallar = []
+        for md in match_data:
+            all_skrallar.extend(md['skrällar'])
+        top_3_skrallar = sorted(all_skrallar, key=lambda x: x['hist_pct'], reverse=True)[:3]
+        
+        # 4. Bygg Kärnvillkoren (Unika matcher till Grupp A och Grupp B)
+        # Vi tar ut 2 spikar och 4 halvgarderingar ur det som finns kvar.
+        kv_spikar = spikar_sorted[:2]
+        used_matches_for_kv = [m['match'] for m in kv_spikar]
+        
+        kv_las_candidates = [m for m in las_sorted if m['match'] not in used_matches_for_kv]
+        kv_las = kv_las_candidates[:4]
+        
+        # Skapa Grupperna
+        group_a = [kv_spikar[0], kv_las[0], kv_las[1]] if len(kv_las) >= 2 else []
+        group_b = [kv_spikar[1], kv_las[2], kv_las[3]] if len(kv_las) >= 4 else []
 
-        hist_stats.sort(key=lambda x: x['match'])
-        col_frame, col_data = st.columns([1, 2.5])
-        with col_frame:
-            st.markdown("**AI:ns Ram:**")
-            ram_str = "".join([f"M{r['match']}:{' ' if r['match']<10 else ''}  {r['rekommendation']}\n" for r in hist_stats])
-            st.code(ram_str)
-        with col_data:
-            st.markdown("**Historisk Analys:**")
-            for rad in hist_stats: st.write(f"**M{rad['match']}** ({rad['odds_str']}) ➡️ *{rad['hist_str']}* {rad['varning']}")
+        # --- RITA UPP ALLT ---
+        col_spik, col_las, col_skrall = st.columns(3)
+        
+        with col_spik:
+            st.markdown("🔥 **Topp 3 Spikarna**")
+            for s in top_3_spikar:
+                st.write(f"**M{s['match']}: {s['best_single_sign']}** (Vinner {s['best_single_pct']:.0f}%, Streck {s['odds_idag'][s['best_single_sign']]:.0f}%)")
+
+        with col_las:
+            st.markdown("🔒 **Topp 3 Låsen**")
+            for l in top_3_las:
+                st.write(f"**M{l['match']}: {l['best_double_str']}** (Täcker {l['best_double_pct']:.0f}%)")
+
+        with col_skrall:
+            st.markdown("💣 **Topp 3 Skrälldrag (<20%)**")
+            if not top_3_skrallar:
+                st.write("Hittade inga skrällar under 20% idag.")
+            for sk in top_3_skrallar:
+                st.write(f"**M{sk['match']}: {sk['sign']}** (Vinner {sk['hist_pct']:.0f}%, Streck {sk['odds_idag']:.0f}%)")
+
+        if group_a and group_b:
+            st.markdown("---")
+            st.markdown("🎯 **Dina Dubbla Kärnvillkor (Reducerings-förslag)**")
+            st.markdown("Ställ in dessa som *'U-tecken/Utgångsrad'* i ditt program med kravet att **exakt 2 eller 3 måste sitta**. Genom att kräva detta slipper du helgardera allt, rensar bort massor av skräprader, och behåller ändå en oerhört hög slagkraft.")
+            
+            col_kva, col_kvb = st.columns(2)
+            with col_kva:
+                st.info(f"🛡️ **Grupp A (Krav: Minst 2 av 3 ska sitta)**\n\n"
+                        f"✅ **M{group_a[0]['match']}**: Spik {group_a[0]['best_single_sign']}\n\n"
+                        f"✅ **M{group_a[1]['match']}**: Lås {group_a[1]['best_double_str']}\n\n"
+                        f"✅ **M{group_a[2]['match']}**: Lås {group_a[2]['best_double_str']}")
+            with col_kvb:
+                st.info(f"⚔️ **Grupp B (Krav: Minst 2 av 3 ska sitta)**\n\n"
+                        f"✅ **M{group_b[0]['match']}**: Spik {group_b[0]['best_single_sign']}\n\n"
+                        f"✅ **M{group_b[1]['match']}**: Lås {group_b[1]['best_double_str']}\n\n"
+                        f"✅ **M{group_b[2]['match']}**: Lås {group_b[2]['best_double_str']}")
+
 
         if antal_matcher == 8:
             st.markdown("---")
@@ -672,7 +694,6 @@ if st.session_state.get('har_kort_analys') and input_text:
             
             valid_exact_rows = [] 
             
-            # Förkalkylera listan av listor för Total Diff-filtret så slipper vi göra det 6561 gånger!
             match_odds_input = [input_compare[j:j+3] for j in range(0, len(input_compare), 3)]
             
             for tr in all_possible_rows:
@@ -704,8 +725,6 @@ if st.session_state.get('har_kort_analys') and input_text:
                 if cb_points and (c_points[0] <= get_rank_points(tr, input_compare) <= c_points[1]): pts += 1
                 if cb_100minus and (c_minus[0] <= get_100_minus_sum(tr, input_compare) <= c_minus[1]): pts += 1
                 if cb_rank24 and (c_rank24[0] <= get_rank_sum(tr, input_compare) <= c_rank24[1]): pts += 1
-                
-                # Det nya exakta filtret applicerat här!
                 if cb_totaldiff:
                     td_c = calculate_total_diff(match_odds_input, list(tr))
                     if (c_totaldiff[0] <= td_c <= c_totaldiff[1]): pts += 1
@@ -740,7 +759,6 @@ if st.session_state.get('har_kort_analys') and input_text:
 
         st.markdown("---")
         st.subheader("📊 Datadistribution")
-        # Har gjort graf-ytan lite högre (3 rader) för att ge plats till Total Diff
         fig = plt.figure(figsize=(18, 16)) 
         def smart_plot(data_list, col_idx, color, title, xlabel, is_active, val_min, val_max):
             plt.subplot(3, 3, col_idx) 
@@ -771,8 +789,6 @@ if st.session_state.get('har_kort_analys') and input_text:
         smart_plot(points_vals, 4, 'mediumpurple', 'Poängfilter', 'Poäng', cb_points, c_points[0], c_points[1])
         smart_plot(minus_sums, 5, 'tan', '100-minus Summa', '100-minus', cb_100minus, c_minus[0], c_minus[1])
         smart_plot(rank24_sums, 6, 'lightpink', 'Rank Summa', 'Rank Summa', cb_rank24, c_rank24[0], c_rank24[1])
-        
-        # Total Diff ritas ut på rad 3!
         smart_plot(total_diff_vals, 7, 'lightgreen', 'Total Diff (T1-T2)', 'Differens', cb_totaldiff, c_totaldiff[0], c_totaldiff[1])
         
         plt.tight_layout(pad=2.0, h_pad=2.0)
