@@ -676,14 +676,14 @@ if st.session_state.get('har_kort_analys') and input_text:
             col_kva, col_kvb = st.columns(2)
             with col_kva:
                 st.info(f"🛡️ **Grupp A (Krav: Minst 2 av 3 ska sitta)**\n\n"
-                        f"✅ **M{group_a[0]['match']}**: Spik {group_a[0]['best_single_sign']}\n\n"
-                        f"✅ **M{group_a[1]['match']}**: Lås {group_a[1]['best_double_str']}\n\n"
-                        f"✅ **M{group_a[2]['match']}**: Lås {group_a[2]['best_double_str']}")
+                        f"✅ **M{group_a[0]['match']}**: Spik {group_a[0]['best_single_sign']} *(Vinner {group_a[0]['best_single_pct']:.0f}%)*\n\n"
+                        f"✅ **M{group_a[1]['match']}**: Lås {group_a[1]['best_double_str']} *(Täcker {group_a[1]['best_double_pct']:.0f}%)*\n\n"
+                        f"✅ **M{group_a[2]['match']}**: Lås {group_a[2]['best_double_str']} *(Täcker {group_a[2]['best_double_pct']:.0f}%)*")
             with col_kvb:
                 st.info(f"⚔️ **Grupp B (Krav: Minst 2 av 3 ska sitta)**\n\n"
-                        f"✅ **M{group_b[0]['match']}**: Spik {group_b[0]['best_single_sign']}\n\n"
-                        f"✅ **M{group_b[1]['match']}**: Lås {group_b[1]['best_double_str']}\n\n"
-                        f"✅ **M{group_b[2]['match']}**: Lås {group_b[2]['best_double_str']}")
+                        f"✅ **M{group_b[0]['match']}**: Spik {group_b[0]['best_single_sign']} *(Vinner {group_b[0]['best_single_pct']:.0f}%)*\n\n"
+                        f"✅ **M{group_b[1]['match']}**: Lås {group_b[1]['best_double_str']} *(Täcker {group_b[1]['best_double_pct']:.0f}%)*\n\n"
+                        f"✅ **M{group_b[2]['match']}**: Lås {group_b[2]['best_double_str']} *(Täcker {group_b[2]['best_double_pct']:.0f}%)*")
 
 
         if antal_matcher == 8:
