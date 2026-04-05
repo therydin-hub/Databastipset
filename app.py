@@ -169,6 +169,55 @@ def get_top_n_favs_wins(row_str, prob_vector, top_n):
     top_n_list = match_favs[:top_n]
     return sum(1 for fav in top_n_list if row_str[fav['match_idx']] == fav['sign'])
 
+# NYTT TOTAL DIFF-FILTER (Dynamiskt för både 8 och 13 matcher)
+def calculate_total_diff(match_odds, correct_results):
+    col_map = {'1': 0, 'X': 1, '2': 2}
+    matcher = len(correct_results)
+    
+    # T1
+    flat_t1 = []
+    for match_idx, odds in enumerate(match_odds):
+        max_val = max(odds)
+        max_idx = odds.index(max_val)
+        for col_idx, val in enumerate(odds):
+            is_max = (col_idx == max_idx)
+            flat_t1.append({"match_idx": match_idx, "col_idx": col_idx, "val": 0 if is_max else val, "is_max": is_max})
+            
+    non_zeros_t1 = sorted([x for x in flat_t1 if not x["is_max"]], key=lambda x: x["val"], reverse=True)
+    for rank, item in enumerate(non_zeros_t1, start=1): item["rank"] = rank
+    for item in flat_t1: 
+        if item["is_max"]: item["rank"] = 0
+            
+    t1_table = [[0]*3 for _ in range(matcher)]
+    for item in flat_t1: t1_table[item["match_idx"]][item["col_idx"]] = item["rank"]
+
+    # T2
+    flat_t2 = []
+    for match_idx, odds in enumerate(match_odds):
+        min_val = min(odds)
+        min_idx = odds.index(min_val)
+        for col_idx, val in enumerate(odds):
+            is_min = (col_idx == min_idx)
+            flat_t2.append({"match_idx": match_idx, "col_idx": col_idx, "val": 0 if is_min else val, "is_min": is_min})
+            
+    non_zeros_t2 = sorted([x for x in flat_t2 if not x["is_min"]], key=lambda x: x["val"], reverse=True)
+    for rank, item in enumerate(non_zeros_t2, start=1): item["rank"] = rank
+    for item in flat_t2: 
+        if item["is_min"]: item["rank"] = 0
+            
+    t2_table = [[0]*3 for _ in range(matcher)]
+    for item in flat_t2: t2_table[item["match_idx"]][item["col_idx"]] = item["rank"]
+
+    # DIFFERENS
+    total_diff = 0
+    for i in range(matcher):
+        correct_sign = str(correct_results[i]).strip().upper()
+        if correct_sign not in col_map: continue
+        col = col_map[correct_sign]
+        total_diff += (t1_table[i][col] - t2_table[i][col])
+        
+    return total_diff
+
 
 # ==========================================
 # 2. AUTO-LADDNING & DATABAS
@@ -311,6 +360,7 @@ with st.sidebar:
     cb_points = st.checkbox("POÄNGFILTER (Eget)", value=True)
     cb_100minus = st.checkbox("100-minus Summa", value=True)
     cb_rank24 = st.checkbox(f"Rank 1-{krav_odds} Summa", value=True)
+    cb_totaldiff = st.checkbox("Total Diff (T1 - T2)", value=True)
     
     cb_base = st.checkbox("Grundfilter (1, X, 2)", value=True)
     cb_streak = st.checkbox("Sviter", value=True)
@@ -330,7 +380,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("🎯 Soft Filtering")
-    active_filters_list = [cb_u_favs, cb_sft, cb_fat, cb_points, cb_100minus, cb_rank24, cb_base, cb_streak, cb_gap, cb_single, cb_doublet, cb_triplet, cb_occur, cb_aimatrix]
+    active_filters_list = [cb_u_favs, cb_sft, cb_fat, cb_points, cb_100minus, cb_rank24, cb_totaldiff, cb_base, cb_streak, cb_gap, cb_single, cb_doublet, cb_triplet, cb_occur, cb_aimatrix]
     total_active = sum(active_filters_list)
     slider_pass_req = st.slider("Minsta antal uppfyllda krav", 1, total_active, total_active) if total_active > 0 else 0
 
@@ -385,7 +435,6 @@ if st.session_state.get('har_kort_analys') and input_text:
     elif v_m is None or len(v_m) == 0:
         st.error("❌ Inga matcher kvar efter filtrering. Testa att lätta på Utdelningskravet.")
     else:
-        # HÄR LIGGER LÖSNINGEN FÖR KRASCHEN (input_compare återskapas)
         input_compare = get_structural_vector(input_vec) if cb_structure else input_vec
         
         visnings_kolumner = [c for c in ['Datum', 'ID_Omg'] if c in v_m.columns] + ['Payout', 'Sim']
@@ -401,7 +450,7 @@ if st.session_state.get('har_kort_analys') and input_text:
         trip1, tripx, trip2, trip_tot = [], [], [], []
         occ1, occx, occ2, occ_tot = [], [], [], []
         sft_sums, fat_f, fat_a, fat_t, fat_sums = [], [], [], [], []
-        points_vals, minus_sums, rank24_sums, u_wins, ai_ranks = [], [], [], [], []
+        points_vals, minus_sums, rank24_sums, total_diff_vals, u_wins, ai_ranks = [], [], [], [], [], []
 
         for _, row in v_m.iterrows():
             r, p = row['Correct_Row'], row['Prob_Vector']
@@ -425,6 +474,10 @@ if st.session_state.get('har_kort_analys') and input_text:
             minus_sums.append(get_100_minus_sum(r, p))
             rank24_sums.append(get_rank_sum(r, p))
             u_wins.append(get_top_n_favs_wins(r, p, slider_u_count))
+            
+            # Beräkna Total Diff 
+            match_odds_list = [p[j:j+3] for j in range(0, len(p), 3)]
+            total_diff_vals.append(calculate_total_diff(match_odds_list, list(r)))
 
         c_v, c_s = slider_core_val, slider_core_str
         c_ones = get_best_interval(ones, c_s); c_draws = get_best_interval(draws, c_s); c_twos = get_best_interval(twos, c_s)
@@ -440,6 +493,7 @@ if st.session_state.get('har_kort_analys') and input_text:
         c_points = get_best_interval(points_vals, c_v)
         c_minus = get_best_interval(minus_sums, c_v)
         c_rank24 = get_best_interval(rank24_sums, c_v)
+        c_totaldiff = get_best_interval(total_diff_vals, c_v)
         c_u = get_best_interval(u_wins, c_v)
         
         c_ai_rank = get_best_interval(ai_ranks, c_v) if len(ai_ranks) > 0 else (1, max_rank)
@@ -454,6 +508,7 @@ if st.session_state.get('har_kort_analys') and input_text:
             st.subheader(f"💰 VÄRDE & SVÅRIGHET ({c_v}%)")
             if cb_payout: st.write(f"**Utdelning:** {v_m['Payout'].min():.0f} - {v_m['Payout'].max():.0f} kr")
             if cb_aimatrix: st.write(f"**{ai_txt}:** {active_ai_min:.0f} - {active_ai_max:.0f}")
+            if cb_totaldiff: st.write(f"**Total Diff:** {c_totaldiff[0]} - {c_totaldiff[1]}")
             if cb_rank24: st.write(f"**Rank Summa:** {c_rank24[0]:.1f} - {c_rank24[1]:.1f}")
             if cb_100minus: st.write(f"**100-minus Summa:** {c_minus[0]} - {c_minus[1]}")
             if cb_sft: st.write(f"**SFT Summa:** {c_sft[0]} - {c_sft[1]}")
@@ -487,6 +542,7 @@ if st.session_state.get('har_kort_analys') and input_text:
             if cb_points and (c_points[0] <= points_vals[i] <= c_points[1]): pts += 1
             if cb_100minus and (c_minus[0] <= minus_sums[i] <= c_minus[1]): pts += 1
             if cb_rank24 and (c_rank24[0] <= rank24_sums[i] <= c_rank24[1]): pts += 1
+            if cb_totaldiff and (c_totaldiff[0] <= total_diff_vals[i] <= c_totaldiff[1]): pts += 1
             if cb_aimatrix and (active_ai_min <= ai_ranks[i] <= active_ai_max): pts += 1
             if pts >= slider_pass_req: mall_hits += 1
 
@@ -608,7 +664,6 @@ if st.session_state.get('har_kort_analys') and input_text:
             st.markdown("**Historisk Analys:**")
             for rad in hist_stats: st.write(f"**M{rad['match']}** ({rad['odds_str']}) ➡️ *{rad['hist_str']}* {rad['varning']}")
 
-        # HÄR LIGGER LÖSNINGEN FÖR FREKVENSTABELLEN
         if antal_matcher == 8:
             st.markdown("---")
             st.subheader("🎲 EXAKT UTRÄKNING (6 561 rader)")
@@ -616,6 +671,9 @@ if st.session_state.get('har_kort_analys') and input_text:
             ai_matrix, ai_scores_asc, ai_tot = calculate_ai_matrix_from_values(input_compare)
             
             valid_exact_rows = [] 
+            
+            # Förkalkylera listan av listor för Total Diff-filtret så slipper vi göra det 6561 gånger!
+            match_odds_input = [input_compare[j:j+3] for j in range(0, len(input_compare), 3)]
             
             for tr in all_possible_rows:
                 pts = 0
@@ -646,6 +704,12 @@ if st.session_state.get('har_kort_analys') and input_text:
                 if cb_points and (c_points[0] <= get_rank_points(tr, input_compare) <= c_points[1]): pts += 1
                 if cb_100minus and (c_minus[0] <= get_100_minus_sum(tr, input_compare) <= c_minus[1]): pts += 1
                 if cb_rank24 and (c_rank24[0] <= get_rank_sum(tr, input_compare) <= c_rank24[1]): pts += 1
+                
+                # Det nya exakta filtret applicerat här!
+                if cb_totaldiff:
+                    td_c = calculate_total_diff(match_odds_input, list(tr))
+                    if (c_totaldiff[0] <= td_c <= c_totaldiff[1]): pts += 1
+                    
                 if cb_aimatrix:
                     rank_c, _ = get_exact_rank(tr, ai_matrix, ai_scores_asc, ai_tot)
                     if (active_ai_min <= rank_c <= active_ai_max): pts += 1
@@ -676,9 +740,10 @@ if st.session_state.get('har_kort_analys') and input_text:
 
         st.markdown("---")
         st.subheader("📊 Datadistribution")
-        fig = plt.figure(figsize=(18, 12))
+        # Har gjort graf-ytan lite högre (3 rader) för att ge plats till Total Diff
+        fig = plt.figure(figsize=(18, 16)) 
         def smart_plot(data_list, col_idx, color, title, xlabel, is_active, val_min, val_max):
-            plt.subplot(2, 3, col_idx) 
+            plt.subplot(3, 3, col_idx) 
             valid_data = [d for d in data_list if not pd.isna(d)]
             if not valid_data: plt.text(0.5, 0.5, 'Ingen data', ha='center', va='center'); plt.title(title); return
             d_min, d_max = min(valid_data), max(valid_data)
@@ -706,6 +771,10 @@ if st.session_state.get('har_kort_analys') and input_text:
         smart_plot(points_vals, 4, 'mediumpurple', 'Poängfilter', 'Poäng', cb_points, c_points[0], c_points[1])
         smart_plot(minus_sums, 5, 'tan', '100-minus Summa', '100-minus', cb_100minus, c_minus[0], c_minus[1])
         smart_plot(rank24_sums, 6, 'lightpink', 'Rank Summa', 'Rank Summa', cb_rank24, c_rank24[0], c_rank24[1])
+        
+        # Total Diff ritas ut på rad 3!
+        smart_plot(total_diff_vals, 7, 'lightgreen', 'Total Diff (T1-T2)', 'Differens', cb_totaldiff, c_totaldiff[0], c_totaldiff[1])
+        
         plt.tight_layout(pad=2.0, h_pad=2.0)
         
         st.pyplot(fig)
