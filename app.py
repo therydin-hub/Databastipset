@@ -621,17 +621,17 @@ if st.session_state.get('har_kort_analys') and input_text:
                 'skrällar': skrällar
             })
 
-        # --- SORTERA FRAM KATEGORIERNA ---
+        # --- SORTERA FRAM KATEGORIERNA (NU TOPP 5) ---
         spikar_sorted = sorted(match_data, key=lambda x: (x['best_single_pct'], x['value_single']), reverse=True)
-        top_3_spikar = spikar_sorted[:3]
+        top_5_spikar = spikar_sorted[:5]
         
         las_sorted = sorted(match_data, key=lambda x: x['best_double_pct'], reverse=True)
-        top_3_las = las_sorted[:3]
+        top_5_las = las_sorted[:5]
         
         all_skrallar = []
         for md in match_data:
             all_skrallar.extend(md['skrällar'])
-        top_3_skrallar = sorted(all_skrallar, key=lambda x: x['hist_pct'], reverse=True)[:3]
+        top_5_skrallar = sorted(all_skrallar, key=lambda x: x['hist_pct'], reverse=True)[:5]
         
         kv_spikar = spikar_sorted[:2]
         used_matches_for_kv = [m['match'] for m in kv_spikar]
@@ -646,20 +646,20 @@ if st.session_state.get('har_kort_analys') and input_text:
         col_spik, col_las, col_skrall = st.columns(3)
         
         with col_spik:
-            st.markdown("🔥 **Topp 3 Spikarna**")
-            for s in top_3_spikar:
+            st.markdown("🔥 **Topp 5 Spikarna**")
+            for s in top_5_spikar:
                 st.write(f"**M{s['match']}: {s['best_single_sign']}** (Vinner {s['best_single_pct']:.0f}%, Streck {s['odds_idag'][s['best_single_sign']]:.0f}%)")
 
         with col_las:
-            st.markdown("🔒 **Topp 3 Låsen**")
-            for l in top_3_las:
+            st.markdown("🔒 **Topp 5 Låsen**")
+            for l in top_5_las:
                 st.write(f"**M{l['match']}: {l['best_double_str']}** (Täcker {l['best_double_pct']:.0f}%)")
 
         with col_skrall:
-            st.markdown("💣 **Topp 3 Skrälldrag (<20%)**")
-            if not top_3_skrallar:
+            st.markdown("💣 **Topp 5 Skrälldrag (<20%)**")
+            if not top_5_skrallar:
                 st.write("Hittade inga skrällar under 20% idag.")
-            for sk in top_3_skrallar:
+            for sk in top_5_skrallar:
                 st.write(f"**M{sk['match']}: {sk['sign']}** (Vinner {sk['hist_pct']:.0f}%, Streck {sk['odds_idag']:.0f}%)")
 
         if group_a and group_b:
