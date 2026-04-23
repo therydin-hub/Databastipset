@@ -690,7 +690,31 @@ if st.session_state.get('har_kort_analys') and input_text:
                         f"✅ **M{group_b[1]['match']}**: Lås {group_b[1]['best_double_str']} *(Täcker {group_b[1]['best_double_pct']:.0f}%)*\n\n"
                         f"✅ **M{group_b[2]['match']}**: Lås {group_b[2]['best_double_str']} *(Täcker {group_b[2]['best_double_pct']:.0f}%)*\n\n"
                         f"📊 **Chans att villkoret överlever: {prob_b:.1f}%**")
+# ==========================================
+        # NYHET: MAKRO-VILLKOR (TECKENFÖRDELNING 2 AV 3)
+        # ==========================================
+        st.markdown("---")
+        st.subheader("🧩 Makro-Villkor: Teckenfördelning")
+        st.markdown("Istället för att kräva att raden har ett perfekt antal av *både* 1:or, X och 2:or, kan du ställa in ett villkor där **minst 2 av 3** måste stämma. Detta tillåter att en teckensort spårar ur (t.ex. en extrem 'kryss-omgång') utan att ditt system spricker, så länge resten av kupongen är normal.")
+        
+        # Räkna ut hur många historiska rader som klarar 2 av 3-kravet
+        macro_hits = 0
+        for i in range(len(v_m)):
+            req1 = 1 if (c_ones[0] <= ones[i] <= c_ones[1]) else 0
+            reqx = 1 if (c_draws[0] <= draws[i] <= c_draws[1]) else 0
+            req2 = 1 if (c_twos[0] <= twos[i] <= c_twos[1]) else 0
+            
+            if (req1 + reqx + req2) >= 2:
+                macro_hits += 1
+                
+        macro_prob = (macro_hits / len(v_m)) * 100 if len(v_m) > 0 else 0
 
+        st.info(f"⚖️ **Krav: Minst 2 av följande 3 påståenden måste stämma på raden:**\n\n"
+                f"1️⃣ **Antal 1:or** ska vara mellan **{c_ones[0]} och {c_ones[1]}** st.\n\n"
+                f"✖️ **Antal X** ska vara mellan **{c_draws[0]} och {c_draws[1]}** st.\n\n"
+                f"2️⃣ **Antal 2:or** ska vara mellan **{c_twos[0]} och {c_twos[1]}** st.\n\n"
+                f"📊 **Historisk chans att kupongen överlever detta villkor: {macro_prob:.1f}%**")
+        
         if antal_matcher == 8:
             st.markdown("---")
             st.subheader("🎲 EXAKT UTRÄKNING (6 561 rader)")
