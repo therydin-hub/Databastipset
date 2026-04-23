@@ -342,6 +342,7 @@ with st.sidebar:
     slider_top_n = st.slider("Antal historiska matcher att hämta", 5, 100, 30, step=5)
     slider_core_val = st.slider("Kärna % (Värde & Svårighet)", 40, 100, 90, step=5)
     slider_core_str = st.slider("Kärna % (Struktur & Tecken)", 40, 100, 100, step=5)
+    slider_macro_target = st.slider("Målsättning för Makro (2-av-3) %", 40, 100, 80, step=5)
     slider_u_count = st.slider("Antal Topp-Favoriter (U-tecken)", 1, antal_matcher, min(3, antal_matcher), step=1)
     
     st.subheader("Avancerade Filter")
@@ -491,7 +492,7 @@ if st.session_state.get('har_kort_analys') and input_text:
         active_ai_min, active_ai_max = slider_ai_rank if cb_manual_ai_rank else c_ai_rank
         ai_txt = "AI-Rank (MANUELL)" if cb_manual_ai_rank else f"AI-Rank (AUTO {c_v}%)"
 
-        # --- MAKRO STRUKTUR (Balanserad och Strikt - Minst 90% träff) ---
+        # --- MAKRO STRUKTUR (Dynamiskt via Slider) ---
         def get_macro_intervals(l1, l2, l3, total_rows):
             if total_rows == 0 or not l1 or not l2 or not l3: return (0,0), (0,0), (0,0), 0.0
             for cov in range(10, 101, 1): 
@@ -503,7 +504,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                                                             (1 if i2[0]<=l2[i]<=i2[1] else 0) + 
                                                             (1 if i3[0]<=l3[i]<=i3[1] else 0)) >= 2)
                 prob = (hits / total_rows) * 100
-                if prob >= 90.0:
+                if prob >= slider_macro_target:
                     return i1, i2, i3, prob
             return get_best_interval(l1, 100), get_best_interval(l2, 100), get_best_interval(l3, 100), 100.0
 
@@ -544,7 +545,7 @@ if st.session_state.get('har_kort_analys') and input_text:
             if cb_occur: st.write(f"**Uppkomster:** 1: {c_occ1[0]}-{c_occ1[1]} | X: {c_occx[0]}-{c_occx[1]} | 2: {c_occ2[0]}-{c_occ2[1]} | Tot: {c_occtot[0]}-{c_occtot[1]}")
             
             st.markdown("---")
-            st.subheader("🧩 MAKRO GRUPPER (Krav: Minst 2 av 3)")
+            st.subheader(f"🧩 MAKRO GRUPPER (Krav: Minst 2 av 3)")
             if cb_m_base: st.write(f"**1X2 (Överlever {p_base:.1f}%):** 1: {t_ones[0]}-{t_ones[1]} | X: {t_draws[0]}-{t_draws[1]} | 2: {t_twos[0]}-{t_twos[1]}")
             if cb_m_streak: st.write(f"**Sviter (Överlever {p_streak:.1f}%):** 1: {t_s1[0]}-{t_s1[1]} | X: {t_sx[0]}-{t_sx[1]} | 2: {t_s2[0]}-{t_s2[1]}")
             if cb_m_gap: st.write(f"**Luckor (Överlever {p_gap:.1f}%):** 1: {t_g1[0]}-{t_g1[1]} | X: {t_gx[0]}-{t_gx[1]} | 2: {t_g2[0]}-{t_g2[1]}")
