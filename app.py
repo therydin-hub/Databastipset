@@ -492,52 +492,50 @@ if st.session_state.get('har_kort_analys') and input_text:
         active_ai_min, active_ai_max = slider_ai_rank if cb_manual_ai_rank else c_ai_rank
         ai_txt = "AI-Rank (MANUELL)" if cb_manual_ai_rank else f"AI-Rank (AUTO {c_v}%)"
 
-        # --- MAKRO STRUKTUR (Perfekt balanserad och strikt sökning) ---
+       # --- MAKRO STRUKTUR (Brute Force för absolut snävaste 2-av-3) ---
         def get_macro_intervals(l1, l2, l3, total_rows):
             if total_rows == 0 or not l1 or not l2 or not l3: return (0,0), (0,0), (0,0), 0.0
             
-            # Funktion för att hitta det tätaste klustret givet en exakt bredd (size)
-            def get_peak(vals, size):
-                vmin, vmax = int(min(vals)), int(max(vals))
-                if size >= vmax - vmin: return (vmin, vmax)
-                best_c, best_i = -1, (vmin, vmin+size)
-                for s in range(vmin, vmax - size + 1):
-                    e = s + size
-                    c = sum(1 for v in vals if s <= v <= e)
-                    if c > best_c:
-                        best_c = c; best_i = (s, e)
-                return best_i
-
-            max_sp1 = int(max(l1) - min(l1)) if l1 else 0
-            max_sp2 = int(max(l2) - min(l2)) if l2 else 0
-            max_sp3 = int(max(l3) - min(l3)) if l3 else 0
+            # Räkna ut exakt hur många rader vi måste rädda för att nå ditt mål i slidern
+            target_hits = int(np.ceil(total_rows * (slider_macro_target / 100.0)))
             
-            # 1. Bygg alla tänkbara kombinationer av spridning (bredd på intervallen)
-            combos = []
-            for s1 in range(max_sp1 + 1):
-                for s2 in range(max_sp2 + 1):
-                    for s3 in range(max_sp3 + 1):
-                        combos.append((s1, s2, s3))
+            vmin1, vmax1 = int(min(l1)), int(max(l1))
+            vmin2, vmax2 = int(min(l2)), int(max(l2))
+            vmin3, vmax3 = int(min(l3)), int(max(l3))
             
-            # 2. MAGIN! Vi sorterar kombinationerna:
-            # - Först efter lägst total spridning (tvingar fram supertajta gränser)
-            # - Sedan efter maxvärdet i kombon (tvingar fram BALANS, t.ex. (2,2,2) prioriteras över (0,0,6)!)
-            combos.sort(key=lambda x: (sum(x), max(x)))
+            max_w1, max_w2, max_w3 = vmax1 - vmin1, vmax2 - vmin2, vmax3 - vmin3
             
-            # 3. Testa kombinationerna från tajtast till bredast
-            for s1, s2, s3 in combos:
-                i1, i2, i3 = get_peak(l1, s1), get_peak(l2, s2), get_peak(l3, s3)
+            # 1. Bygg listan över alla tänkbara intervall-bredder
+            width_combos = []
+            for w1 in range(max_w1 + 1):
+                for w2 in range(max_w2 + 1):
+                    for w3 in range(max_w3 + 1):
+                        width_combos.append((w1, w2, w3))
+                        
+            # 2. Sortera för att ALLTID börja testa de snävaste gränserna först!
+            width_combos.sort(key=lambda x: (sum(x), max(x)))
+            
+            # 3. Mosa igenom alla fönster-positioner tills vi når målet
+            for w1, w2, w3 in width_combos:
+                c1 = [(s, s+w1) for s in range(vmin1, vmax1 - w1 + 1)]
+                c2 = [(s, s+w2) for s in range(vmin2, vmax2 - w2 + 1)]
+                c3 = [(s, s+w3) for s in range(vmin3, vmax3 - w3 + 1)]
                 
-                hits = sum(1 for i in range(total_rows) if ((1 if i1[0]<=l1[i]<=i1[1] else 0) + 
-                                                            (1 if i2[0]<=l2[i]<=i2[1] else 0) + 
-                                                            (1 if i3[0]<=l3[i]<=i3[1] else 0)) >= 2)
-                prob = (hits / total_rows) * 100
-                
-                # Stanna exakt när vi når målet du ställt in i sidofältet!
-                if prob >= slider_macro_target:
-                    return i1, i2, i3, prob
-                    
-            return (min(l1), max(l1)), (min(l2), max(l2)), (min(l3), max(l3)), 100.0
+                for i1 in c1:
+                    for i2 in c2:
+                        for i3 in c3:
+                            # Testa hur många historiska rader som klarar exakt dessa snäva gränser
+                            hits = sum(1 for i in range(total_rows) if 
+                                       ((1 if i1[0]<=l1[i]<=i1[1] else 0) + 
+                                        (1 if i2[0]<=l2[i]<=i2[1] else 0) + 
+                                        (1 if i3[0]<=l3[i]<=i3[1] else 0)) >= 2)
+                            
+                            # BINGO! Vi slog i procentmålet. Avbryt och svara direkt.
+                            if hits >= target_hits:
+                                prob = (hits / total_rows) * 100
+                                return i1, i2, i3, prob
+                                
+            return (vmin1, vmax1), (vmin2, vmax2), (vmin3, vmax3), 100.0
 
         n_rows = len(v_m)
         t_ones, t_draws, t_twos, p_base = get_macro_intervals(ones, draws, twos, n_rows)
