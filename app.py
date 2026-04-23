@@ -473,6 +473,24 @@ if st.session_state.get('har_kort_analys') and input_text:
         active_ai_min, active_ai_max = slider_ai_rank if cb_manual_ai_rank else c_ai_rank
         ai_txt = "AI-Rank (MANUELL)" if cb_manual_ai_rank else f"AI-Rank (AUTO {c_v}%)"
 
+        # --- Dynamisk sökning för Struktur Grupper (1X2) - Minst 90% träff ---
+        t_ones, t_draws, t_twos = (0,0), (0,0), (0,0)
+        macro_prob = 0
+        for cov in range(30, 101, 2): 
+            t_ones = get_best_interval(ones, cov)
+            t_draws = get_best_interval(draws, cov)
+            t_twos = get_best_interval(twos, cov)
+            
+            macro_hits_count = 0
+            for i in range(len(v_m)):
+                req1 = 1 if (t_ones[0] <= ones[i] <= t_ones[1]) else 0
+                reqx = 1 if (t_draws[0] <= draws[i] <= t_draws[1]) else 0
+                req2 = 1 if (t_twos[0] <= twos[i] <= t_twos[1]) else 0
+                if (req1 + reqx + req2) >= 2: macro_hits_count += 1
+                    
+            macro_prob = (macro_hits_count / len(v_m)) * 100 if len(v_m) > 0 else 0
+            if macro_prob >= 90.0: break
+
         st.markdown("---")
         st.header(f"📋 VECKANS MALL ({spelform})")
         
@@ -491,13 +509,16 @@ if st.session_state.get('har_kort_analys') and input_text:
 
         with col_s:
             st.subheader(f"⚽ STRUKTUR ({c_s}%)")
-            if cb_base: st.write(f"**1X2:** 1: {c_ones[0]}-{c_ones[1]} | X: {c_draws[0]}-{c_draws[1]} | 2: {c_twos[0]}-{c_twos[1]}")
             if cb_streak: st.write(f"**Sviter:** 1: {c_s1[0]}-{c_s1[1]} | X: {c_sx[0]}-{c_sx[1]} | 2: {c_s2[0]}-{c_s2[1]}")
             if cb_gap: st.write(f"**Luckor:** 1: {c_g1[0]}-{c_g1[1]} | X: {c_gx[0]}-{c_gx[1]} | 2: {c_g2[0]}-{c_g2[1]}")
             if cb_single: st.write(f"**Singlar:** 1: {c_sing1[0]}-{c_sing1[1]} | X: {c_singx[0]}-{c_singx[1]} | 2: {c_sing2[0]}-{c_sing2[1]} | Tot: {c_singtot[0]}-{c_singtot[1]}")
             if cb_doublet: st.write(f"**Dubbletter:** 1: {c_dub1[0]}-{c_dub1[1]} | X: {c_dubx[0]}-{c_dubx[1]} | 2: {c_dub2[0]}-{c_dub2[1]} | Tot: {c_dubtot[0]}-{c_dubtot[1]}")
             if cb_triplet: st.write(f"**Tripplar:** 1: {c_trip1[0]}-{c_trip1[1]} | X: {c_tripx[0]}-{c_tripx[1]} | 2: {c_trip2[0]}-{c_trip2[1]} | Tot: {c_triptot[0]}-{c_triptot[1]}")
             if cb_occur: st.write(f"**Uppkomster:** 1: {c_occ1[0]}-{c_occ1[1]} | X: {c_occx[0]}-{c_occx[1]} | 2: {c_occ2[0]}-{c_occ2[1]} | Tot: {c_occtot[0]}-{c_occtot[1]}")
+            
+            st.markdown("---")
+            st.subheader("🧩 STRUKTUR GRUPPER (Krav: Minst 2 av 3)")
+            if cb_base: st.write(f"**1X2 (Överlever {macro_prob:.1f}%):** 1: {t_ones[0]}-{t_ones[1]} | X: {t_draws[0]}-{t_draws[1]} | 2: {t_twos[0]}-{t_twos[1]}")
 
         mall_hits = 0
         for i in range(len(v_m)):
