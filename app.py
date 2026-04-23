@@ -695,42 +695,32 @@ if st.session_state.get('har_kort_analys') and input_text:
         # ==========================================
         st.markdown("---")
         st.subheader("🧩 Makro-Villkor: Teckenfördelning")
-        st.markdown("Eftersom det räcker att **2 av 3** sitter, använder vi extremt tighta intervaller (den absolut vanligaste 'peaken' i historiken) för att skala bort så många dyra och dåliga rader som möjligt.")
+        st.markdown("Här har AI:n dynamiskt letat upp de tajtaste möjliga intervallerna som **garanterar minst 90% historisk överlevnad** när du spelar med villkoret att 2 av 3 måste sitta.")
         
-        # Funktion för att hitta det tätaste fönstret (max spridning på 2 steg för 13 rätt, 1 steg för 8 rätt)
-        max_spread = 2 if antal_matcher == 13 else 1
-        
-        def get_peak_interval(val_list, max_spread):
-            if not val_list: return (0, 0)
-            v_min, v_max = min(val_list), max(val_list)
-            best_int = (v_min, v_max)
-            best_count = -1
-            
-            # Skjut ett fönster över all data och hitta där flest omgångar hamnar
-            for start_val in range(v_min, v_max + 1):
-                end_val = start_val + max_spread
-                count = sum(1 for v in val_list if start_val <= v <= end_val)
-                if count > best_count:
-                    best_count = count
-                    best_int = (start_val, end_val)
-            return best_int
-
-        # Hämta de nyskapade, supersnäva intervallerna
-        t_ones = get_peak_interval(ones, max_spread)
-        t_draws = get_peak_interval(draws, max_spread)
-        t_twos = get_peak_interval(twos, max_spread)
-
-        # Räkna ut hur många historiska rader som klarar 2 av 3-kravet med dessa snäva gränser
+        # Dynamisk sökning efter perfekta intervaller (mål: minst 90% träff)
+        t_ones, t_draws, t_twos = (0,0), (0,0), (0,0)
+        macro_prob = 0
         macro_hits = 0
-        for i in range(len(v_m)):
-            req1 = 1 if (t_ones[0] <= ones[i] <= t_ones[1]) else 0
-            reqx = 1 if (t_draws[0] <= draws[i] <= t_draws[1]) else 0
-            req2 = 1 if (t_twos[0] <= twos[i] <= t_twos[1]) else 0
+        
+        # AI:n testar gradvis bredare täckning (från 30% upp till 100%) tills 2-av-3-villkoret når 90%
+        for cov in range(30, 101, 2): 
+            t_ones = get_best_interval(ones, cov)
+            t_draws = get_best_interval(draws, cov)
+            t_twos = get_best_interval(twos, cov)
             
-            if (req1 + reqx + req2) >= 2:
-                macro_hits += 1
+            macro_hits = 0
+            for i in range(len(v_m)):
+                req1 = 1 if (t_ones[0] <= ones[i] <= t_ones[1]) else 0
+                reqx = 1 if (t_draws[0] <= draws[i] <= t_draws[1]) else 0
+                req2 = 1 if (t_twos[0] <= twos[i] <= t_twos[1]) else 0
                 
-        macro_prob = (macro_hits / len(v_m)) * 100 if len(v_m) > 0 else 0
+                if (req1 + reqx + req2) >= 2:
+                    macro_hits += 1
+                    
+            macro_prob = (macro_hits / len(v_m)) * 100 if len(v_m) > 0 else 0
+            
+            if macro_prob >= 90.0:
+                break # Målet nått! Stanna på dessa optimalt snäva intervaller.
 
         st.info(f"⚖️ **Krav: Minst 2 av följande 3 påståenden måste stämma på raden:**\n\n"
                 f"1️⃣ **Antal 1:or** ska vara exakt **{t_ones[0]} till {t_ones[1]}** st.\n\n"
