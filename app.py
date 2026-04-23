@@ -491,37 +491,27 @@ if st.session_state.get('har_kort_analys') and input_text:
         active_ai_min, active_ai_max = slider_ai_rank if cb_manual_ai_rank else c_ai_rank
         ai_txt = "AI-Rank (MANUELL)" if cb_manual_ai_rank else f"AI-Rank (AUTO {c_v}%)"
 
-        # --- MAKRO STRUKTUR (Extremt Strikt - Minst 90% träff) ---
+        # --- MAKRO STRUKTUR (Balanserad och Strikt - Minst 90% träff) ---
         def get_macro_intervals(l1, l2, l3, total_rows):
             if total_rows == 0 or not l1 or not l2 or not l3: return (0,0), (0,0), (0,0), 0.0
             
-            def get_peak(vals, sp):
-                vmin, vmax = int(min(vals)), int(max(vals))
-                if sp >= vmax - vmin: return (vmin, vmax)
-                best_c, best_i = -1, (vmin, vmax)
-                for s in range(vmin, vmax - sp + 1):
-                    e = s + sp
-                    c = sum(1 for v in vals if s <= v <= e)
-                    if c > best_c:
-                        best_c = c
-                        best_i = (s, e)
-                return best_i
-
-            max_sp = int(max(max(l1)-min(l1), max(l2)-min(l2), max(l3)-min(l3)))
-            
-            for total_spread in range(0, (max_sp * 3) + 1):
-                for s1 in range(total_spread + 1):
-                    for s2 in range(total_spread - s1 + 1):
-                        s3 = total_spread - s1 - s2
-                        
-                        i1, i2, i3 = get_peak(l1, s1), get_peak(l2, s2), get_peak(l3, s3)
-                        
-                        hits = sum(1 for i in range(total_rows) if ((1 if i1[0]<=l1[i]<=i1[1] else 0) + (1 if i2[0]<=l2[i]<=i2[1] else 0) + (1 if i3[0]<=l3[i]<=i3[1] else 0)) >= 2)
-                        prob = (hits / total_rows) * 100
-                        if prob >= 90.0:
-                            return i1, i2, i3, prob
-                            
-            return (min(l1), max(l1)), (min(l2), max(l2)), (min(l3), max(l3)), 100.0
+            # AI:n börjar med extremt snäva gränser (bara 10% av datan) och ökar symmetriskt med 1% 
+            # i taget tills 2-av-3-villkoret överlever i minst 90% av fallen.
+            for cov in range(10, 101, 1): 
+                i1 = get_best_interval(l1, cov)
+                i2 = get_best_interval(l2, cov)
+                i3 = get_best_interval(l3, cov)
+                
+                hits = sum(1 for i in range(total_rows) if ((1 if i1[0]<=l1[i]<=i1[1] else 0) + 
+                                                            (1 if i2[0]<=l2[i]<=i2[1] else 0) + 
+                                                            (1 if i3[0]<=l3[i]<=i3[1] else 0)) >= 2)
+                prob = (hits / total_rows) * 100
+                
+                if prob >= 90.0:
+                    return i1, i2, i3, prob
+                    
+            # Om vi mot förmodan inte når 90% (t.ex. extremt få historiska rader), ta max-spridning
+            return get_best_interval(l1, 100), get_best_interval(l2, 100), get_best_interval(l3, 100), 100.0
 
         n_rows = len(v_m)
         t_ones, t_draws, t_twos, p_base = get_macro_intervals(ones, draws, twos, n_rows)
