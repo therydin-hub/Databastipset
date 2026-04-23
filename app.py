@@ -341,6 +341,7 @@ with st.sidebar:
     st.subheader("Matchning & Kärna")
     slider_top_n = st.slider("Antal historiska matcher att hämta", 5, 100, 30, step=5)
     slider_core_val = st.slider("Kärna % (Värde & Svårighet)", 40, 100, 90, step=5)
+    slider_core_str = st.slider("Kärna % (Struktur & Tecken)", 40, 100, 100, step=5)
     slider_u_count = st.slider("Antal Topp-Favoriter (U-tecken)", 1, antal_matcher, min(3, antal_matcher), step=1)
     
     st.subheader("Avancerade Filter")
@@ -351,13 +352,13 @@ with st.sidebar:
     cb_payout = st.checkbox("Utdelning", value=True)
     cb_u_favs = st.checkbox("Topp-Favoriter (U-tecken)", value=True)
     cb_sft = st.checkbox("SFT Summa", value=True)
+    cb_fat = st.checkbox("FAT-Tabell & Summa (Standard)", value=True)
     cb_points = st.checkbox("POÄNGFILTER (Eget)", value=True)
     cb_100minus = st.checkbox("100-minus Summa", value=True)
     cb_rank24 = st.checkbox(f"Rank 1-{krav_odds} Summa", value=True)
     cb_totaldiff = st.checkbox("Total Diff (T1 - T2)", value=True)
     
-    # STRUKTUR (Nu som grupper)
-    st.markdown("**Struktur Grupper (Minst 2 av 3 krav):**")
+    st.markdown("**Struktur (Standard):**")
     cb_base = st.checkbox("Grundfilter (1, X, 2)", value=True)
     cb_streak = st.checkbox("Sviter", value=True)
     cb_gap = st.checkbox("Luckor", value=True)
@@ -365,7 +366,16 @@ with st.sidebar:
     cb_doublet = st.checkbox("Dubbletter", value=True)
     cb_triplet = st.checkbox("Tripplar", value=True)
     cb_occur = st.checkbox("Uppkomster", value=True)
-    cb_fat = st.checkbox("FAT-Tabell", value=True)
+    
+    st.markdown("**Makro-Grupper (2 av 3 Krav):**")
+    cb_m_base = st.checkbox("Makro: 1X2", value=True)
+    cb_m_streak = st.checkbox("Makro: Sviter", value=True)
+    cb_m_gap = st.checkbox("Makro: Luckor", value=True)
+    cb_m_single = st.checkbox("Makro: Singlar", value=True)
+    cb_m_doublet = st.checkbox("Makro: Dubbletter", value=True)
+    cb_m_triplet = st.checkbox("Makro: Tripplar", value=True)
+    cb_m_occur = st.checkbox("Makro: Uppkomster", value=True)
+    cb_m_fat = st.checkbox("Makro: FAT", value=True)
     
     cb_aimatrix = st.checkbox("AI-Matrix Rank", value=True)
     cb_manual_ai_rank = st.checkbox("Styr AI-Rank manuellt", value=False)
@@ -377,7 +387,12 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("🎯 Soft Filtering")
-    active_filters_list = [cb_u_favs, cb_sft, cb_fat, cb_points, cb_100minus, cb_rank24, cb_totaldiff, cb_base, cb_streak, cb_gap, cb_single, cb_doublet, cb_triplet, cb_occur, cb_aimatrix]
+    active_filters_list = [
+        cb_u_favs, cb_sft, cb_fat, cb_points, cb_100minus, cb_rank24, cb_totaldiff,
+        cb_base, cb_streak, cb_gap, cb_single, cb_doublet, cb_triplet, cb_occur,
+        cb_m_base, cb_m_streak, cb_m_gap, cb_m_single, cb_m_doublet, cb_m_triplet, cb_m_occur, cb_m_fat,
+        cb_aimatrix
+    ]
     total_active = sum(active_filters_list)
     slider_pass_req = st.slider("Minsta antal uppfyllda krav", 1, total_active, total_active) if total_active > 0 else 0
 
@@ -453,18 +468,30 @@ if st.session_state.get('har_kort_analys') and input_text:
             match_odds_list = [p[j:j+3] for j in range(0, len(p), 3)]
             total_diff_vals.append(calculate_total_diff(match_odds_list, list(r)))
 
-        c_v = slider_core_val
+        c_v, c_s = slider_core_val, slider_core_str
+        
+        # --- STANDARD STRUKTUR ---
+        c_ones = get_best_interval(ones, c_s); c_draws = get_best_interval(draws, c_s); c_twos = get_best_interval(twos, c_s)
+        c_s1 = get_best_interval(s1, c_s); c_sx = get_best_interval(sx, c_s); c_s2 = get_best_interval(s2, c_s)
+        c_g1 = get_best_interval(g1, c_s); c_gx = get_best_interval(gx, c_s); c_g2 = get_best_interval(g2, c_s)
+        c_sing1 = get_best_interval(sing1, c_s); c_singx = get_best_interval(singx, c_s); c_sing2 = get_best_interval(sing2, c_s); c_singtot = get_best_interval(sing_tot, c_s)
+        c_dub1 = get_best_interval(dub1, c_s); c_dubx = get_best_interval(dubx, c_s); c_dub2 = get_best_interval(dub2, c_s); c_dubtot = get_best_interval(dub_tot, c_s)
+        c_trip1 = get_best_interval(trip1, c_s); c_tripx = get_best_interval(tripx, c_s); c_trip2 = get_best_interval(trip2, c_s); c_triptot = get_best_interval(trip_tot, c_s)
+        c_occ1 = get_best_interval(occ1, c_s); c_occx = get_best_interval(occx, c_s); c_occ2 = get_best_interval(occ2, c_s); c_occtot = get_best_interval(occ_tot, c_s)
+        
         c_sft = get_best_interval(sft_sums, c_v)
+        c_fatf = get_best_interval(fat_f, c_v); c_fata = get_best_interval(fat_a, c_v); c_fatt = get_best_interval(fat_t, c_v); c_fatsum = get_best_interval(fat_sums, c_v)
         c_points = get_best_interval(points_vals, c_v)
         c_minus = get_best_interval(minus_sums, c_v)
         c_rank24 = get_best_interval(rank24_sums, c_v)
         c_totaldiff = get_best_interval(total_diff_vals, c_v)
         c_u = get_best_interval(u_wins, c_v)
+        
         c_ai_rank = get_best_interval(ai_ranks, c_v) if len(ai_ranks) > 0 else (1, max_rank)
         active_ai_min, active_ai_max = slider_ai_rank if cb_manual_ai_rank else c_ai_rank
         ai_txt = "AI-Rank (MANUELL)" if cb_manual_ai_rank else f"AI-Rank (AUTO {c_v}%)"
 
-        # --- Funktion för att hitta snäva 2-av-3 Makro-intervaller ---
+        # --- MAKRO STRUKTUR (Minst 90% träff) ---
         def get_macro_intervals(l1, l2, l3, total_rows):
             if total_rows == 0: return (0,0), (0,0), (0,0), 0.0
             for cov in range(30, 101, 2): 
@@ -498,32 +525,55 @@ if st.session_state.get('har_kort_analys') and input_text:
             if cb_100minus: st.write(f"**100-minus Summa:** {c_minus[0]} - {c_minus[1]}")
             if cb_sft: st.write(f"**SFT Summa:** {c_sft[0]} - {c_sft[1]}")
             if cb_points: st.write(f"**Poängfilter:** {c_points[0]} - {c_points[1]}")
+            if cb_fat: st.write(f"**FAT:** F:{c_fatf[0]}-{c_fatf[1]} | A:{c_fata[0]}-{c_fata[1]} | T:{c_fatt[0]}-{c_fatt[1]} (Summa: {c_fatsum[0]}-{c_fatsum[1]})")
             if cb_u_favs: st.write(f"**Topp {slider_u_count} Favoriter:** {c_u[0]} - {c_u[1]} st vinner")
 
         with col_s:
-            st.subheader("🧩 STRUKTUR GRUPPER (Krav: Minst 2 av 3)")
-            if cb_base: st.write(f"**1X2 (Överlever {p_base:.1f}%):** 1: {t_ones[0]}-{t_ones[1]} | X: {t_draws[0]}-{t_draws[1]} | 2: {t_twos[0]}-{t_twos[1]}")
-            if cb_streak: st.write(f"**Sviter (Överlever {p_streak:.1f}%):** 1: {t_s1[0]}-{t_s1[1]} | X: {t_sx[0]}-{t_sx[1]} | 2: {t_s2[0]}-{t_s2[1]}")
-            if cb_gap: st.write(f"**Luckor (Överlever {p_gap:.1f}%):** 1: {t_g1[0]}-{t_g1[1]} | X: {t_gx[0]}-{t_gx[1]} | 2: {t_g2[0]}-{t_g2[1]}")
-            if cb_single: st.write(f"**Singlar (Överlever {p_sing:.1f}%):** 1: {t_sing1[0]}-{t_sing1[1]} | X: {t_singx[0]}-{t_singx[1]} | 2: {t_sing2[0]}-{t_sing2[1]}")
-            if cb_doublet: st.write(f"**Dubbletter (Överlever {p_dub:.1f}%):** 1: {t_dub1[0]}-{t_dub1[1]} | X: {t_dubx[0]}-{t_dubx[1]} | 2: {t_dub2[0]}-{t_dub2[1]}")
-            if cb_triplet: st.write(f"**Tripplar (Överlever {p_trip:.1f}%):** 1: {t_trip1[0]}-{t_trip1[1]} | X: {t_tripx[0]}-{t_tripx[1]} | 2: {t_trip2[0]}-{t_trip2[1]}")
-            if cb_occur: st.write(f"**Uppkomster (Överlever {p_occ:.1f}%):** 1: {t_occ1[0]}-{t_occ1[1]} | X: {t_occx[0]}-{t_occx[1]} | 2: {t_occ2[0]}-{t_occ2[1]}")
-            if cb_fat: st.write(f"**FAT (Överlever {p_fat:.1f}%):** F: {t_fatf[0]}-{t_fatf[1]} | A: {t_fata[0]}-{t_fata[1]} | T: {t_fatt[0]}-{t_fatt[1]}")
+            st.subheader(f"⚽ STRUKTUR ({c_s}%)")
+            if cb_base: st.write(f"**1X2:** 1: {c_ones[0]}-{c_ones[1]} | X: {c_draws[0]}-{c_draws[1]} | 2: {c_twos[0]}-{c_twos[1]}")
+            if cb_streak: st.write(f"**Sviter:** 1: {c_s1[0]}-{c_s1[1]} | X: {c_sx[0]}-{c_sx[1]} | 2: {c_s2[0]}-{c_s2[1]}")
+            if cb_gap: st.write(f"**Luckor:** 1: {c_g1[0]}-{c_g1[1]} | X: {c_gx[0]}-{c_gx[1]} | 2: {c_g2[0]}-{c_g2[1]}")
+            if cb_single: st.write(f"**Singlar:** 1: {c_sing1[0]}-{c_sing1[1]} | X: {c_singx[0]}-{c_singx[1]} | 2: {c_sing2[0]}-{c_sing2[1]} | Tot: {c_singtot[0]}-{c_singtot[1]}")
+            if cb_doublet: st.write(f"**Dubbletter:** 1: {c_dub1[0]}-{c_dub1[1]} | X: {c_dubx[0]}-{c_dubx[1]} | 2: {c_dub2[0]}-{c_dub2[1]} | Tot: {c_dubtot[0]}-{c_dubtot[1]}")
+            if cb_triplet: st.write(f"**Tripplar:** 1: {c_trip1[0]}-{c_trip1[1]} | X: {c_tripx[0]}-{c_tripx[1]} | 2: {c_trip2[0]}-{c_trip2[1]} | Tot: {c_triptot[0]}-{c_triptot[1]}")
+            if cb_occur: st.write(f"**Uppkomster:** 1: {c_occ1[0]}-{c_occ1[1]} | X: {c_occx[0]}-{c_occx[1]} | 2: {c_occ2[0]}-{c_occ2[1]} | Tot: {c_occtot[0]}-{c_occtot[1]}")
+            
+            st.markdown("---")
+            st.subheader("🧩 MAKRO GRUPPER (Krav: Minst 2 av 3)")
+            if cb_m_base: st.write(f"**1X2 (Överlever {p_base:.1f}%):** 1: {t_ones[0]}-{t_ones[1]} | X: {t_draws[0]}-{t_draws[1]} | 2: {t_twos[0]}-{t_twos[1]}")
+            if cb_m_streak: st.write(f"**Sviter (Överlever {p_streak:.1f}%):** 1: {t_s1[0]}-{t_s1[1]} | X: {t_sx[0]}-{t_sx[1]} | 2: {t_s2[0]}-{t_s2[1]}")
+            if cb_m_gap: st.write(f"**Luckor (Överlever {p_gap:.1f}%):** 1: {t_g1[0]}-{t_g1[1]} | X: {t_gx[0]}-{t_gx[1]} | 2: {t_g2[0]}-{t_g2[1]}")
+            if cb_m_single: st.write(f"**Singlar (Överlever {p_sing:.1f}%):** 1: {t_sing1[0]}-{t_sing1[1]} | X: {t_singx[0]}-{t_singx[1]} | 2: {t_sing2[0]}-{t_sing2[1]}")
+            if cb_m_doublet: st.write(f"**Dubbletter (Överlever {p_dub:.1f}%):** 1: {t_dub1[0]}-{t_dub1[1]} | X: {t_dubx[0]}-{t_dubx[1]} | 2: {t_dub2[0]}-{t_dub2[1]}")
+            if cb_m_triplet: st.write(f"**Tripplar (Överlever {p_trip:.1f}%):** 1: {t_trip1[0]}-{t_trip1[1]} | X: {t_tripx[0]}-{t_tripx[1]} | 2: {t_trip2[0]}-{t_trip2[1]}")
+            if cb_m_occur: st.write(f"**Uppkomster (Överlever {p_occ:.1f}%):** 1: {t_occ1[0]}-{t_occ1[1]} | X: {t_occx[0]}-{t_occx[1]} | 2: {t_occ2[0]}-{t_occ2[1]}")
+            if cb_m_fat: st.write(f"**FAT (Överlever {p_fat:.1f}%):** F: {t_fatf[0]}-{t_fatf[1]} | A: {t_fata[0]}-{t_fata[1]} | T: {t_fatt[0]}-{t_fatt[1]}")
 
-        # POÄNGBERÄKNINGEN UPPDATERAD MED 2-AV-3 LOGIKEN FÖR SOFT FILTERING
         mall_hits = 0
         for i in range(len(v_m)):
             pts = 0
-            if cb_base and (sum([t_ones[0] <= ones[i] <= t_ones[1], t_draws[0] <= draws[i] <= t_draws[1], t_twos[0] <= twos[i] <= t_twos[1]]) >= 2): pts += 1
-            if cb_streak and (sum([t_s1[0] <= s1[i] <= t_s1[1], t_sx[0] <= sx[i] <= t_sx[1], t_s2[0] <= s2[i] <= t_s2[1]]) >= 2): pts += 1
-            if cb_gap and (sum([t_g1[0] <= g1[i] <= t_g1[1], t_gx[0] <= gx[i] <= t_gx[1], t_g2[0] <= g2[i] <= t_g2[1]]) >= 2): pts += 1
-            if cb_single and (sum([t_sing1[0] <= sing1[i] <= t_sing1[1], t_singx[0] <= singx[i] <= t_singx[1], t_sing2[0] <= sing2[i] <= t_sing2[1]]) >= 2): pts += 1
-            if cb_doublet and (sum([t_dub1[0] <= dub1[i] <= t_dub1[1], t_dubx[0] <= dubx[i] <= t_dubx[1], t_dub2[0] <= dub2[i] <= t_dub2[1]]) >= 2): pts += 1
-            if cb_triplet and (sum([t_trip1[0] <= trip1[i] <= t_trip1[1], t_tripx[0] <= tripx[i] <= t_tripx[1], t_trip2[0] <= trip2[i] <= t_trip2[1]]) >= 2): pts += 1
-            if cb_occur and (sum([t_occ1[0] <= occ1[i] <= t_occ1[1], t_occx[0] <= occx[i] <= t_occx[1], t_occ2[0] <= occ2[i] <= t_occ2[1]]) >= 2): pts += 1
-            if cb_fat and (sum([t_fatf[0] <= fat_f[i] <= t_fatf[1], t_fata[0] <= fat_a[i] <= t_fata[1], t_fatt[0] <= fat_t[i] <= t_fatt[1]]) >= 2): pts += 1
             
+            # Poäng för Standard Struktur
+            if cb_base and (c_ones[0] <= ones[i] <= c_ones[1] and c_draws[0] <= draws[i] <= c_draws[1] and c_twos[0] <= twos[i] <= c_twos[1]): pts += 1
+            if cb_streak and (c_s1[0] <= s1[i] <= c_s1[1] and c_sx[0] <= sx[i] <= c_sx[1] and c_s2[0] <= s2[i] <= c_s2[1]): pts += 1
+            if cb_gap and (c_g1[0] <= g1[i] <= c_g1[1] and c_gx[0] <= gx[i] <= c_gx[1] and c_g2[0] <= g2[i] <= c_g2[1]): pts += 1
+            if cb_single and (c_sing1[0] <= sing1[i] <= c_sing1[1] and c_singx[0] <= singx[i] <= c_singx[1] and c_sing2[0] <= sing2[i] <= c_sing2[1] and c_singtot[0] <= sing_tot[i] <= c_singtot[1]): pts += 1
+            if cb_doublet and (c_dub1[0] <= dub1[i] <= c_dub1[1] and c_dubx[0] <= dubx[i] <= c_dubx[1] and c_dub2[0] <= dub2[i] <= c_dub2[1] and c_dubtot[0] <= dub_tot[i] <= c_dubtot[1]): pts += 1
+            if cb_triplet and (c_trip1[0] <= trip1[i] <= c_trip1[1] and c_tripx[0] <= tripx[i] <= c_tripx[1] and c_trip2[0] <= trip2[i] <= c_trip2[1] and c_triptot[0] <= trip_tot[i] <= c_triptot[1]): pts += 1
+            if cb_occur and (c_occ1[0] <= occ1[i] <= c_occ1[1] and c_occx[0] <= occx[i] <= c_occx[1] and c_occ2[0] <= occ2[i] <= c_occ2[1] and c_occtot[0] <= occ_tot[i] <= c_occtot[1]): pts += 1
+            
+            # Poäng för Makro Grupper (2 av 3)
+            if cb_m_base and (sum([t_ones[0] <= ones[i] <= t_ones[1], t_draws[0] <= draws[i] <= t_draws[1], t_twos[0] <= twos[i] <= t_twos[1]]) >= 2): pts += 1
+            if cb_m_streak and (sum([t_s1[0] <= s1[i] <= t_s1[1], t_sx[0] <= sx[i] <= t_sx[1], t_s2[0] <= s2[i] <= t_s2[1]]) >= 2): pts += 1
+            if cb_m_gap and (sum([t_g1[0] <= g1[i] <= t_g1[1], t_gx[0] <= gx[i] <= t_gx[1], t_g2[0] <= g2[i] <= t_g2[1]]) >= 2): pts += 1
+            if cb_m_single and (sum([t_sing1[0] <= sing1[i] <= t_sing1[1], t_singx[0] <= singx[i] <= t_singx[1], t_sing2[0] <= sing2[i] <= t_sing2[1]]) >= 2): pts += 1
+            if cb_m_doublet and (sum([t_dub1[0] <= dub1[i] <= t_dub1[1], t_dubx[0] <= dubx[i] <= t_dubx[1], t_dub2[0] <= dub2[i] <= t_dub2[1]]) >= 2): pts += 1
+            if cb_m_triplet and (sum([t_trip1[0] <= trip1[i] <= t_trip1[1], t_tripx[0] <= tripx[i] <= t_tripx[1], t_trip2[0] <= trip2[i] <= t_trip2[1]]) >= 2): pts += 1
+            if cb_m_occur and (sum([t_occ1[0] <= occ1[i] <= t_occ1[1], t_occx[0] <= occx[i] <= t_occx[1], t_occ2[0] <= occ2[i] <= t_occ2[1]]) >= 2): pts += 1
+            if cb_m_fat and (sum([t_fatf[0] <= fat_f[i] <= t_fatf[1], t_fata[0] <= fat_a[i] <= t_fata[1], t_fatt[0] <= fat_t[i] <= t_fatt[1]]) >= 2): pts += 1
+            
+            # Övriga Filter
+            if cb_fat and (c_fatf[0] <= fat_f[i] <= c_fatf[1] and c_fata[0] <= fat_a[i] <= c_fata[1] and c_fatt[0] <= fat_t[i] <= c_fatt[1] and c_fatsum[0] <= fat_sums[i] <= c_fatsum[1]): pts += 1
             if cb_u_favs and (c_u[0] <= u_wins[i] <= c_u[1]): pts += 1
             if cb_sft and (c_sft[0] <= sft_sums[i] <= c_sft[1]): pts += 1
             if cb_points and (c_points[0] <= points_vals[i] <= c_points[1]): pts += 1
@@ -719,38 +769,53 @@ if st.session_state.get('har_kort_analys') and input_text:
             for tr in all_possible_rows:
                 pts = 0
                 
-                # Exakta 2-av-3 filter-reglerna appliceras nu direkt på raden i uträkningen!
-                if cb_base and (sum([t_ones[0] <= tr.count('1') <= t_ones[1], t_draws[0] <= tr.count('X') <= t_draws[1], t_twos[0] <= tr.count('2') <= t_twos[1]]) >= 2): pts += 1
-                
+                # Standard Struktur
+                if cb_base and (c_ones[0] <= tr.count('1') <= c_ones[1] and c_draws[0] <= tr.count('X') <= c_draws[1] and c_twos[0] <= tr.count('2') <= c_twos[1]): pts += 1
                 if cb_streak:
                     s1_c, sx_c, s2_c, _ = get_streaks(tr)
-                    if (sum([t_s1[0] <= s1_c <= t_s1[1], t_sx[0] <= sx_c <= t_sx[1], t_s2[0] <= s2_c <= t_s2[1]]) >= 2): pts += 1
-                    
+                    if (c_s1[0] <= s1_c <= c_s1[1] and c_sx[0] <= sx_c <= c_sx[1] and c_s2[0] <= s2_c <= c_s2[1]): pts += 1
                 if cb_gap:
                     g1_c, gx_c, g2_c, _ = get_gaps(tr)
-                    if (sum([t_g1[0] <= g1_c <= t_g1[1], t_gx[0] <= gx_c <= t_gx[1], t_g2[0] <= g2_c <= t_g2[1]]) >= 2): pts += 1
-                    
+                    if (c_g1[0] <= g1_c <= c_g1[1] and c_gx[0] <= gx_c <= c_gx[1] and c_g2[0] <= g2_c <= c_g2[1]): pts += 1
                 if cb_single:
+                    si1_c, six_c, si2_c, singtot_c, _ = get_singles(tr)
+                    if (c_sing1[0] <= si1_c <= c_sing1[1] and c_singx[0] <= six_c <= c_singx[1] and c_sing2[0] <= si2_c <= c_sing2[1] and c_singtot[0] <= singtot_c <= c_singtot[1]): pts += 1
+                if cb_doublet:
+                    d1_c, dx_c, d2_c, dubtot_c, _ = get_doublets(tr)
+                    if (c_dub1[0] <= d1_c <= c_dub1[1] and c_dubx[0] <= dx_c <= c_dubx[1] and c_dub2[0] <= d2_c <= c_dub2[1] and c_dubtot[0] <= dubtot_c <= c_dubtot[1]): pts += 1
+                if cb_triplet:
+                    t1_c, tx_c, t2_c, triptot_c, _ = get_triplets(tr)
+                    if (c_trip1[0] <= t1_c <= c_trip1[1] and c_tripx[0] <= tx_c <= c_tripx[1] and c_trip2[0] <= t2_c <= c_trip2[1] and c_triptot[0] <= triptot_c <= c_triptot[1]): pts += 1
+                if cb_occur:
+                    o1_c, ox_c, o2_c, occtot_c, _ = get_occurrences(tr)
+                    if (c_occ1[0] <= o1_c <= c_occ1[1] and c_occx[0] <= ox_c <= c_occx[1] and c_occ2[0] <= o2_c <= c_occ2[1] and c_occtot[0] <= occtot_c <= c_occtot[1]): pts += 1
+                
+                # Makro Grupper (2 av 3)
+                if cb_m_base and (sum([t_ones[0] <= tr.count('1') <= t_ones[1], t_draws[0] <= tr.count('X') <= t_draws[1], t_twos[0] <= tr.count('2') <= t_twos[1]]) >= 2): pts += 1
+                if cb_m_streak:
+                    s1_c, sx_c, s2_c, _ = get_streaks(tr)
+                    if (sum([t_s1[0] <= s1_c <= t_s1[1], t_sx[0] <= sx_c <= t_sx[1], t_s2[0] <= s2_c <= t_s2[1]]) >= 2): pts += 1
+                if cb_m_gap:
+                    g1_c, gx_c, g2_c, _ = get_gaps(tr)
+                    if (sum([t_g1[0] <= g1_c <= t_g1[1], t_gx[0] <= gx_c <= t_gx[1], t_g2[0] <= g2_c <= t_g2[1]]) >= 2): pts += 1
+                if cb_m_single:
                     si1_c, six_c, si2_c, _, _ = get_singles(tr)
                     if (sum([t_sing1[0] <= si1_c <= t_sing1[1], t_singx[0] <= six_c <= t_singx[1], t_sing2[0] <= si2_c <= t_sing2[1]]) >= 2): pts += 1
-                    
-                if cb_doublet:
+                if cb_m_doublet:
                     d1_c, dx_c, d2_c, _, _ = get_doublets(tr)
                     if (sum([t_dub1[0] <= d1_c <= t_dub1[1], t_dubx[0] <= dx_c <= t_dubx[1], t_dub2[0] <= d2_c <= t_dub2[1]]) >= 2): pts += 1
-                    
-                if cb_triplet:
+                if cb_m_triplet:
                     t1_c, tx_c, t2_c, _, _ = get_triplets(tr)
                     if (sum([t_trip1[0] <= t1_c <= t_trip1[1], t_tripx[0] <= tx_c <= t_tripx[1], t_trip2[0] <= t2_c <= t_trip2[1]]) >= 2): pts += 1
-                    
-                if cb_occur:
+                if cb_m_occur:
                     o1_c, ox_c, o2_c, _, _ = get_occurrences(tr)
                     if (sum([t_occ1[0] <= o1_c <= t_occ1[1], t_occx[0] <= ox_c <= t_occx[1], t_occ2[0] <= o2_c <= t_occ2[1]]) >= 2): pts += 1
-                    
-                if cb_fat:
-                    f_c, a_c, t_c, _ = get_fat(tr, input_compare)
+                if cb_m_fat:
+                    f_c, a_c, t_c, fsum_c = get_fat(tr, input_compare)
                     if (sum([t_fatf[0] <= f_c <= t_fatf[1], t_fata[0] <= a_c <= t_fata[1], t_fatt[0] <= t_c <= t_fatt[1]]) >= 2): pts += 1
 
-                # Resten av de vanliga värde-filtren
+                # Övriga Värde-filter
+                if cb_fat and (c_fatf[0] <= get_fat(tr, input_compare)[0] <= c_fatf[1] and c_fata[0] <= get_fat(tr, input_compare)[1] <= c_fata[1] and c_fatt[0] <= get_fat(tr, input_compare)[2] <= c_fatt[1] and c_fatsum[0] <= get_fat(tr, input_compare)[3] <= c_fatsum[1]): pts += 1
                 if cb_u_favs and (c_u[0] <= get_top_n_favs_wins(tr, input_compare, slider_u_count) <= c_u[1]): pts += 1
                 if cb_sft and (c_sft[0] <= get_sft_sum(tr, input_compare) <= c_sft[1]): pts += 1
                 if cb_points and (c_points[0] <= get_rank_points(tr, input_compare) <= c_points[1]): pts += 1
@@ -815,7 +880,7 @@ if st.session_state.get('har_kort_analys') and input_text:
 
         smart_plot([r for r in ai_ranks if r > 0], 1, 'skyblue', 'AI-Rank', 'AI-Rank', cb_aimatrix, active_ai_min, active_ai_max)
         smart_plot(sft_sums, 2, 'coral', 'SFT Summa', 'SFT Summa', cb_sft, c_sft[0], c_sft[1])
-        smart_plot(fat_sums, 3, 'gold', 'FAT Summa', 'FAT Summa', cb_fat, t_fatf[0], t_fatt[1]) # Uppdaterad för FAT
+        smart_plot(fat_sums, 3, 'gold', 'FAT Summa', 'FAT Summa', cb_fat, c_fatsum[0], c_fatsum[1]) 
         smart_plot(points_vals, 4, 'mediumpurple', 'Poängfilter', 'Poäng', cb_points, c_points[0], c_points[1])
         smart_plot(minus_sums, 5, 'tan', '100-minus Summa', '100-minus', cb_100minus, c_minus[0], c_minus[1])
         smart_plot(rank24_sums, 6, 'lightpink', 'Rank Summa', 'Rank Summa', cb_rank24, c_rank24[0], c_rank24[1])
