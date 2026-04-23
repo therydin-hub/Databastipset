@@ -695,14 +695,37 @@ if st.session_state.get('har_kort_analys') and input_text:
         # ==========================================
         st.markdown("---")
         st.subheader("🧩 Makro-Villkor: Teckenfördelning")
-        st.markdown("Istället för att kräva att raden har ett perfekt antal av *både* 1:or, X och 2:or, kan du ställa in ett villkor där **minst 2 av 3** måste stämma. Detta tillåter att en teckensort spårar ur (t.ex. en extrem 'kryss-omgång') utan att ditt system spricker, så länge resten av kupongen är normal.")
+        st.markdown("Eftersom det räcker att **2 av 3** sitter, använder vi extremt tighta intervaller (den absolut vanligaste 'peaken' i historiken) för att skala bort så många dyra och dåliga rader som möjligt.")
         
-        # Räkna ut hur många historiska rader som klarar 2 av 3-kravet
+        # Funktion för att hitta det tätaste fönstret (max spridning på 2 steg för 13 rätt, 1 steg för 8 rätt)
+        max_spread = 2 if antal_matcher == 13 else 1
+        
+        def get_peak_interval(val_list, max_spread):
+            if not val_list: return (0, 0)
+            v_min, v_max = min(val_list), max(val_list)
+            best_int = (v_min, v_max)
+            best_count = -1
+            
+            # Skjut ett fönster över all data och hitta där flest omgångar hamnar
+            for start_val in range(v_min, v_max + 1):
+                end_val = start_val + max_spread
+                count = sum(1 for v in val_list if start_val <= v <= end_val)
+                if count > best_count:
+                    best_count = count
+                    best_int = (start_val, end_val)
+            return best_int
+
+        # Hämta de nyskapade, supersnäva intervallerna
+        t_ones = get_peak_interval(ones, max_spread)
+        t_draws = get_peak_interval(draws, max_spread)
+        t_twos = get_peak_interval(twos, max_spread)
+
+        # Räkna ut hur många historiska rader som klarar 2 av 3-kravet med dessa snäva gränser
         macro_hits = 0
         for i in range(len(v_m)):
-            req1 = 1 if (c_ones[0] <= ones[i] <= c_ones[1]) else 0
-            reqx = 1 if (c_draws[0] <= draws[i] <= c_draws[1]) else 0
-            req2 = 1 if (c_twos[0] <= twos[i] <= c_twos[1]) else 0
+            req1 = 1 if (t_ones[0] <= ones[i] <= t_ones[1]) else 0
+            reqx = 1 if (t_draws[0] <= draws[i] <= t_draws[1]) else 0
+            req2 = 1 if (t_twos[0] <= twos[i] <= t_twos[1]) else 0
             
             if (req1 + reqx + req2) >= 2:
                 macro_hits += 1
@@ -710,9 +733,9 @@ if st.session_state.get('har_kort_analys') and input_text:
         macro_prob = (macro_hits / len(v_m)) * 100 if len(v_m) > 0 else 0
 
         st.info(f"⚖️ **Krav: Minst 2 av följande 3 påståenden måste stämma på raden:**\n\n"
-                f"1️⃣ **Antal 1:or** ska vara mellan **{c_ones[0]} och {c_ones[1]}** st.\n\n"
-                f"✖️ **Antal X** ska vara mellan **{c_draws[0]} och {c_draws[1]}** st.\n\n"
-                f"2️⃣ **Antal 2:or** ska vara mellan **{c_twos[0]} och {c_twos[1]}** st.\n\n"
+                f"1️⃣ **Antal 1:or** ska vara exakt **{t_ones[0]} till {t_ones[1]}** st.\n\n"
+                f"✖️ **Antal X** ska vara exakt **{t_draws[0]} till {t_draws[1]}** st.\n\n"
+                f"2️⃣ **Antal 2:or** ska vara exakt **{t_twos[0]} till {t_twos[1]}** st.\n\n"
                 f"📊 **Historisk chans att kupongen överlever detta villkor: {macro_prob:.1f}%**")
         
         if antal_matcher == 8:
