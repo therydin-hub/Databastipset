@@ -495,7 +495,9 @@ if st.session_state.get('har_kort_analys') and input_text:
         # --- MAKRO STRUKTUR (Dynamiskt via Slider) ---
         def get_macro_intervals(l1, l2, l3, total_rows):
             if total_rows == 0 or not l1 or not l2 or not l3: return (0,0), (0,0), (0,0), 0.0
-            for cov in range(10, 101, 1): 
+            
+            # Börjar från 1% kärna och växer jämnt och symmetriskt
+            for cov in range(1, 101, 1): 
                 i1 = get_best_interval(l1, cov)
                 i2 = get_best_interval(l2, cov)
                 i3 = get_best_interval(l3, cov)
@@ -504,8 +506,11 @@ if st.session_state.get('har_kort_analys') and input_text:
                                                             (1 if i2[0]<=l2[i]<=i2[1] else 0) + 
                                                             (1 if i3[0]<=l3[i]<=i3[1] else 0)) >= 2)
                 prob = (hits / total_rows) * 100
+                
+                # Stannar precis när "2 av 3"-kravet nuddar ditt inställda mål i slidern!
                 if prob >= slider_macro_target:
                     return i1, i2, i3, prob
+                    
             return get_best_interval(l1, 100), get_best_interval(l2, 100), get_best_interval(l3, 100), 100.0
 
         n_rows = len(v_m)
