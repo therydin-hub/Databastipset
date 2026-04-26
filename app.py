@@ -578,33 +578,46 @@ if st.session_state.get('har_kort_analys') and input_text:
                 
                 # --- Kalkylator för omedelbar feedback på reduceringen ---
                 if antal_matcher == 8:
-                    sm_survivors = 0
-                    all_8_rows = [''.join(tup) for tup in itertools.product(['1','X','2'], repeat=8)]
-                    for tr in all_8_rows:
-                        g_pass = 0
-                        c1, cx, c2 = tr.count('1'), tr.count('X'), tr.count('2')
-                        s1_c, sx_c, s2_c, _ = get_streaks(tr)
-                        g1_c, gx_c, g2_c, _ = get_gaps(tr)
-                        si1_c, six_c, si2_c, _, _ = get_singles(tr)
-                        d1_c, dx_c, d2_c, _, _ = get_doublets(tr)
-                        t1_c, tx_c, t2_c, _, _ = get_triplets(tr)
-                        o1_c, ox_c, o2_c, _, _ = get_occurrences(tr)
-                        f_c, a_c, t_c, _ = get_fat(tr, input_compare)
+                    test_rows = [''.join(tup) for tup in itertools.product(['1','X','2'], repeat=8)]
+                    total_test = 6561
+                    is_exact = True
+                else:
+                    # Blixtsnabb Monte Carlo-simulering för 13 matcher
+                    mc_matrix = np.random.choice(['1', 'X', '2'], size=(10000, 13))
+                    test_rows = [''.join(row) for row in mc_matrix]
+                    total_test = 10000
+                    is_exact = False
+                    
+                sm_survivors = 0
+                for tr in test_rows:
+                    g_pass = 0
+                    c1, cx, c2 = tr.count('1'), tr.count('X'), tr.count('2')
+                    s1_c, sx_c, s2_c, _ = get_streaks(tr)
+                    g1_c, gx_c, g2_c, _ = get_gaps(tr)
+                    si1_c, six_c, si2_c, _, _ = get_singles(tr)
+                    d1_c, dx_c, d2_c, _, _ = get_doublets(tr)
+                    t1_c, tx_c, t2_c, _, _ = get_triplets(tr)
+                    o1_c, ox_c, o2_c, _, _ = get_occurrences(tr)
+                    f_c, a_c, t_c, _ = get_fat(tr, input_compare)
+                    
+                    if sum([b['1'][0] <= c1 <= b['1'][1], b['X'][0] <= cx <= b['X'][1], b['2'][0] <= c2 <= b['2'][1]]) >= 2: g_pass += 1
+                    if sum([b['s1'][0] <= s1_c <= b['s1'][1], b['sx'][0] <= sx_c <= b['sx'][1], b['s2'][0] <= s2_c <= b['s2'][1]]) >= 2: g_pass += 1
+                    if sum([b['g1'][0] <= g1_c <= b['g1'][1], b['gx'][0] <= gx_c <= b['gx'][1], b['g2'][0] <= g2_c <= b['g2'][1]]) >= 2: g_pass += 1
+                    if sum([b['si1'][0] <= si1_c <= b['si1'][1], b['six'][0] <= six_c <= b['six'][1], b['si2'][0] <= si2_c <= b['si2'][1]]) >= 2: g_pass += 1
+                    if sum([b['d1'][0] <= d1_c <= b['d1'][1], b['dx'][0] <= dx_c <= b['dx'][1], b['d2'][0] <= d2_c <= b['d2'][1]]) >= 2: g_pass += 1
+                    if sum([b['t1'][0] <= t1_c <= b['t1'][1], b['tx'][0] <= tx_c <= b['tx'][1], b['t2'][0] <= t2_c <= b['t2'][1]]) >= 2: g_pass += 1
+                    if sum([b['o1'][0] <= o1_c <= b['o1'][1], b['ox'][0] <= ox_c <= b['ox'][1], b['o2'][0] <= o2_c <= b['o2'][1]]) >= 2: g_pass += 1
+                    if sum([b['f'][0] <= f_c <= b['f'][1], b['a'][0] <= a_c <= b['a'][1], b['t'][0] <= t_c <= b['t'][1]]) >= 2: g_pass += 1
+                    
+                    if g_pass >= slider_super_groups:
+                        sm_survivors += 1
                         
-                        if sum([b['1'][0] <= c1 <= b['1'][1], b['X'][0] <= cx <= b['X'][1], b['2'][0] <= c2 <= b['2'][1]]) >= 2: g_pass += 1
-                        if sum([b['s1'][0] <= s1_c <= b['s1'][1], b['sx'][0] <= sx_c <= b['sx'][1], b['s2'][0] <= s2_c <= b['s2'][1]]) >= 2: g_pass += 1
-                        if sum([b['g1'][0] <= g1_c <= b['g1'][1], b['gx'][0] <= gx_c <= b['gx'][1], b['g2'][0] <= g2_c <= b['g2'][1]]) >= 2: g_pass += 1
-                        if sum([b['si1'][0] <= si1_c <= b['si1'][1], b['six'][0] <= six_c <= b['six'][1], b['si2'][0] <= si2_c <= b['si2'][1]]) >= 2: g_pass += 1
-                        if sum([b['d1'][0] <= d1_c <= b['d1'][1], b['dx'][0] <= dx_c <= b['dx'][1], b['d2'][0] <= d2_c <= b['d2'][1]]) >= 2: g_pass += 1
-                        if sum([b['t1'][0] <= t1_c <= b['t1'][1], b['tx'][0] <= tx_c <= b['tx'][1], b['t2'][0] <= t2_c <= b['t2'][1]]) >= 2: g_pass += 1
-                        if sum([b['o1'][0] <= o1_c <= b['o1'][1], b['ox'][0] <= ox_c <= b['ox'][1], b['o2'][0] <= o2_c <= b['o2'][1]]) >= 2: g_pass += 1
-                        if sum([b['f'][0] <= f_c <= b['f'][1], b['a'][0] <= a_c <= b['a'][1], b['t'][0] <= t_c <= b['t'][1]]) >= 2: g_pass += 1
-                        
-                        if g_pass >= slider_super_groups:
-                            sm_survivors += 1
-                            
-                    red_pct = 100 - ((sm_survivors / 6561) * 100)
-                    st.success(f"✂️ **Omedelbar effekt:** Bara detta Super-Makro ensamt slaktar bort **{red_pct:.1f}%** av de matematiska raderna! (Kvar: {sm_survivors} av 6561)")
+                red_pct = 100 - ((sm_survivors / total_test) * 100)
+                if is_exact:
+                    st.success(f"✂️ **Omedelbar effekt:** Bara detta Super-Makro ensamt slaktar bort **{red_pct:.1f}%** av de matematiska raderna! (Kvar: {sm_survivors} av 6 561)")
+                else:
+                    est_rader = int(1594323 * (sm_survivors / total_test))
+                    st.success(f"✂️ **Omedelbar effekt (AI-Estimat):** Bara detta Super-Makro ensamt slaktar bort ca **{red_pct:.1f}%** av de matematiska raderna! (Kvar: ca {est_rader:,} av 1 594 323 rader)".replace(',', ' '))
 
         mall_hits = 0
         for i in range(len(v_m)):
