@@ -523,48 +523,67 @@ if st.session_state.get('har_kort_analys') and input_text:
         st.info(f"📈 **HISTORISK TRÄFFSÄKERHET:** {mall_hits} av {len(v_m)} rader ({mall_hits/len(v_m)*100:.1f}%) fick tillräckligt med poäng ({slider_pass_req} poäng) för att passera Soft-filtret.")
 
         # ==========================================
-        # TECKENFÖRDELNING (EXAKTA ANTAL)
+        # TECKENFÖRDELNING (2-NUMMERS INTERVALL + 2 AV 3)
         # ==========================================
         st.markdown("---")
-        st.subheader("🧩 Dagens Bästa Teckenfördelning (Exakta Antal)")
-        st.markdown("Här analyserar AI:n vilka **exakta helhetskombinationer** av tecken som historiskt sett är allra vanligast för just denna typ av omgång. Perfekt som en stenhård mall!")
+        st.subheader("🧩 Topp 5: Smarta 2-av-3 Mallar (Två nummer)")
+        st.markdown("Du hade helt rätt! Genom att låta varje tecken ha ett intervall på **två nummer** (t.ex. 4-5) häver vi den matematiska låsningen. Här har AI:n testat alla kombinationer för att hitta de överlägset bästa **2-av-3-ramarna**.")
         
-        dist_1x2 = []
-        dist_fat = []
+        def get_top_2of3_combos(l1, l2, l3, total_rows, spread=1):
+            if total_rows == 0: return []
+            intervals = [(i, i+spread) for i in range(antal_matcher)]
+            combos_scored = []
+            
+            for i1 in intervals:
+                for i2 in intervals:
+                    for i3 in intervals:
+                        # Enkel rimlighetskoll (summan av min- och maxvärdena måste kunna rymma antalet matcher)
+                        if i1[0] + i2[0] + i3[0] > antal_matcher: continue
+                        if i1[1] + i2[1] + i3[1] < antal_matcher: continue
+                        
+                        hits = sum(1 for k in range(total_rows) if ((1 if i1[0] <= l1[k] <= i1[1] else 0) + 
+                                                                    (1 if i2[0] <= l2[k] <= i2[1] else 0) + 
+                                                                    (1 if i3[0] <= l3[k] <= i3[1] else 0)) >= 2)
+                        
+                        if hits > 0:
+                            combos_scored.append({
+                                'combo': f"{i1[0]}-{i1[1]} st 1:or | {i2[0]}-{i2[1]} st X | {i3[0]}-{i3[1]} st 2:or",
+                                'hits': hits,
+                                'prob': (hits/total_rows)*100
+                            })
+                            
+            # Sortera på flest träffar
+            combos_scored.sort(key=lambda x: x['hits'], reverse=True)
+            return combos_scored[:5]
+
+        # Hämta exakta värden från historiken
+        l_ones = [r.count('1') for r in v_m['Correct_Row'] if len(r) == antal_matcher]
+        l_draws = [r.count('X') for r in v_m['Correct_Row'] if len(r) == antal_matcher]
+        l_twos = [r.count('2') for r in v_m['Correct_Row'] if len(r) == antal_matcher]
+        
+        l_f, l_a, l_t = [], [], []
         for _, row in v_m.iterrows():
-            r = row['Correct_Row']
-            p = row['Prob_Vector']
-            if len(r) == antal_matcher:
-                # 1X2 Fördelning
-                dist_1x2.append(f"{r.count('1')} st 1:or | {r.count('X')} st X | {r.count('2')} st 2:or")
+            if len(row['Correct_Row']) == antal_matcher:
+                f, a, t, _ = get_fat(row['Correct_Row'], row['Prob_Vector'])
+                l_f.append(f); l_a.append(a); l_t.append(t)
                 
-                # FAT Fördelning
-                f, a, t, _ = get_fat(r, p)
-                dist_fat.append(f"{f} st Fav | {a} st Andra | {t} st Skräll")
-                
-        total_valid = len(dist_1x2)
+        total_valid = len(l_ones)
+        
         if total_valid > 0:
             col_d1, col_d2 = st.columns(2)
             
             with col_d1:
-                st.markdown("⚽ **Topp 5: Fördelning 1X2**")
-                counts_1x2 = pd.Series(dist_1x2).value_counts().head(5)
-                sum_1x2 = 0
-                for dist, count in counts_1x2.items():
-                    chans = (count / total_valid) * 100
-                    sum_1x2 += chans
-                    st.write(f"**{dist}** ➡️ **{chans:.1f}%** ({count} st)")
-                st.info(f"💡 **Om du kräver att 1 av dessa 5 ska sitta, täcker du {sum_1x2:.1f}% av historiken.**")
+                st.markdown("⚽ **Topp 5: 1X2-ramar (Krav: 2 av 3)**")
+                top_1x2 = get_top_2of3_combos(l_ones, l_draws, l_twos, total_valid, spread=1)
+                for item in top_1x2:
+                    st.write(f"**{item['combo']}** ➡️ **{item['prob']:.1f}%** ({item['hits']} st)")
                     
             with col_d2:
-                st.markdown("🧬 **Topp 5: Fördelning FAT**")
-                counts_fat = pd.Series(dist_fat).value_counts().head(5)
-                sum_fat = 0
-                for dist, count in counts_fat.items():
-                    chans = (count / total_valid) * 100
-                    sum_fat += chans
-                    st.write(f"**{dist}** ➡️ **{chans:.1f}%** ({count} st)")
-                st.info(f"💡 **Om du kräver att 1 av dessa 5 ska sitta, täcker du {sum_fat:.1f}% av historiken.**")
+                st.markdown("🧬 **Topp 5: FAT-ramar (Krav: 2 av 3)**")
+                top_fat = get_top_2of3_combos(l_f, l_a, l_t, total_valid, spread=1)
+                for item in top_fat:
+                    combo_str = item['combo'].replace('1:or', 'Fav').replace('st X', 'st Andra').replace('2:or', 'Skräll')
+                    st.write(f"**{combo_str}** ➡️ **{item['prob']:.1f}%** ({item['hits']} st)")
 
         # ==========================================
         # ORIGINAL: FAT-SEKVENSER
