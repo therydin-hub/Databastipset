@@ -342,10 +342,13 @@ with st.sidebar:
     slider_top_n = st.slider("Antal historiska matcher att hämta", 5, 100, 30, step=5)
     slider_core_val = st.slider("Kärna % (Värde & Svårighet)", 40, 100, 90, step=5)
     slider_core_str = st.slider("Kärna % (Struktur & Tecken)", 40, 100, 100, step=5)
-    slider_macro_target = st.slider("Målsättning Super-Makro (2 av 8) %", 40, 100, 90, step=5)
-    slider_u_count = st.slider("Antal Topp-Favoriter (U-tecken)", 1, antal_matcher, min(3, antal_matcher), step=1)
+    
+    st.subheader("Makro & Super-Makro")
+    slider_macro_target = st.slider("Målsättning Procent %", 40, 100, 90, step=5)
+    slider_super_groups = st.slider("Super-Makro: Minst antal grupper (av 8)", 1, 8, 4, step=1)
     
     st.subheader("Avancerade Filter")
+    slider_u_count = st.slider("Antal Topp-Favoriter (U-tecken)", 1, antal_matcher, min(3, antal_matcher), step=1)
     p_opts = [0, 500, 1000, 2500, 5000, 10000, 25000, 50000, 75000, 100000, 250000, 500000, 750000, 1000000, 2500000, 5000000, 10000000]
     slider_payout = st.select_slider("Utdelnings-krav (kr)", options=p_opts, value=(0, p_opts[-1]))
     
@@ -369,7 +372,7 @@ with st.sidebar:
     cb_occur = st.checkbox("Uppkomster", value=True)
     
     st.markdown("**Super-Makro:**")
-    cb_super_macro = st.checkbox("Super-Makro (Minst 2 av 8 Grupper)", value=True)
+    cb_super_macro = st.checkbox(f"Super-Makro (Minst {slider_super_groups} av 8 Grupper)", value=True)
     
     cb_aimatrix = st.checkbox("AI-Matrix Rank", value=True)
     cb_manual_ai_rank = st.checkbox("Styr AI-Rank manuellt", value=False)
@@ -484,8 +487,8 @@ if st.session_state.get('har_kort_analys') and input_text:
         active_ai_min, active_ai_max = slider_ai_rank if cb_manual_ai_rank else c_ai_rank
         ai_txt = "AI-Rank (MANUELL)" if cb_manual_ai_rank else f"AI-Rank (AUTO {c_v}%)"
 
-        # --- SUPER-MAKRO (2 av 8 grupper ska sitta, 3 av 3 internt) ---
-        def get_super_macro_bounds(total_rows, target_prob):
+        # --- SUPER-MAKRO (X av 8 grupper ska sitta, 2 av 3 internt) ---
+        def get_super_macro_bounds(total_rows, target_prob, req_groups):
             lists_dict = {
                 '1': ones, 'X': draws, '2': twos,
                 's1': s1, 'sx': sx, 's2': s2,
@@ -514,16 +517,18 @@ if st.session_state.get('har_kort_analys') and input_text:
                 hits = 0
                 for i in range(total_rows):
                     g_pass = 0
-                    if b['1'][0] <= ones[i] <= b['1'][1] and b['X'][0] <= draws[i] <= b['X'][1] and b['2'][0] <= twos[i] <= b['2'][1]: g_pass += 1
-                    if b['s1'][0] <= s1[i] <= b['s1'][1] and b['sx'][0] <= sx[i] <= b['sx'][1] and b['s2'][0] <= s2[i] <= b['s2'][1]: g_pass += 1
-                    if b['g1'][0] <= g1[i] <= b['g1'][1] and b['gx'][0] <= gx[i] <= b['gx'][1] and b['g2'][0] <= g2[i] <= b['g2'][1]: g_pass += 1
-                    if b['si1'][0] <= sing1[i] <= b['si1'][1] and b['six'][0] <= singx[i] <= b['six'][1] and b['si2'][0] <= sing2[i] <= b['si2'][1]: g_pass += 1
-                    if b['d1'][0] <= dub1[i] <= b['d1'][1] and b['dx'][0] <= dubx[i] <= b['dx'][1] and b['d2'][0] <= dub2[i] <= b['d2'][1]: g_pass += 1
-                    if b['t1'][0] <= trip1[i] <= b['t1'][1] and b['tx'][0] <= tripx[i] <= b['tx'][1] and b['t2'][0] <= trip2[i] <= b['t2'][1]: g_pass += 1
-                    if b['o1'][0] <= occ1[i] <= b['o1'][1] and b['ox'][0] <= occx[i] <= b['ox'][1] and b['o2'][0] <= occ2[i] <= b['o2'][1]: g_pass += 1
-                    if b['f'][0] <= fat_f[i] <= b['f'][1] and b['a'][0] <= fat_a[i] <= b['a'][1] and b['t'][0] <= fat_t[i] <= b['t'][1]: g_pass += 1
+                    # 2 av 3 internt krav per grupp
+                    if sum([b['1'][0] <= ones[i] <= b['1'][1], b['X'][0] <= draws[i] <= b['X'][1], b['2'][0] <= twos[i] <= b['2'][1]]) >= 2: g_pass += 1
+                    if sum([b['s1'][0] <= s1[i] <= b['s1'][1], b['sx'][0] <= sx[i] <= b['sx'][1], b['s2'][0] <= s2[i] <= b['s2'][1]]) >= 2: g_pass += 1
+                    if sum([b['g1'][0] <= g1[i] <= b['g1'][1], b['gx'][0] <= gx[i] <= b['gx'][1], b['g2'][0] <= g2[i] <= b['g2'][1]]) >= 2: g_pass += 1
+                    if sum([b['si1'][0] <= sing1[i] <= b['si1'][1], b['six'][0] <= singx[i] <= b['six'][1], b['si2'][0] <= sing2[i] <= b['si2'][1]]) >= 2: g_pass += 1
+                    if sum([b['d1'][0] <= dub1[i] <= b['d1'][1], b['dx'][0] <= dubx[i] <= b['dx'][1], b['d2'][0] <= dub2[i] <= b['d2'][1]]) >= 2: g_pass += 1
+                    if sum([b['t1'][0] <= trip1[i] <= b['t1'][1], b['tx'][0] <= tripx[i] <= b['tx'][1], b['t2'][0] <= trip2[i] <= b['t2'][1]]) >= 2: g_pass += 1
+                    if sum([b['o1'][0] <= occ1[i] <= b['o1'][1], b['ox'][0] <= occx[i] <= b['ox'][1], b['o2'][0] <= occ2[i] <= b['o2'][1]]) >= 2: g_pass += 1
+                    if sum([b['f'][0] <= fat_f[i] <= b['f'][1], b['a'][0] <= fat_a[i] <= b['a'][1], b['t'][0] <= fat_t[i] <= b['t'][1]]) >= 2: g_pass += 1
                     
-                    if g_pass >= 2: hits += 1
+                    # Totalt antal grupper som måste sitta (från slider)
+                    if g_pass >= req_groups: hits += 1
                     
                 prob = (hits / total_rows) * 100
                 if prob >= target_prob:
@@ -531,7 +536,7 @@ if st.session_state.get('har_kort_analys') and input_text:
             return b, 100.0
 
         n_rows = len(v_m)
-        sm_bounds, sm_prob = get_super_macro_bounds(n_rows, slider_macro_target)
+        sm_bounds, sm_prob = get_super_macro_bounds(n_rows, slider_macro_target, slider_super_groups)
 
         st.markdown("---")
         st.header(f"📋 VECKANS MALL ({spelform})")
@@ -560,8 +565,8 @@ if st.session_state.get('har_kort_analys') and input_text:
             if cb_occur: st.write(f"**Uppkomster:** 1: {c_occ1[0]}-{c_occ1[1]} | X: {c_occx[0]}-{c_occx[1]} | 2: {c_occ2[0]}-{c_occ2[1]} | Tot: {c_occtot[0]}-{c_occtot[1]}")
             
             st.markdown("---")
-            st.subheader("🧩 SUPER-MAKRO (Villkor: Minst 2 av 8 grupper)")
-            st.markdown(f"*Samtliga 3 interna tecken i en grupp måste sitta för att gruppen ska räknas som 'träffad'. Överlever **{sm_prob:.1f}%**.*")
+            st.subheader(f"🧩 SUPER-MAKRO (Krav: Minst {slider_super_groups} av 8 grupper)")
+            st.markdown(f"*Minst 2 av 3 interna tecken i en grupp måste sitta för att gruppen ska räknas som 'träffad'. Överlever **{sm_prob:.1f}%**.*")
             if cb_super_macro:
                 b = sm_bounds
                 st.write(f"⚽ **Grp 1 (1X2):** 1: {b['1'][0]}-{b['1'][1]} | X: {b['X'][0]}-{b['X'][1]} | 2: {b['2'][0]}-{b['2'][1]}")
@@ -586,19 +591,19 @@ if st.session_state.get('har_kort_analys') and input_text:
             if cb_triplet and (c_trip1[0] <= trip1[i] <= c_trip1[1] and c_tripx[0] <= tripx[i] <= c_tripx[1] and c_trip2[0] <= trip2[i] <= c_trip2[1] and c_triptot[0] <= trip_tot[i] <= c_triptot[1]): pts += 1
             if cb_occur and (c_occ1[0] <= occ1[i] <= c_occ1[1] and c_occx[0] <= occx[i] <= c_occx[1] and c_occ2[0] <= occ2[i] <= c_occ2[1] and c_occtot[0] <= occ_tot[i] <= c_occtot[1]): pts += 1
             
-            # Poäng för Super-Makro (2 av 8 grupper)
+            # Poäng för Super-Makro
             if cb_super_macro:
                 g_pass = 0
                 b = sm_bounds
-                if b['1'][0] <= ones[i] <= b['1'][1] and b['X'][0] <= draws[i] <= b['X'][1] and b['2'][0] <= twos[i] <= b['2'][1]: g_pass += 1
-                if b['s1'][0] <= s1[i] <= b['s1'][1] and b['sx'][0] <= sx[i] <= b['sx'][1] and b['s2'][0] <= s2[i] <= b['s2'][1]: g_pass += 1
-                if b['g1'][0] <= g1[i] <= b['g1'][1] and b['gx'][0] <= gx[i] <= b['gx'][1] and b['g2'][0] <= g2[i] <= b['g2'][1]: g_pass += 1
-                if b['si1'][0] <= sing1[i] <= b['si1'][1] and b['six'][0] <= singx[i] <= b['six'][1] and b['si2'][0] <= sing2[i] <= b['si2'][1]: g_pass += 1
-                if b['d1'][0] <= dub1[i] <= b['d1'][1] and b['dx'][0] <= dubx[i] <= b['dx'][1] and b['d2'][0] <= dub2[i] <= b['d2'][1]: g_pass += 1
-                if b['t1'][0] <= trip1[i] <= b['t1'][1] and b['tx'][0] <= tripx[i] <= b['tx'][1] and b['t2'][0] <= trip2[i] <= b['t2'][1]: g_pass += 1
-                if b['o1'][0] <= occ1[i] <= b['o1'][1] and b['ox'][0] <= occx[i] <= b['ox'][1] and b['o2'][0] <= occ2[i] <= b['o2'][1]: g_pass += 1
-                if b['f'][0] <= fat_f[i] <= b['f'][1] and b['a'][0] <= fat_a[i] <= b['a'][1] and b['t'][0] <= fat_t[i] <= b['t'][1]: g_pass += 1
-                if g_pass >= 2: pts += 1
+                if sum([b['1'][0] <= ones[i] <= b['1'][1], b['X'][0] <= draws[i] <= b['X'][1], b['2'][0] <= twos[i] <= b['2'][1]]) >= 2: g_pass += 1
+                if sum([b['s1'][0] <= s1[i] <= b['s1'][1], b['sx'][0] <= sx[i] <= b['sx'][1], b['s2'][0] <= s2[i] <= b['s2'][1]]) >= 2: g_pass += 1
+                if sum([b['g1'][0] <= g1[i] <= b['g1'][1], b['gx'][0] <= gx[i] <= b['gx'][1], b['g2'][0] <= g2[i] <= b['g2'][1]]) >= 2: g_pass += 1
+                if sum([b['si1'][0] <= sing1[i] <= b['si1'][1], b['six'][0] <= singx[i] <= b['six'][1], b['si2'][0] <= sing2[i] <= b['si2'][1]]) >= 2: g_pass += 1
+                if sum([b['d1'][0] <= dub1[i] <= b['d1'][1], b['dx'][0] <= dubx[i] <= b['dx'][1], b['d2'][0] <= dub2[i] <= b['d2'][1]]) >= 2: g_pass += 1
+                if sum([b['t1'][0] <= trip1[i] <= b['t1'][1], b['tx'][0] <= tripx[i] <= b['tx'][1], b['t2'][0] <= trip2[i] <= b['t2'][1]]) >= 2: g_pass += 1
+                if sum([b['o1'][0] <= occ1[i] <= b['o1'][1], b['ox'][0] <= occx[i] <= b['ox'][1], b['o2'][0] <= occ2[i] <= b['o2'][1]]) >= 2: g_pass += 1
+                if sum([b['f'][0] <= fat_f[i] <= b['f'][1], b['a'][0] <= fat_a[i] <= b['a'][1], b['t'][0] <= fat_t[i] <= b['t'][1]]) >= 2: g_pass += 1
+                if g_pass >= slider_super_groups: pts += 1
             
             # Övriga Filter
             if cb_fat and (c_fatf[0] <= fat_f[i] <= c_fatf[1] and c_fata[0] <= fat_a[i] <= c_fata[1] and c_fatt[0] <= fat_t[i] <= c_fatt[1] and c_fatsum[0] <= fat_sums[i] <= c_fatsum[1]): pts += 1
@@ -657,6 +662,78 @@ if st.session_state.get('har_kort_analys') and input_text:
                     sum_fat += chans
                     st.write(f"**{dist}** ➡️ **{chans:.1f}%** ({count} st)")
                 st.info(f"💡 **Om du kräver att 1 av dessa 5 ska sitta, täcker du {sum_fat:.1f}% av historiken.**")
+
+        # ==========================================
+        # TECKENFÖRDELNING (DYNAMISKA INTERVALL + 2 AV 3)
+        # ==========================================
+        st.markdown("---")
+        st.subheader("🧩 Topp 5: Smarta 2-av-3 Mallar (Dynamisk Bredd)")
+        st.markdown(f"Här börjar AI:n med 2 nummer per tecken och breddar sedan luckorna automatiskt tills den absolut bästa mallen når din inställda målsättning (**{slider_macro_target}%**).")
+        
+        def get_dynamic_top_combos(l1, l2, l3, total_rows, target_prob):
+            if total_rows == 0: return [], 0
+            
+            # spread 1 = 2 nummer (t.ex. 4-5), spread 2 = 3 nummer (t.ex. 4-6)
+            for spread in range(1, antal_matcher + 1):
+                intervals = [(i, i+spread) for i in range(antal_matcher + 1 - spread)]
+                combos_scored = []
+                
+                for i1 in intervals:
+                    for i2 in intervals:
+                        for i3 in intervals:
+                            # Logisk rimlighetskoll
+                            if i1[0] + i2[0] + i3[0] > antal_matcher: continue
+                            if i1[1] + i2[1] + i3[1] < antal_matcher: continue
+                            
+                            hits = sum(1 for k in range(total_rows) if ((1 if i1[0] <= l1[k] <= i1[1] else 0) + 
+                                                                        (1 if i2[0] <= l2[k] <= i2[1] else 0) + 
+                                                                        (1 if i3[0] <= l3[k] <= i3[1] else 0)) >= 2)
+                            
+                            if hits > 0:
+                                combos_scored.append({
+                                    'c1': i1, 'c2': i2, 'c3': i3,
+                                    'hits': hits,
+                                    'prob': (hits/total_rows)*100
+                                })
+                                
+                if combos_scored:
+                    combos_scored.sort(key=lambda x: x['hits'], reverse=True)
+                    # Om den bäst presterande mallen når ditt mål, stanna och returnera!
+                    if combos_scored[0]['prob'] >= target_prob:
+                        return combos_scored[:5], spread + 1
+                        
+            return [], 0
+
+        # Hämta exakta värden från historiken
+        l_ones = [r.count('1') for r in v_m['Correct_Row'] if len(r) == antal_matcher]
+        l_draws = [r.count('X') for r in v_m['Correct_Row'] if len(r) == antal_matcher]
+        l_twos = [r.count('2') for r in v_m['Correct_Row'] if len(r) == antal_matcher]
+        
+        l_f, l_a, l_t = [], [], []
+        for _, row in v_m.iterrows():
+            if len(row['Correct_Row']) == antal_matcher:
+                f, a, t, _ = get_fat(row['Correct_Row'], row['Prob_Vector'])
+                l_f.append(f); l_a.append(a); l_t.append(t)
+                
+        total_valid = len(l_ones)
+        
+        if total_valid > 0:
+            col_d1, col_d2 = st.columns(2)
+            
+            with col_d1:
+                top_1x2, nums_1x2 = get_dynamic_top_combos(l_ones, l_draws, l_twos, total_valid, slider_macro_target)
+                st.markdown(f"⚽ **Topp 5: 1X2-ramar (Intervall: {nums_1x2} nr)**")
+                for item in top_1x2:
+                    combo_str = f"{item['c1'][0]}-{item['c1'][1]} st 1:or | {item['c2'][0]}-{item['c2'][1]} st X | {item['c3'][0]}-{item['c3'][1]} st 2:or"
+                    st.write(f"**{combo_str}** ➡️ **{item['prob']:.1f}%** ({item['hits']} st)")
+                    
+            with col_d2:
+                top_fat, nums_fat = get_dynamic_top_combos(l_f, l_a, l_t, total_valid, slider_macro_target)
+                st.markdown(f"🧬 **Topp 5: FAT-ramar (Intervall: {nums_fat} nr)**")
+                for item in top_fat:
+                    combo_str = f"{item['c1'][0]}-{item['c1'][1]} st Fav | {item['c2'][0]}-{item['c2'][1]} st Andra | {item['c3'][0]}-{item['c3'][1]} st Skräll"
+                    st.write(f"**{combo_str}** ➡️ **{item['prob']:.1f}%** ({item['hits']} st)")
+
 
         # ==========================================
         # ORIGINAL: FAT-SEKVENSER
@@ -861,19 +938,19 @@ if st.session_state.get('har_kort_analys') and input_text:
                 if cb_triplet and (c_trip1[0] <= t1_c <= c_trip1[1] and c_tripx[0] <= tx_c <= c_tripx[1] and c_trip2[0] <= t2_c <= c_trip2[1] and c_triptot[0] <= triptot_c <= c_triptot[1]): pts += 1
                 if cb_occur and (c_occ1[0] <= o1_c <= c_occ1[1] and c_occx[0] <= ox_c <= c_occx[1] and c_occ2[0] <= o2_c <= c_occ2[1] and c_occtot[0] <= occtot_c <= c_occtot[1]): pts += 1
                 
-                # Super-Makro
+                # Super-Makro (2 av 3 internt, Y av 8 grupper ska sitta)
                 if cb_super_macro:
                     g_pass = 0
                     b = sm_bounds
-                    if b['1'][0] <= c1 <= b['1'][1] and b['X'][0] <= cx <= b['X'][1] and b['2'][0] <= c2 <= b['2'][1]: g_pass += 1
-                    if b['s1'][0] <= s1_c <= b['s1'][1] and b['sx'][0] <= sx_c <= b['sx'][1] and b['s2'][0] <= s2_c <= b['s2'][1]: g_pass += 1
-                    if b['g1'][0] <= g1_c <= b['g1'][1] and b['gx'][0] <= gx_c <= b['gx'][1] and b['g2'][0] <= g2_c <= b['g2'][1]: g_pass += 1
-                    if b['si1'][0] <= si1_c <= b['si1'][1] and b['six'][0] <= six_c <= b['six'][1] and b['si2'][0] <= si2_c <= b['si2'][1]: g_pass += 1
-                    if b['d1'][0] <= d1_c <= b['d1'][1] and b['dx'][0] <= dx_c <= b['dx'][1] and b['d2'][0] <= d2_c <= b['d2'][1]: g_pass += 1
-                    if b['t1'][0] <= t1_c <= b['t1'][1] and b['tx'][0] <= tx_c <= b['tx'][1] and b['t2'][0] <= t2_c <= b['t2'][1]: g_pass += 1
-                    if b['o1'][0] <= o1_c <= b['o1'][1] and b['ox'][0] <= ox_c <= b['ox'][1] and b['o2'][0] <= o2_c <= b['o2'][1]: g_pass += 1
-                    if b['f'][0] <= f_c <= b['f'][1] and b['a'][0] <= a_c <= b['a'][1] and b['t'][0] <= t_c <= b['t'][1]: g_pass += 1
-                    if g_pass >= 2: pts += 1
+                    if sum([b['1'][0] <= c1 <= b['1'][1], b['X'][0] <= cx <= b['X'][1], b['2'][0] <= c2 <= b['2'][1]]) >= 2: g_pass += 1
+                    if sum([b['s1'][0] <= s1_c <= b['s1'][1], b['sx'][0] <= sx_c <= b['sx'][1], b['s2'][0] <= s2_c <= b['s2'][1]]) >= 2: g_pass += 1
+                    if sum([b['g1'][0] <= g1_c <= b['g1'][1], b['gx'][0] <= gx_c <= b['gx'][1], b['g2'][0] <= g2_c <= b['g2'][1]]) >= 2: g_pass += 1
+                    if sum([b['si1'][0] <= si1_c <= b['si1'][1], b['six'][0] <= six_c <= b['six'][1], b['si2'][0] <= si2_c <= b['si2'][1]]) >= 2: g_pass += 1
+                    if sum([b['d1'][0] <= d1_c <= b['d1'][1], b['dx'][0] <= dx_c <= b['dx'][1], b['d2'][0] <= d2_c <= b['d2'][1]]) >= 2: g_pass += 1
+                    if sum([b['t1'][0] <= t1_c <= b['t1'][1], b['tx'][0] <= tx_c <= b['tx'][1], b['t2'][0] <= t2_c <= b['t2'][1]]) >= 2: g_pass += 1
+                    if sum([b['o1'][0] <= o1_c <= b['o1'][1], b['ox'][0] <= ox_c <= b['ox'][1], b['o2'][0] <= o2_c <= b['o2'][1]]) >= 2: g_pass += 1
+                    if sum([b['f'][0] <= f_c <= b['f'][1], b['a'][0] <= a_c <= b['a'][1], b['t'][0] <= t_c <= b['t'][1]]) >= 2: g_pass += 1
+                    if g_pass >= slider_super_groups: pts += 1
 
                 # Övriga Värde-filter
                 if cb_fat and (c_fatf[0] <= f_c <= c_fatf[1] and c_fata[0] <= a_c <= c_fata[1] and c_fatt[0] <= t_c <= c_fatt[1] and c_fatsum[0] <= fsum_c <= c_fatsum[1]): pts += 1
