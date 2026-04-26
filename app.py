@@ -523,6 +523,48 @@ if st.session_state.get('har_kort_analys') and input_text:
         st.info(f"📈 **HISTORISK TRÄFFSÄKERHET:** {mall_hits} av {len(v_m)} rader ({mall_hits/len(v_m)*100:.1f}%) fick tillräckligt med poäng ({slider_pass_req} poäng) för att passera Soft-filtret.")
 
         st.markdown("---")
+        st.markdown("---")
+        st.subheader("🧩 Dagens Bästa Tecken-Sekvenser (1X2)")
+        st.markdown("Här analyserar AI:n vilka specifika teckenföljder (1, X, 2) som oftast dyker upp i denna typ av omgång. Perfekt för U-teckens-reducering!")
+        
+        # En smart, gemensam funktion som nu klarar både 1X2 och FAT
+        def calculate_top_seqs(string_list, length, alphabet, top_n=5):
+            seqs = [''.join(p) for p in itertools.product(alphabet, repeat=length)]
+            counts = {s: sum(1 for r in string_list if s in r) for s in seqs}
+            return sorted(counts.items(), key=lambda x: x[1], reverse=True)[:top_n]
+
+        sign_strings = [row['Correct_Row'] for _, row in v_m.iterrows() if len(row['Correct_Row']) == antal_matcher]
+        total_signs = len(sign_strings)
+        
+        if total_signs > 0:
+            c_s2, c_s3, c_scombo = st.columns(3)
+            with c_s2:
+                st.markdown("**Två i rad (Längd 2)**")
+                for seq, count in calculate_top_seqs(sign_strings, 2, ['1', 'X', '2']):
+                    chans = (count/total_signs)*100
+                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} st)")
+            
+            with c_s3:
+                st.markdown("**Tre i rad (Längd 3)**")
+                for seq, count in calculate_top_seqs(sign_strings, 3, ['1', 'X', '2']):
+                    chans = (count/total_signs)*100
+                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} st)")
+                    
+            with c_scombo:
+                st.markdown("**Dubbelchans (Minst 1 av 2)**")
+                st.caption("Kombinationer av Längd 3")
+                seqs3_1x2 = [''.join(p) for p in itertools.product(['1', 'X', '2'], repeat=3)]
+                pair_counts_1x2 = []
+                for s1, s2 in itertools.combinations(seqs3_1x2, 2):
+                    covered = sum(1 for r in sign_strings if s1 in r or s2 in r)
+                    pair_counts_1x2.append(((s1, s2), covered))
+                
+                best_pairs_1x2 = sorted(pair_counts_1x2, key=lambda x: x[1], reverse=True)[:5]
+                for (s1, s2), count in best_pairs_1x2:
+                    chans = (count/total_signs)*100
+                    st.write(f"**{s1}** / **{s2}** ➡️ **{chans:.1f}%** ({count} st)")
+
+        st.markdown("---")
         st.subheader("🧬 Dagens Bästa FAT-Sekvenser (Byggklossar)")
         st.markdown("Här analyserar AI:n vilka specifika mönster (1=Fav, 2=Andrahand, 3=Skräll) som bäst täcker in **exakt denna typ av omgång**.")
         
@@ -541,36 +583,29 @@ if st.session_state.get('har_kort_analys') and input_text:
         
         if total_twins > 0:
             col_seq2, col_seq3, col_combo = st.columns(3)
-            
-            def calculate_top_seqs(fat_list, length, top_n=5):
-                seqs = [''.join(p) for p in itertools.product('123', repeat=length)]
-                counts = {s: sum(1 for r in fat_list if s in r) for s in seqs}
-                return sorted(counts.items(), key=lambda x: x[1], reverse=True)[:top_n]
-
             with col_seq2:
                 st.markdown("**Två i rad (Längd 2)**")
-                for seq, count in calculate_top_seqs(fat_strings, 2):
+                for seq, count in calculate_top_seqs(fat_strings, 2, '123'):
                     chans = (count/total_twins)*100
                     st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} st)")
                     
             with col_seq3:
                 st.markdown("**Tre i rad (Längd 3)**")
-                for seq, count in calculate_top_seqs(fat_strings, 3):
+                for seq, count in calculate_top_seqs(fat_strings, 3, '123'):
                     chans = (count/total_twins)*100
                     st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} st)")
                     
             with col_combo:
                 st.markdown("**Dubbelchans (Minst 1 av 2)**")
                 st.caption("Kombinationer av Längd 3")
-                
-                seqs3 = [''.join(p) for p in itertools.product('123', repeat=3)]
-                pair_counts = []
-                for s1, s2 in itertools.combinations(seqs3, 2):
+                seqs3_fat = [''.join(p) for p in itertools.product('123', repeat=3)]
+                pair_counts_fat = []
+                for s1, s2 in itertools.combinations(seqs3_fat, 2):
                     covered = sum(1 for r in fat_strings if s1 in r or s2 in r)
-                    pair_counts.append(((s1, s2), covered))
+                    pair_counts_fat.append(((s1, s2), covered))
                 
-                best_pairs = sorted(pair_counts, key=lambda x: x[1], reverse=True)[:5]
-                for (s1, s2), count in best_pairs:
+                best_pairs_fat = sorted(pair_counts_fat, key=lambda x: x[1], reverse=True)[:5]
+                for (s1, s2), count in best_pairs_fat:
                     chans = (count/total_twins)*100
                     st.write(f"**{s1}** / **{s2}** ➡️ **{chans:.1f}%** ({count} st)")
                     
