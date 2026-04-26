@@ -565,49 +565,42 @@ if st.session_state.get('har_kort_analys') and input_text:
                     st.write(f"**{s1}** / **{s2}** ➡️ **{chans:.1f}%** ({count} st)")
 
         st.markdown("---")
-        st.subheader("🧬 Dagens Bästa FAT-Sekvenser (Byggklossar)")
-        st.markdown("Här analyserar AI:n vilka specifika mönster (1=Fav, 2=Andrahand, 3=Skräll) som bäst täcker in **exakt denna typ av omgång**.")
+        st.subheader("🧩 Dagens Bästa Teckenfördelning (Exakta Antal)")
+        st.markdown("Här analyserar AI:n vilka **exakta helhetskombinationer** av tecken som historiskt sett är allra vanligast för just denna typ av omgång. Perfekt som en stenhård mall!")
         
-        def get_fat_string(row_str, prob_vector):
-            fat_str = ""
-            for i, char in enumerate(row_str):
-                idx = i * 3
-                ranked = sorted([('1', prob_vector[idx]), ('X', prob_vector[idx+1]), ('2', prob_vector[idx+2])], key=lambda x: x[1], reverse=True)
-                if char == ranked[0][0]: fat_str += '1'
-                elif char == ranked[1][0]: fat_str += '2'
-                else: fat_str += '3'
-            return fat_str
-
-        fat_strings = [get_fat_string(row['Correct_Row'], row['Prob_Vector']) for _, row in v_m.iterrows() if len(row['Correct_Row']) == antal_matcher]
-        total_twins = len(fat_strings)
-        
-        if total_twins > 0:
-            col_seq2, col_seq3, col_combo = st.columns(3)
-            with col_seq2:
-                st.markdown("**Två i rad (Längd 2)**")
-                for seq, count in calculate_top_seqs(fat_strings, 2, '123'):
-                    chans = (count/total_twins)*100
-                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} st)")
-                    
-            with col_seq3:
-                st.markdown("**Tre i rad (Längd 3)**")
-                for seq, count in calculate_top_seqs(fat_strings, 3, '123'):
-                    chans = (count/total_twins)*100
-                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} st)")
-                    
-            with col_combo:
-                st.markdown("**Dubbelchans (Minst 1 av 2)**")
-                st.caption("Kombinationer av Längd 3")
-                seqs3_fat = [''.join(p) for p in itertools.product('123', repeat=3)]
-                pair_counts_fat = []
-                for s1, s2 in itertools.combinations(seqs3_fat, 2):
-                    covered = sum(1 for r in fat_strings if s1 in r or s2 in r)
-                    pair_counts_fat.append(((s1, s2), covered))
+        dist_1x2 = []
+        dist_fat = []
+        for _, row in v_m.iterrows():
+            r = row['Correct_Row']
+            p = row['Prob_Vector']
+            if len(r) == antal_matcher:
+                # 1X2 Fördelning
+                dist_1x2.append(f"{r.count('1')} st 1:or | {r.count('X')} st X | {r.count('2')} st 2:or")
                 
-                best_pairs_fat = sorted(pair_counts_fat, key=lambda x: x[1], reverse=True)[:5]
-                for (s1, s2), count in best_pairs_fat:
-                    chans = (count/total_twins)*100
-                    st.write(f"**{s1}** / **{s2}** ➡️ **{chans:.1f}%** ({count} st)")
+                # FAT Fördelning
+                f, a, t, _ = get_fat(r, p)
+                dist_fat.append(f"{f} st Fav | {a} st Andra | {t} st Skräll")
+                
+        total_valid = len(dist_1x2)
+        if total_valid > 0:
+            col_d1, col_d2 = st.columns(2)
+            
+            with col_d1:
+                st.markdown("⚽ **Topp 5: Fördelning 1X2**")
+                counts_1x2 = pd.Series(dist_1x2).value_counts().head(5)
+                for dist, count in counts_1x2.items():
+                    chans = (count / total_valid) * 100
+                    st.write(f"**{dist}** ➡️ **{chans:.1f}%** ({count} st)")
+                    
+            with col_d2:
+                st.markdown("🧬 **Topp 5: Fördelning FAT**")
+                counts_fat = pd.Series(dist_fat).value_counts().head(5)
+                for dist, count in counts_fat.items():
+                    chans = (count / total_valid) * 100
+                    st.write(f"**{dist}** ➡️ **{chans:.1f}%** ({count} st)")
+
+        st.markdown("---")
+        st.subheader("🧬 Dagens Bästa FAT-Sekvenser (Byggklossar)")
                     
         # ==========================================
         # NYA AI-STRATEGIN: BYGGKLOSSAR FÖR REDUCERING
