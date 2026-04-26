@@ -566,7 +566,7 @@ if st.session_state.get('har_kort_analys') and input_text:
             
             st.markdown("---")
             st.subheader(f"🧩 SUPER-MAKRO (Krav: Minst {slider_super_groups} av 8 grupper)")
-            st.markdown(f"*Minst 2 av 3 interna tecken i en grupp måste sitta för att gruppen ska räknas som 'träffad'. Överlever **{sm_prob:.1f}%**.*")
+            st.markdown(f"*Minst 2 av 3 interna tecken i en grupp måste sitta för att gruppen ska räknas som 'träffad'. Överlever historiskt **{sm_prob:.1f}%**.*")
             if cb_super_macro:
                 b = sm_bounds
                 st.write(f"⚽ **Grp 1 (1X2):** 1: {b['1'][0]}-{b['1'][1]} | X: {b['X'][0]}-{b['X'][1]} | 2: {b['2'][0]}-{b['2'][1]}")
@@ -577,19 +577,36 @@ if st.session_state.get('har_kort_analys') and input_text:
                 st.write(f"📐 **Grp 6 (Tripplar):** 1: {b['t1'][0]}-{b['t1'][1]} | X: {b['tx'][0]}-{b['tx'][1]} | 2: {b['t2'][0]}-{b['t2'][1]}")
                 st.write(f"💥 **Grp 7 (Uppkomster):** 1: {b['o1'][0]}-{b['o1'][1]} | X: {b['ox'][0]}-{b['ox'][1]} | 2: {b['o2'][0]}-{b['o2'][1]}")
                 st.write(f"🧬 **Grp 8 (FAT):** F: {b['f'][0]}-{b['f'][1]} | A: {b['a'][0]}-{b['a'][1]} | T: {b['t'][0]}-{b['t'][1]}")
-
-        mall_hits = 0
-        for i in range(len(v_m)):
-            pts = 0
-            
-            # Poäng för Standard Struktur
-            if cb_base and (c_ones[0] <= ones[i] <= c_ones[1] and c_draws[0] <= draws[i] <= c_draws[1] and c_twos[0] <= twos[i] <= c_twos[1]): pts += 1
-            if cb_streak and (c_s1[0] <= s1[i] <= c_s1[1] and c_sx[0] <= sx[i] <= c_sx[1] and c_s2[0] <= s2[i] <= c_s2[1]): pts += 1
-            if cb_gap and (c_g1[0] <= g1[i] <= c_g1[1] and c_gx[0] <= gx[i] <= c_gx[1] and c_g2[0] <= g2[i] <= c_g2[1]): pts += 1
-            if cb_single and (c_sing1[0] <= sing1[i] <= c_sing1[1] and c_singx[0] <= singx[i] <= c_singx[1] and c_sing2[0] <= sing2[i] <= c_sing2[1] and c_singtot[0] <= sing_tot[i] <= c_singtot[1]): pts += 1
-            if cb_doublet and (c_dub1[0] <= dub1[i] <= c_dub1[1] and c_dubx[0] <= dubx[i] <= c_dubx[1] and c_dub2[0] <= dub2[i] <= c_dub2[1] and c_dubtot[0] <= dub_tot[i] <= c_dubtot[1]): pts += 1
-            if cb_triplet and (c_trip1[0] <= trip1[i] <= c_trip1[1] and c_tripx[0] <= tripx[i] <= c_tripx[1] and c_trip2[0] <= trip2[i] <= c_trip2[1] and c_triptot[0] <= trip_tot[i] <= c_triptot[1]): pts += 1
-            if cb_occur and (c_occ1[0] <= occ1[i] <= c_occ1[1] and c_occx[0] <= occx[i] <= c_occx[1] and c_occ2[0] <= occ2[i] <= c_occ2[1] and c_occtot[0] <= occ_tot[i] <= c_occtot[1]): pts += 1
+                
+                # --- Kalkylator för omedelbar feedback på reduceringen ---
+                if antal_matcher == 8:
+                    sm_survivors = 0
+                    all_8_rows = [''.join(tup) for tup in itertools.product(['1','X','2'], repeat=8)]
+                    for tr in all_8_rows:
+                        g_pass = 0
+                        c1, cx, c2 = tr.count('1'), tr.count('X'), tr.count('2')
+                        s1_c, sx_c, s2_c, _ = get_streaks(tr)
+                        g1_c, gx_c, g2_c, _ = get_gaps(tr)
+                        si1_c, six_c, si2_c, _, _ = get_singles(tr)
+                        d1_c, dx_c, d2_c, _, _ = get_doublets(tr)
+                        t1_c, tx_c, t2_c, _, _ = get_triplets(tr)
+                        o1_c, ox_c, o2_c, _, _ = get_occurrences(tr)
+                        f_c, a_c, t_c, _ = get_fat(tr, input_compare)
+                        
+                        if sum([b['1'][0] <= c1 <= b['1'][1], b['X'][0] <= cx <= b['X'][1], b['2'][0] <= c2 <= b['2'][1]]) >= 2: g_pass += 1
+                        if sum([b['s1'][0] <= s1_c <= b['s1'][1], b['sx'][0] <= sx_c <= b['sx'][1], b['s2'][0] <= s2_c <= b['s2'][1]]) >= 2: g_pass += 1
+                        if sum([b['g1'][0] <= g1_c <= b['g1'][1], b['gx'][0] <= gx_c <= b['gx'][1], b['g2'][0] <= g2_c <= b['g2'][1]]) >= 2: g_pass += 1
+                        if sum([b['si1'][0] <= si1_c <= b['si1'][1], b['six'][0] <= six_c <= b['six'][1], b['si2'][0] <= si2_c <= b['si2'][1]]) >= 2: g_pass += 1
+                        if sum([b['d1'][0] <= d1_c <= b['d1'][1], b['dx'][0] <= dx_c <= b['dx'][1], b['d2'][0] <= d2_c <= b['d2'][1]]) >= 2: g_pass += 1
+                        if sum([b['t1'][0] <= t1_c <= b['t1'][1], b['tx'][0] <= tx_c <= b['tx'][1], b['t2'][0] <= t2_c <= b['t2'][1]]) >= 2: g_pass += 1
+                        if sum([b['o1'][0] <= o1_c <= b['o1'][1], b['ox'][0] <= ox_c <= b['ox'][1], b['o2'][0] <= o2_c <= b['o2'][1]]) >= 2: g_pass += 1
+                        if sum([b['f'][0] <= f_c <= b['f'][1], b['a'][0] <= a_c <= b['a'][1], b['t'][0] <= t_c <= b['t'][1]]) >= 2: g_pass += 1
+                        
+                        if g_pass >= slider_super_groups:
+                            sm_survivors += 1
+                            
+                    red_pct = 100 - ((sm_survivors / 6561) * 100)
+                    st.success(f"✂️ **Omedelbar effekt:** Bara detta Super-Makro ensamt slaktar bort **{red_pct:.1f}%** av de matematiska raderna! (Kvar: {sm_survivors} av 6561)")
             
             # Poäng för Super-Makro
             if cb_super_macro:
