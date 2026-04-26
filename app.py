@@ -592,6 +592,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                 for item in top_fat:
                     combo_str = f"{item['c1'][0]}-{item['c1'][1]} st Fav | {item['c2'][0]}-{item['c2'][1]} st Andra | {item['c3'][0]}-{item['c3'][1]} st Skräll"
                     st.write(f"**{combo_str}** ➡️ **{item['prob']:.1f}%** ({item['hits']} st)")
+                    
         # ==========================================
         # ORIGINAL: FAT-SEKVENSER
         # ==========================================
