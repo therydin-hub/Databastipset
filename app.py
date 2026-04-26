@@ -549,16 +549,22 @@ if st.session_state.get('har_kort_analys') and input_text:
             with col_d1:
                 st.markdown("⚽ **Topp 5: Fördelning 1X2**")
                 counts_1x2 = pd.Series(dist_1x2).value_counts().head(5)
+                sum_1x2 = 0
                 for dist, count in counts_1x2.items():
                     chans = (count / total_valid) * 100
+                    sum_1x2 += chans
                     st.write(f"**{dist}** ➡️ **{chans:.1f}%** ({count} st)")
+                st.info(f"💡 **Om du kräver att 1 av dessa 5 ska sitta, täcker du {sum_1x2:.1f}% av historiken.**")
                     
             with col_d2:
                 st.markdown("🧬 **Topp 5: Fördelning FAT**")
                 counts_fat = pd.Series(dist_fat).value_counts().head(5)
+                sum_fat = 0
                 for dist, count in counts_fat.items():
                     chans = (count / total_valid) * 100
+                    sum_fat += chans
                     st.write(f"**{dist}** ➡️ **{chans:.1f}%** ({count} st)")
+                st.info(f"💡 **Om du kräver att 1 av dessa 5 ska sitta, täcker du {sum_fat:.1f}% av historiken.**")
 
         # ==========================================
         # ORIGINAL: FAT-SEKVENSER
