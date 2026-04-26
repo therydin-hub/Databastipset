@@ -523,38 +523,45 @@ if st.session_state.get('har_kort_analys') and input_text:
         st.info(f"📈 **HISTORISK TRÄFFSÄKERHET:** {mall_hits} av {len(v_m)} rader ({mall_hits/len(v_m)*100:.1f}%) fick tillräckligt med poäng ({slider_pass_req} poäng) för att passera Soft-filtret.")
 
         # ==========================================
-        # TECKENFÖRDELNING (2-NUMMERS INTERVALL + 2 AV 3)
+        # TECKENFÖRDELNING (DYNAMISKA INTERVALL + 2 AV 3)
         # ==========================================
         st.markdown("---")
-        st.subheader("🧩 Topp 5: Smarta 2-av-3 Mallar (Två nummer)")
-        st.markdown("Du hade helt rätt! Genom att låta varje tecken ha ett intervall på **två nummer** (t.ex. 4-5) häver vi den matematiska låsningen. Här har AI:n testat alla kombinationer för att hitta de överlägset bästa **2-av-3-ramarna**.")
+        st.subheader("🧩 Topp 5: Smarta 2-av-3 Mallar (Dynamisk Bredd)")
+        st.markdown(f"Här börjar AI:n med 2 nummer per tecken och breddar sedan luckorna automatiskt tills den absolut bästa mallen når din inställda målsättning (**{slider_macro_target}%**).")
         
-        def get_top_2of3_combos(l1, l2, l3, total_rows, spread=1):
-            if total_rows == 0: return []
-            intervals = [(i, i+spread) for i in range(antal_matcher)]
-            combos_scored = []
+        def get_dynamic_top_combos(l1, l2, l3, total_rows, target_prob):
+            if total_rows == 0: return [], 0
             
-            for i1 in intervals:
-                for i2 in intervals:
-                    for i3 in intervals:
-                        # Enkel rimlighetskoll (summan av min- och maxvärdena måste kunna rymma antalet matcher)
-                        if i1[0] + i2[0] + i3[0] > antal_matcher: continue
-                        if i1[1] + i2[1] + i3[1] < antal_matcher: continue
-                        
-                        hits = sum(1 for k in range(total_rows) if ((1 if i1[0] <= l1[k] <= i1[1] else 0) + 
-                                                                    (1 if i2[0] <= l2[k] <= i2[1] else 0) + 
-                                                                    (1 if i3[0] <= l3[k] <= i3[1] else 0)) >= 2)
-                        
-                        if hits > 0:
-                            combos_scored.append({
-                                'combo': f"{i1[0]}-{i1[1]} st 1:or | {i2[0]}-{i2[1]} st X | {i3[0]}-{i3[1]} st 2:or",
-                                'hits': hits,
-                                'prob': (hits/total_rows)*100
-                            })
+            # spread 1 = 2 nummer (t.ex. 4-5), spread 2 = 3 nummer (t.ex. 4-6)
+            for spread in range(1, antal_matcher + 1):
+                intervals = [(i, i+spread) for i in range(antal_matcher + 1 - spread)]
+                combos_scored = []
+                
+                for i1 in intervals:
+                    for i2 in intervals:
+                        for i3 in intervals:
+                            # Logisk rimlighetskoll
+                            if i1[0] + i2[0] + i3[0] > antal_matcher: continue
+                            if i1[1] + i2[1] + i3[1] < antal_matcher: continue
                             
-            # Sortera på flest träffar
-            combos_scored.sort(key=lambda x: x['hits'], reverse=True)
-            return combos_scored[:5]
+                            hits = sum(1 for k in range(total_rows) if ((1 if i1[0] <= l1[k] <= i1[1] else 0) + 
+                                                                        (1 if i2[0] <= l2[k] <= i2[1] else 0) + 
+                                                                        (1 if i3[0] <= l3[k] <= i3[1] else 0)) >= 2)
+                            
+                            if hits > 0:
+                                combos_scored.append({
+                                    'c1': i1, 'c2': i2, 'c3': i3,
+                                    'hits': hits,
+                                    'prob': (hits/total_rows)*100
+                                })
+                                
+                if combos_scored:
+                    combos_scored.sort(key=lambda x: x['hits'], reverse=True)
+                    # Om den bäst presterande mallen når ditt mål, stanna och returnera!
+                    if combos_scored[0]['prob'] >= target_prob:
+                        return combos_scored[:5], spread + 1
+                        
+            return [], 0
 
         # Hämta exakta värden från historiken
         l_ones = [r.count('1') for r in v_m['Correct_Row'] if len(r) == antal_matcher]
@@ -573,18 +580,18 @@ if st.session_state.get('har_kort_analys') and input_text:
             col_d1, col_d2 = st.columns(2)
             
             with col_d1:
-                st.markdown("⚽ **Topp 5: 1X2-ramar (Krav: 2 av 3)**")
-                top_1x2 = get_top_2of3_combos(l_ones, l_draws, l_twos, total_valid, spread=1)
+                top_1x2, nums_1x2 = get_dynamic_top_combos(l_ones, l_draws, l_twos, total_valid, slider_macro_target)
+                st.markdown(f"⚽ **Topp 5: 1X2-ramar (Intervall: {nums_1x2} nr)**")
                 for item in top_1x2:
-                    st.write(f"**{item['combo']}** ➡️ **{item['prob']:.1f}%** ({item['hits']} st)")
+                    combo_str = f"{item['c1'][0]}-{item['c1'][1]} st 1:or | {item['c2'][0]}-{item['c2'][1]} st X | {item['c3'][0]}-{item['c3'][1]} st 2:or"
+                    st.write(f"**{combo_str}** ➡️ **{item['prob']:.1f}%** ({item['hits']} st)")
                     
             with col_d2:
-                st.markdown("🧬 **Topp 5: FAT-ramar (Krav: 2 av 3)**")
-                top_fat = get_top_2of3_combos(l_f, l_a, l_t, total_valid, spread=1)
+                top_fat, nums_fat = get_dynamic_top_combos(l_f, l_a, l_t, total_valid, slider_macro_target)
+                st.markdown(f"🧬 **Topp 5: FAT-ramar (Intervall: {nums_fat} nr)**")
                 for item in top_fat:
-                    combo_str = item['combo'].replace('1:or', 'Fav').replace('st X', 'st Andra').replace('2:or', 'Skräll')
+                    combo_str = f"{item['c1'][0]}-{item['c1'][1]} st Fav | {item['c2'][0]}-{item['c2'][1]} st Andra | {item['c3'][0]}-{item['c3'][1]} st Skräll"
                     st.write(f"**{combo_str}** ➡️ **{item['prob']:.1f}%** ({item['hits']} st)")
-
         # ==========================================
         # ORIGINAL: FAT-SEKVENSER
         # ==========================================
