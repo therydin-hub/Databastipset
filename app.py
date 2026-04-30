@@ -440,10 +440,20 @@ if st.session_state.get('har_kort_analys') and input_text:
         st.error(err)
     elif v_m is None or len(v_m) == 0:
         st.error("❌ Inga matcher kvar efter filtrering. Testa att lätta på Utdelningskravet.")
-    else:
+   else:
         input_compare = get_structural_vector(input_vec) if cb_structure else input_vec
         
-       visnings_kolumner = [c for c in ['Datum', 'ID_Omg'] if c in v_m.columns] + ['Payout', 'Sim']
+        visnings_kolumner = [c for c in ['Datum', 'ID_Omg'] if c in v_m.columns] + ['Payout', 'Sim']
+        
+        # Tvinga ID_Omg till snyggt textformat (utan decimaler) om kolumnen finns
+        if 'ID_Omg' in v_m.columns:
+            v_m['ID_Omg'] = pd.to_numeric(v_m['ID_Omg'], errors='coerce').fillna(0).astype(int).astype(str)
+            v_m['ID_Omg'] = v_m['ID_Omg'].replace('0', '') # Dölj nollan om id saknas
+            
+        st.success(f"✅ Auto-laddade: **{filnamn}**. Exakt {len(v_m)} liknande omgångar hittades.")
+        
+        st.subheader(f"📋 Historiska Omgångar ({len(v_m)} st)")
+        st.dataframe(v_m[visnings_kolumner].rename(columns={'Payout':f'Utdelning ({antal_matcher}r)', 'Sim':'Likhet'}).style.format({f'Utdelning ({antal_matcher}r)': '{:.0f} kr', 'Likhet': '{:.2f}'}), use_container_width=True)
         
         # Tvinga ID_Omg till snyggt textformat (utan decimaler) om kolumnen finns
         if 'ID_Omg' in v_m.columns:
