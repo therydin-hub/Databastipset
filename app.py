@@ -443,13 +443,17 @@ if st.session_state.get('har_kort_analys') and input_text:
     else:
         input_compare = get_structural_vector(input_vec) if cb_structure else input_vec
         
-        visnings_kolumner = [c for c in ['Datum', 'ID_Omg'] if c in v_m.columns] + ['Payout', 'Sim']
-        st.success(f"✅ Auto-laddade: **{filnamn}**. Exakt {len(v_m)} liknande omgångar hittades.")
+       visnings_kolumner = [c for c in ['Datum', 'ID_Omg'] if c in v_m.columns] + ['Payout', 'Sim']
         
+        # Tvinga ID_Omg till snyggt textformat (utan decimaler) om kolumnen finns
+        if 'ID_Omg' in v_m.columns:
+            v_m['ID_Omg'] = pd.to_numeric(v_m['ID_Omg'], errors='coerce').fillna(0).astype(int).astype(str)
+            v_m['ID_Omg'] = v_m['ID_Omg'].replace('0', '') # Dölj nollan om id saknas
+            
         st.subheader(f"📋 Historiska Omgångar ({len(v_m)} st)")
         st.dataframe(v_m[visnings_kolumner].rename(columns={'Payout':f'Utdelning ({antal_matcher}r)', 'Sim':'Likhet'}).style.format({f'Utdelning ({antal_matcher}r)': '{:.0f} kr', 'Likhet': '{:.2f}'}), use_container_width=True)
-
-        ones, draws, twos = [], [], []
+        
+ones, draws, twos = [], [], []
         s1, sx, s2, g1, gx, g2 = [], [], [], [], [], []
         sing1, singx, sing2, sing_tot = [], [], [], []
         dub1, dubx, dub2, dub_tot = [], [], [], []
