@@ -256,7 +256,7 @@ def load_database(filepath, antal_matcher):
 
     col_m = [f'M{i}' for i in range(1, antal_matcher + 1)]
     if all(c in global_db.columns for c in col_m):
-        # Säker ihopslagning som tvingar allt till ren text och tar bort '.0'
+        # Säker ihopslagning som tvingar allt till ren text
         def safe_join(row):
             try:
                 return ''.join([str(x).replace('.0', '').strip().upper() for x in row])
@@ -282,19 +282,26 @@ def load_database(filepath, antal_matcher):
 
     global_db['Prob_Vector'] = prob_vectors
     
-    # Supersmart sökning efter utdelningskolumnen (ignorerar mellanslag och stora/små bokstäver)
+    # ---------------------------------------------------------
+    # BULLETPROOF UTDELNINGS-PARSER
+    # ---------------------------------------------------------
     payout_col = None
-    target_str = f"{antal_matcher}rätt"
+    target_1 = f"{antal_matcher}rätt"
+    target_2 = str(antal_matcher)
+    target_3 = f"utdelning{antal_matcher}"
+    
     for col in global_db.columns:
-        clean_col = str(col).lower().replace(' ', '').replace('_', '')
-        if target_str in clean_col:
+        clean_col = str(col).lower().replace(' ', '').replace('_', '').replace('-', '')
+        if target_1 in clean_col or clean_col == target_2 or target_3 in clean_col:
             payout_col = col
             break
             
     if payout_col: 
         raw_payout = global_db[payout_col].astype(str)
-        # Tvätta bort " kr", mellanslag och kommatecken från beloppet
-        clean_payout = raw_payout.str.replace(' ', '').str.replace(',', '.').str.replace('kr', '', flags=re.IGNORECASE).str.replace('+', '', regex=False)
+        # Regex: Ta bort ALLT som inte är siffror (krossar kr, mellanslag, kommatecken, bokstäver)
+        clean_payout = raw_payout.str.replace(r'[^\d]', '', regex=True)
+        # Om fältet blir tomt (t.ex. om det stod "Jackpot" eller bara "-"), sätt till "0"
+        clean_payout = clean_payout.replace('', '0')
         global_db['Payout'] = pd.to_numeric(clean_payout, errors='coerce').fillna(0)
     else: 
         global_db['Payout'] = 0
