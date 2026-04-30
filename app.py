@@ -216,7 +216,7 @@ def calculate_total_diff(match_odds, correct_results):
 
 
 # ==========================================
-# 2. AUTO-LADDNING & DATABAS
+# 2. AUTO-LADDNING & DATABAS (BULLETPROOF)
 # ==========================================
 
 def find_local_database(spelform):
@@ -245,23 +245,22 @@ def load_database(filepath, antal_matcher):
         try:
             with open(filepath, 'r', encoding='utf-8') as f: first_line = f.readline()
             sep = ';' if ';' in first_line else ','
+            if '\t' in first_line and ';' not in first_line and ',' not in first_line: sep = '\t'
             global_db = pd.read_csv(filepath, sep=sep, encoding='utf-8', on_bad_lines='skip')
         except:
             with open(filepath, 'r', encoding='latin-1') as f: first_line = f.readline()
             sep = ';' if ';' in first_line else ','
+            if '\t' in first_line and ';' not in first_line and ',' not in first_line: sep = '\t'
             global_db = pd.read_csv(filepath, sep=sep, encoding='latin-1', on_bad_lines='skip')
 
-    # Tvätta alla kolumnnamn från osynliga mellanslag
+    # Tvätta kolumnnamn
     global_db.columns = [str(c).strip() for c in global_db.columns]
 
     col_m = [f'M{i}' for i in range(1, antal_matcher + 1)]
     if all(c in global_db.columns for c in col_m):
-        # Säker ihopslagning som tvingar allt till ren text
         def safe_join(row):
-            try:
-                return ''.join([str(x).replace('.0', '').strip().upper() for x in row])
-            except:
-                return ""
+            try: return ''.join([str(x).replace('.0', '').strip().upper() for x in row])
+            except: return ""
         global_db['Correct_Row'] = global_db[col_m].apply(safe_join, axis=1)
 
     prob_vectors = []
@@ -282,26 +281,19 @@ def load_database(filepath, antal_matcher):
 
     global_db['Prob_Vector'] = prob_vectors
     
-    # ---------------------------------------------------------
-    # BULLETPROOF UTDELNINGS-PARSER
-    # ---------------------------------------------------------
     payout_col = None
-    target_1 = f"{antal_matcher}rätt"
-    target_2 = str(antal_matcher)
-    target_3 = f"utdelning{antal_matcher}"
-    
     for col in global_db.columns:
         clean_col = str(col).lower().replace(' ', '').replace('_', '').replace('-', '')
-        if target_1 in clean_col or clean_col == target_2 or target_3 in clean_col:
+        if f"{antal_matcher}rätt" in clean_col or clean_col == str(antal_matcher) or "utdelning" in clean_col or "vinst" in clean_col:
             payout_col = col
             break
             
     if payout_col: 
         raw_payout = global_db[payout_col].astype(str)
-        # Regex: Ta bort ALLT som inte är siffror (krossar kr, mellanslag, kommatecken, bokstäver)
-        clean_payout = raw_payout.str.replace(r'[^\d]', '', regex=True)
-        # Om fältet blir tomt (t.ex. om det stod "Jackpot" eller bara "-"), sätt till "0"
-        clean_payout = clean_payout.replace('', '0')
+        # 1. Plocka bort ,00 och .00 (Så att 66 363,00 inte blir 6636300)
+        clean_payout = raw_payout.str.replace(r'[,.]00', '', regex=True)
+        # 2. Skala bort allt utom rena siffror
+        clean_payout = clean_payout.str.replace(r'[^\d]', '', regex=True).replace('', '0')
         global_db['Payout'] = pd.to_numeric(clean_payout, errors='coerce').fillna(0)
     else: 
         global_db['Payout'] = 0
@@ -610,7 +602,6 @@ if st.session_state.get('har_kort_analys') and input_text:
                     total_test = 6561
                     is_exact = True
                 else:
-                    # Blixtsnabb Monte Carlo-simulering för 13 matcher
                     mc_matrix = np.random.choice(['1', 'X', '2'], size=(10000, 13))
                     test_rows = [''.join(row) for row in mc_matrix]
                     total_test = 10000
@@ -889,7 +880,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                 if cb_single and (c_sing1[0] <= si1_c <= c_sing1[1] and c_singx[0] <= six_c <= c_singx[1] and c_sing2[0] <= si2_c <= c_sing2[1] and c_singtot[0] <= singtot_c <= c_singtot[1]): pts += 1
                 if cb_doublet and (c_dub1[0] <= d1_c <= c_dub1[1] and c_dubx[0] <= dx_c <= c_dubx[1] and c_dub2[0] <= d2_c <= c_dub2[1] and c_dubtot[0] <= dubtot_c <= c_dubtot[1]): pts += 1
                 if cb_triplet and (c_trip1[0] <= t1_c <= c_trip1[1] and c_tripx[0] <= tx_c <= c_tripx[1] and c_trip2[0] <= t2_c <= c_trip2[1] and c_triptot[0] <= triptot_c <= c_triptot[1]): pts += 1
-                if cb_occur and (c_occ1[0] <= o1_c <= c_occ1[1] and c_occx[0] <= occx[i] <= c_occx[1] and c_occ2[0] <= o2_c <= c_occ2[1] and c_occtot[0] <= occtot_c <= c_occtot[1]): pts += 1
+                if cb_occur and (c_occ1[0] <= o1_c <= c_occ1[1] and c_occx[0] <= ox_c <= c_occx[1] and c_occ2[0] <= o2_c <= c_occ2[1] and c_occtot[0] <= occtot_c <= c_occtot[1]): pts += 1
                 
                 # Super-Makro (2 av 3 internt, Y av 8 grupper ska sitta)
                 if cb_super_macro:
