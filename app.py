@@ -169,7 +169,52 @@ def get_top_n_favs_wins(row_str, prob_vector, top_n):
     top_n_list = match_favs[:top_n]
     return sum(1 for fav in top_n_list if row_str[fav['match_idx']] == fav['sign'])
 
-# --- DELTA-KALKYLATOR (NY) ---
+def calculate_total_diff(match_odds, correct_results):
+    col_map = {'1': 0, 'X': 1, '2': 2}
+    matcher = len(correct_results)
+    
+    flat_t1 = []
+    for match_idx, odds in enumerate(match_odds):
+        max_val = max(odds)
+        max_idx = odds.index(max_val)
+        for col_idx, val in enumerate(odds):
+            is_max = (col_idx == max_idx)
+            flat_t1.append({"match_idx": match_idx, "col_idx": col_idx, "val": 0 if is_max else val, "is_max": is_max})
+            
+    non_zeros_t1 = sorted([x for x in flat_t1 if not x["is_max"]], key=lambda x: x["val"], reverse=True)
+    for rank, item in enumerate(non_zeros_t1, start=1): item["rank"] = rank
+    for item in flat_t1: 
+        if item["is_max"]: item["rank"] = 0
+            
+    t1_table = [[0]*3 for _ in range(matcher)]
+    for item in flat_t1: t1_table[item["match_idx"]][item["col_idx"]] = item["rank"]
+
+    flat_t2 = []
+    for match_idx, odds in enumerate(match_odds):
+        min_val = min(odds)
+        min_idx = odds.index(min_val)
+        for col_idx, val in enumerate(odds):
+            is_min = (col_idx == min_idx)
+            flat_t2.append({"match_idx": match_idx, "col_idx": col_idx, "val": 0 if is_min else val, "is_min": is_min})
+            
+    non_zeros_t2 = sorted([x for x in flat_t2 if not x["is_min"]], key=lambda x: x["val"], reverse=True)
+    for rank, item in enumerate(non_zeros_t2, start=1): item["rank"] = rank
+    for item in flat_t2: 
+        if item["is_min"]: item["rank"] = 0
+            
+    t2_table = [[0]*3 for _ in range(matcher)]
+    for item in flat_t2: t2_table[item["match_idx"]][item["col_idx"]] = item["rank"]
+
+    total_diff = 0
+    for i in range(matcher):
+        correct_sign = str(correct_results[i]).strip().upper()
+        if correct_sign not in col_map: continue
+        col = col_map[correct_sign]
+        total_diff += (t1_table[i][col] - t2_table[i][col])
+        
+    return total_diff
+
+# --- DELTA-KALKYLATOR ---
 def calculate_delta(row_str, prob_vector):
     if not row_str or len(prob_vector) != len(row_str) * 3: return 0
     delta_sum = 0
@@ -348,6 +393,7 @@ with st.sidebar:
     cb_points = st.checkbox("POÄNGFILTER (Eget)", value=True)
     cb_100minus = st.checkbox("100-minus Summa", value=True)
     cb_rank24 = st.checkbox(f"Rank 1-{krav_odds} Summa", value=True)
+    cb_totaldiff = st.checkbox("Total Diff (T1 - T2)", value=True)
     
     st.markdown("**Struktur (Standard):**")
     cb_base = st.checkbox("Grundfilter (1, X, 2)", value=True)
@@ -372,7 +418,7 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("🎯 Soft Filtering")
     active_filters_list = [
-        cb_u_favs, cb_sft, cb_fat, cb_points, cb_100minus, cb_rank24, 
+        cb_u_favs, cb_sft, cb_fat, cb_points, cb_100minus, cb_rank24, cb_totaldiff,
         cb_base, cb_streak, cb_gap, cb_single, cb_doublet, cb_triplet, cb_occur,
         cb_super_macro, cb_aimatrix
     ]
@@ -410,7 +456,7 @@ if st.session_state.get('har_kort_analys') and input_text:
     else:
         input_compare = get_structural_vector(input_vec) if cb_structure else input_vec
         
-        # --- BERÄKNA DELTA FÖR ALLA HISTORISKA RADER INNAN TABELLEN RITAS ---
+        # --- BERÄKNA DELTA FÖR ALLA HISTORISKA RADER ---
         delta_list = []
         for _, row in v_m.iterrows():
             if len(row['Correct_Row']) == antal_matcher and len(row['Prob_Vector']) == krav_odds:
@@ -430,19 +476,6 @@ if st.session_state.get('har_kort_analys') and input_text:
         st.subheader(f"📋 Historiska Omgångar ({len(v_m)} st)")
         st.dataframe(v_m[visnings_kolumner].rename(columns={'Payout':f'Utdelning ({antal_matcher}r)', 'Sim':'Likhet'}).style.format({f'Utdelning ({antal_matcher}r)': '{:.0f} kr', 'Likhet': '{:.2f}', 'Delta': '{:.1f}'}), use_container_width=True)
 
-        # --- DELTA FREKVENSTABELL ---
-        st.markdown("### 📐 Delta-Frekvens (Avvikelse från folket)")
-        st.markdown("Här ser du analytiskt hur mycket de vinnande raderna på denna typ av omgång skiljer sig från favoriterna. En hög Delta betyder att många tunga favoriter fälldes.")
-        
-        delta_bins = [-1, 20, 40, 60, 80, 100, 125, 150, 9999]
-        delta_labels = ['0-20 (Mycket Lätt)', '21-40 (Lätt)', '41-60 (Medel)', '61-80 (Svår)', '81-100 (Mycket Svår)', '101-125 (Extrem)', '126-150 (Brutal)', '151+ (Omsättning)']
-        v_m['Delta_Group'] = pd.cut(v_m['Delta'], bins=delta_bins, labels=delta_labels, right=True)
-        
-        delta_freq = v_m['Delta_Group'].value_counts().sort_index().reset_index()
-        delta_freq.columns = ['Delta-Intervall', 'Antal Omgångar']
-        delta_freq['Historisk Sannolikhet'] = (delta_freq['Antal Omgångar'] / len(v_m) * 100).apply(lambda x: f"{x:.1f} %")
-        st.table(delta_freq)
-
         ones, draws, twos = [], [], []
         s1, sx, s2, g1, gx, g2 = [], [], [], [], [], []
         sing1, singx, sing2, sing_tot = [], [], [], []
@@ -450,7 +483,7 @@ if st.session_state.get('har_kort_analys') and input_text:
         trip1, tripx, trip2, trip_tot = [], [], [], []
         occ1, occx, occ2, occ_tot = [], [], [], []
         sft_sums, fat_f, fat_a, fat_t, fat_sums = [], [], [], [], []
-        points_vals, minus_sums, rank24_sums, u_wins, ai_ranks = [], [], [], [], []
+        points_vals, minus_sums, rank24_sums, total_diff_vals, u_wins, ai_ranks = [], [], [], [], [], []
 
         for _, row in v_m.iterrows():
             r, p = row['Correct_Row'], row['Prob_Vector']
@@ -474,6 +507,9 @@ if st.session_state.get('har_kort_analys') and input_text:
             minus_sums.append(get_100_minus_sum(r, p))
             rank24_sums.append(get_rank_sum(r, p))
             u_wins.append(get_top_n_favs_wins(r, p, slider_u_count))
+            
+            match_odds_list = [p[j:j+3] for j in range(0, len(p), 3)]
+            total_diff_vals.append(calculate_total_diff(match_odds_list, list(r)))
 
         c_v, c_s = slider_core_val, slider_core_str
         
@@ -491,13 +527,15 @@ if st.session_state.get('har_kort_analys') and input_text:
         c_points = get_best_interval(points_vals, c_v)
         c_minus = get_best_interval(minus_sums, c_v)
         c_rank24 = get_best_interval(rank24_sums, c_v)
+        c_totaldiff = get_best_interval(total_diff_vals, c_v)
         c_u = get_best_interval(u_wins, c_v)
+        c_delta = get_best_interval(list(v_m['Delta']), c_v)
         
         c_ai_rank = get_best_interval(ai_ranks, c_v) if len(ai_ranks) > 0 else (1, max_rank)
         active_ai_min, active_ai_max = slider_ai_rank if cb_manual_ai_rank else c_ai_rank
         ai_txt = "AI-Rank (MANUELL)" if cb_manual_ai_rank else f"AI-Rank (AUTO {c_v}%)"
 
-        # --- SUPER-MAKRO (X av 8 grupper ska sitta, 2 av 3 internt) ---
+        # --- SUPER-MAKRO ---
         def get_super_macro_bounds(total_rows, target_prob, req_groups):
             lists_dict = {
                 '1': ones, 'X': draws, '2': twos,
@@ -553,7 +591,9 @@ if st.session_state.get('har_kort_analys') and input_text:
         with col_v:
             st.subheader(f"💰 VÄRDE & SVÅRIGHET ({c_v}%)")
             if cb_payout: st.write(f"**Utdelning:** {v_m['Payout'].min():.0f} - {v_m['Payout'].max():.0f} kr")
+            st.write(f"**Delta (Avvikelse):** {c_delta[0]:.1f} - {c_delta[1]:.1f}")
             if cb_aimatrix: st.write(f"**{ai_txt}:** {active_ai_min:.0f} - {active_ai_max:.0f}")
+            if cb_totaldiff: st.write(f"**Total Diff:** {c_totaldiff[0]} - {c_totaldiff[1]}")
             if cb_rank24: st.write(f"**Rank Summa:** {c_rank24[0]:.1f} - {c_rank24[1]:.1f}")
             if cb_100minus: st.write(f"**100-minus Summa:** {c_minus[0]} - {c_minus[1]}")
             if cb_sft: st.write(f"**SFT Summa:** {c_sft[0]} - {c_sft[1]}")
@@ -656,6 +696,7 @@ if st.session_state.get('har_kort_analys') and input_text:
             if cb_points and (c_points[0] <= points_vals[i] <= c_points[1]): pts += 1
             if cb_100minus and (c_minus[0] <= minus_sums[i] <= c_minus[1]): pts += 1
             if cb_rank24 and (c_rank24[0] <= rank24_sums[i] <= c_rank24[1]): pts += 1
+            if cb_totaldiff and (c_totaldiff[0] <= total_diff_vals[i] <= c_totaldiff[1]): pts += 1
             if cb_aimatrix and (active_ai_min <= ai_ranks[i] <= active_ai_max): pts += 1
             
             if pts >= slider_pass_req: mall_hits += 1
@@ -830,6 +871,7 @@ if st.session_state.get('har_kort_analys') and input_text:
             ai_matrix, ai_scores_asc, ai_tot = calculate_ai_matrix_from_values(input_compare)
             
             valid_exact_rows = [] 
+            match_odds_input = [input_compare[j:j+3] for j in range(0, len(input_compare), 3)]
             
             for tr in all_possible_rows:
                 pts = 0
@@ -869,6 +911,9 @@ if st.session_state.get('har_kort_analys') and input_text:
                 if cb_points and (c_points[0] <= get_rank_points(tr, input_compare) <= c_points[1]): pts += 1
                 if cb_100minus and (c_minus[0] <= get_100_minus_sum(tr, input_compare) <= c_minus[1]): pts += 1
                 if cb_rank24 and (c_rank24[0] <= get_rank_sum(tr, input_compare) <= c_rank24[1]): pts += 1
+                if cb_totaldiff:
+                    td_c = calculate_total_diff(match_odds_input, list(tr))
+                    if (c_totaldiff[0] <= td_c <= c_totaldiff[1]): pts += 1
                 if cb_aimatrix:
                     rank_c, _ = get_exact_rank(tr, ai_matrix, ai_scores_asc, ai_tot)
                     if (active_ai_min <= rank_c <= active_ai_max): pts += 1
@@ -929,7 +974,8 @@ if st.session_state.get('har_kort_analys') and input_text:
         smart_plot(points_vals, 4, 'mediumpurple', 'Poängfilter', 'Poäng', cb_points, c_points[0], c_points[1])
         smart_plot(minus_sums, 5, 'tan', '100-minus Summa', '100-minus', cb_100minus, c_minus[0], c_minus[1])
         smart_plot(rank24_sums, 6, 'lightpink', 'Rank Summa', 'Rank Summa', cb_rank24, c_rank24[0], c_rank24[1])
-        smart_plot(list(v_m['Delta']), 7, 'lightgreen', 'Delta (Avvikelse)', 'Delta Poäng', False, 0, 0) # Delta är statisk, ingen röd linje
+        smart_plot(total_diff_vals, 7, 'lightgreen', 'Total Diff (T1-T2)', 'Differens', cb_totaldiff, c_totaldiff[0], c_totaldiff[1])
+        smart_plot(list(v_m['Delta']), 8, 'lightblue', 'Delta (Avvikelse)', 'Delta Poäng', False, c_delta[0], c_delta[1])
         
         plt.tight_layout(pad=2.0, h_pad=2.0)
         
