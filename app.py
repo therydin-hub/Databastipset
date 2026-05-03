@@ -66,3 +66,872 @@ def get_occurrences(row_str):
 def get_triplets(row_str):
     t1, tx, t2, i = 0, 0, 0, 0
     while i < len(row_str):
+        char, count = row_str[i], 1
+        while i + 1 < len(row_str) and row_str[i+1] == char: count += 1; i += 1
+        if count == 3:
+            if char == '1': t1 += 1
+            elif char == 'X': tx += 1
+            else: t2 += 1
+        i += 1
+    return t1, tx, t2, t1+tx+t2, max(t1, tx, t2)
+
+def get_doublets(row_str):
+    d1, dx, d2, i = 0, 0, 0, 0
+    while i < len(row_str):
+        char, count = row_str[i], 1
+        while i + 1 < len(row_str) and row_str[i+1] == char: count += 1; i += 1
+        if count == 2:
+            if char == '1': d1 += 1
+            elif char == 'X': dx += 1
+            else: d2 += 1
+        i += 1
+    return d1, dx, d2, d1+dx+d2, max(d1, dx, d2)
+
+def get_singles(row_str):
+    s1, sx, s2 = 0, 0, 0
+    for i in range(len(row_str)):
+        char = row_str[i]
+        if (i == 0 or row_str[i-1] != char) and (i == len(row_str)-1 or row_str[i+1] != char):
+            if char == '1': s1 += 1
+            elif char == 'X': sx += 1
+            else: s2 += 1
+    return s1, sx, s2, s1+sx+s2, max(s1, sx, s2)
+
+def get_gaps(row_str):
+    g1 = len(max(row_str.split('1'), key=len)) if '1' in row_str else len(row_str)
+    gx = len(max(row_str.split('X'), key=len)) if 'X' in row_str else len(row_str)
+    g2 = len(max(row_str.split('2'), key=len)) if '2' in row_str else len(row_str)
+    return g1, gx, g2, max(g1, gx, g2)
+
+def get_streaks(row_str):
+    m1, mx, m2, c, curr = 0, 0, 0, 0, ''
+    for char in row_str:
+        if char == curr: c += 1
+        else: c, curr = 1, char
+        if curr == '1': m1 = max(m1, c)
+        elif curr == 'X': mx = max(mx, c)
+        else: m2 = max(m2, c)
+    return m1, mx, m2, max(m1, mx, m2)
+
+def get_best_interval(values, target_coverage_percent):
+    n = len(values)
+    if n == 0: return (0, 0)
+    values = sorted(values)
+    min_items = int(np.ceil(n * (target_coverage_percent / 100)))
+    if min_items == 0: return (min(values), max(values))
+    best_diff = float('inf')
+    best_int = (values[0], values[-1])
+    for i in range(n - min_items + 1):
+        j = i + min_items - 1
+        if values[j] - values[i] < best_diff:
+            best_diff = values[j] - values[i]
+            best_int = (values[i], values[j])
+    return best_int
+
+def parse_input_string(text, max_vals):
+    return [float(p) for p in re.sub(r'[^\d\.\s]', '', text).split()[:max_vals]]
+
+def get_structural_vector(vec):
+    matches = [sorted(vec[i:i+3], reverse=True) for i in range(0, len(vec), 3)]
+    matches_sorted = sorted(matches, key=lambda m: m[0], reverse=True)
+    return [val for m in matches_sorted for val in m]
+
+def get_rank_sum(row_str, prob_vector):
+    sorted_probs = sorted(prob_vector, reverse=True)
+    rank_dict = {}
+    for i, p in enumerate(sorted_probs):
+        if p not in rank_dict:
+            count = sorted_probs.count(p)
+            avg_rank = sum(range(i + 1, i + count + 1)) / count
+            rank_dict[p] = avg_rank
+    total_rank = 0
+    for i, char in enumerate(row_str):
+        idx = i * 3
+        if char == '1': p = prob_vector[idx]
+        elif char == 'X': p = prob_vector[idx+1]
+        elif char == '2': p = prob_vector[idx+2]
+        else: p = 0
+        total_rank += rank_dict.get(p, len(prob_vector))
+    return total_rank
+
+def weighted_euclidean(u, v, w):
+    return np.sqrt(np.sum(w * (np.array(u) - np.array(v))**2))
+
+def get_top_n_favs_wins(row_str, prob_vector, top_n):
+    match_favs = []
+    matcher = len(row_str)
+    for m in range(matcher):
+        idx = m * 3
+        probs = [(prob_vector[idx], '1'), (prob_vector[idx+1], 'X'), (prob_vector[idx+2], '2')]
+        probs.sort(key=lambda x: x[0], reverse=True)
+        match_favs.append({'pct': probs[0][0], 'sign': probs[0][1], 'match_idx': m})
+    match_favs.sort(key=lambda x: x['pct'], reverse=True)
+    top_n_list = match_favs[:top_n]
+    return sum(1 for fav in top_n_list if row_str[fav['match_idx']] == fav['sign'])
+
+# --- DELTA-KALKYLATOR (NY) ---
+def calculate_delta(row_str, prob_vector):
+    if not row_str or len(prob_vector) != len(row_str) * 3: return 0
+    delta_sum = 0
+    for i, char in enumerate(row_str):
+        idx = i * 3
+        probs = {'1': prob_vector[idx], 'X': prob_vector[idx+1], '2': prob_vector[idx+2]}
+        fav_pct = max(probs.values())
+        win_pct = probs.get(char, 0)
+        delta_sum += (fav_pct - win_pct)
+    return round(delta_sum, 1)
+
+
+# ==========================================
+# 2. AUTO-LADDNING & DATABAS (BULLETPROOF)
+# ==========================================
+
+def find_local_database(spelform):
+    mapp = os.path.dirname(os.path.abspath(__file__)) if '__file__' in locals() else '.'
+    alla_filer = [f for f in os.listdir(mapp) if f.endswith('.csv') or f.endswith('.xlsx')]
+    def match(f, inc, exc):
+        f_lower = f.lower()
+        return all(w in f_lower for w in inc) and not any(w in f_lower for w in exc)
+    kandidater = []
+    if spelform == "Stryktips": kandidater = [f for f in alla_filer if match(f, ["stryk"], ["topp"])]
+    elif spelform == "Europatips": kandidater = [f for f in alla_filer if match(f, ["europa"], ["topp"])]
+    elif spelform == "Topptips ST": kandidater = [f for f in alla_filer if match(f, ["topp", "st"], [])]
+    elif spelform == "Topptips EU": kandidater = [f for f in alla_filer if match(f, ["topp", "eu"], [])]
+    elif spelform == "Topptips Övrigt": kandidater = [f for f in alla_filer if match(f, ["topp", "övrig"], [])]
+    elif spelform == "Powerplay": kandidater = [f for f in alla_filer if match(f, ["powerplay"], [])]
+
+    if not kandidater: return None
+    for k in kandidater:
+        if "med_rank" in k.lower(): return os.path.join(mapp, k)
+    return os.path.join(mapp, kandidater[0])
+
+@st.cache_data
+def load_database(filepath, antal_matcher):
+    if filepath.endswith('.xlsx'): global_db = pd.read_excel(filepath)
+    else:
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f: first_line = f.readline()
+            sep = ';' if ';' in first_line else ','
+            if '\t' in first_line and ';' not in first_line and ',' not in first_line: sep = '\t'
+            global_db = pd.read_csv(filepath, sep=sep, encoding='utf-8', on_bad_lines='skip')
+        except:
+            with open(filepath, 'r', encoding='latin-1') as f: first_line = f.readline()
+            sep = ';' if ';' in first_line else ','
+            if '\t' in first_line and ';' not in first_line and ',' not in first_line: sep = '\t'
+            global_db = pd.read_csv(filepath, sep=sep, encoding='latin-1', on_bad_lines='skip')
+
+    global_db.columns = [str(c).strip() for c in global_db.columns]
+
+    col_m = [f'M{i}' for i in range(1, antal_matcher + 1)]
+    if all(c in global_db.columns for c in col_m):
+        def safe_join(row):
+            try: return ''.join([str(x).replace('.0', '').strip().upper() for x in row])
+            except: return ""
+        global_db['Correct_Row'] = global_db[col_m].apply(safe_join, axis=1)
+
+    prob_vectors = []
+    valid_rows = []
+    for idx, row in global_db.iterrows():
+        try:
+            p_vec = []
+            for m in range(1, antal_matcher + 1):
+                p1 = float(str(row[f'M{m}-1']).replace(',', '.'))
+                px = float(str(row[f'M{m}-X']).replace(',', '.'))
+                p2 = float(str(row[f'M{m}-2']).replace(',', '.'))
+                p_vec.extend([p1, px, p2])
+            prob_vectors.append(p_vec)
+            valid_rows.append(True)
+        except:
+            prob_vectors.append([])
+            valid_rows.append(False)
+
+    global_db['Prob_Vector'] = prob_vectors
+    
+    payout_col = None
+    for col in global_db.columns:
+        clean_col = str(col).lower().replace(' ', '').replace('_', '').replace('-', '')
+        if f"{antal_matcher}rätt" in clean_col or clean_col == str(antal_matcher) or "utdelning" in clean_col or "vinst" in clean_col:
+            payout_col = col
+            break
+            
+    if payout_col: 
+        raw_payout = global_db[payout_col].astype(str)
+        clean_payout = raw_payout.str.replace(r'[,.]00', '', regex=True)
+        clean_payout = clean_payout.str.replace(r'[^\d]', '', regex=True).replace('', '0')
+        global_db['Payout'] = pd.to_numeric(clean_payout, errors='coerce').fillna(0)
+    else: 
+        global_db['Payout'] = 0
+        
+    return global_db[valid_rows]
+
+@st.cache_data(show_spinner=False)
+def run_core_analysis(input_text, spelform, antal_matcher, krav_odds, cb_structure, slider_top_n, cb_payout, pay_min, pay_max):
+    fil_sökväg = find_local_database(spelform)
+    if not fil_sökväg:
+        return None, None, None, f"❌ Hittade ingen fil för {spelform} i mappen!"
+    
+    try:
+        input_vec = parse_input_string(input_text, krav_odds)
+    except:
+        return None, None, None, "⚠️ Fel vid inläsning av odds."
+        
+    if len(input_vec) != krav_odds: 
+        return None, None, None, f"⚠️ Fel: {spelform} kräver exakt {krav_odds} värden. Hittade {len(input_vec)}."
+
+    global_db = load_database(fil_sökväg, antal_matcher)
+    
+    input_compare = get_structural_vector(input_vec) if cb_structure else input_vec
+    weights_arr = np.array([w for i in range(0, krav_odds, 3) for w in [(max(input_compare[i:i+3])/100.0)**2]*3])
+
+    df_s = global_db.copy()
+    df_s['Sim'] = [weighted_euclidean(input_compare, get_structural_vector(r['Prob_Vector']) if cb_structure else r['Prob_Vector'], weights_arr) if len(r['Prob_Vector'])==krav_odds else 9999 for _, r in df_s.iterrows()]
+    
+    v_m = df_s.sort_values('Sim').head(slider_top_n)
+    
+    if cb_payout: 
+        v_m = v_m[(v_m['Payout'] >= pay_min) & (v_m['Payout'] <= pay_max)]
+        
+    return v_m, input_vec, os.path.basename(fil_sökväg), None
+
+
+# ==========================================
+# STREAMLIT UI & SIDEBAR
+# ==========================================
+
+col_header1, col_header2 = st.columns([2, 1])
+with col_header1:
+    st.title("🎯 Tipset AI-Analys")
+with col_header2:
+    spelform = st.selectbox("⚽ Välj Spelform:", [
+        "Stryktips", "Europatips", "Topptips ST", "Topptips EU", "Topptips Övrigt", "Powerplay"
+    ])
+
+antal_matcher = 13 if spelform in ["Stryktips", "Europatips"] else 8
+krav_odds = antal_matcher * 3
+
+st.markdown(f"**Läge:** Du har valt **{spelform}** ({antal_matcher} matcher).")
+st.markdown("---")
+
+if 'aktuell_spelform' not in st.session_state:
+    st.session_state['aktuell_spelform'] = spelform
+if st.session_state['aktuell_spelform'] != spelform:
+    st.session_state['har_kort_analys'] = False
+    st.session_state['aktuell_spelform'] = spelform
+
+# --- SIDEBAR (INSTÄLLNINGAR) ---
+with st.sidebar:
+    st.header("⚙️ Inställningar")
+    
+    if st.button("🧹 Töm Minne / Rensa Cache"):
+        st.cache_data.clear()
+        st.success("Cachen tömd! Tryck F5 för att ladda om.")
+
+    st.subheader("Matchning & Kärna")
+    slider_top_n = st.slider("Antal historiska matcher att hämta", 5, 100, 30, step=5)
+    slider_core_val = st.slider("Kärna % (Värde & Svårighet)", 40, 100, 90, step=5)
+    slider_core_str = st.slider("Kärna % (Struktur & Tecken)", 40, 100, 100, step=5)
+    
+    st.subheader("Makro & Super-Makro")
+    slider_macro_target = st.slider("Målsättning Procent %", 40, 100, 90, step=5)
+    slider_super_groups = st.slider("Super-Makro: Minst antal grupper (av 8)", 1, 8, 4, step=1)
+    
+    st.subheader("Avancerade Filter")
+    slider_u_count = st.slider("Antal Topp-Favoriter (U-tecken)", 1, antal_matcher, min(3, antal_matcher), step=1)
+    p_opts = [0, 500, 1000, 2500, 5000, 10000, 25000, 50000, 75000, 100000, 250000, 500000, 750000, 1000000, 2500000, 5000000, 10000000]
+    slider_payout = st.select_slider("Utdelnings-krav (kr)", options=p_opts, value=(0, p_opts[-1]))
+    
+    st.subheader("Mallen - Aktiva Filter")
+    cb_payout = st.checkbox("Utdelning", value=True)
+    cb_u_favs = st.checkbox("Topp-Favoriter (U-tecken)", value=True)
+    cb_sft = st.checkbox("SFT Summa", value=True)
+    cb_fat = st.checkbox("FAT-Tabell & Summa (Standard)", value=True)
+    cb_points = st.checkbox("POÄNGFILTER (Eget)", value=True)
+    cb_100minus = st.checkbox("100-minus Summa", value=True)
+    cb_rank24 = st.checkbox(f"Rank 1-{krav_odds} Summa", value=True)
+    
+    st.markdown("**Struktur (Standard):**")
+    cb_base = st.checkbox("Grundfilter (1, X, 2)", value=True)
+    cb_streak = st.checkbox("Sviter", value=True)
+    cb_gap = st.checkbox("Luckor", value=True)
+    cb_single = st.checkbox("Singlar", value=True)
+    cb_doublet = st.checkbox("Dubbletter", value=True)
+    cb_triplet = st.checkbox("Tripplar", value=True)
+    cb_occur = st.checkbox("Uppkomster", value=True)
+    
+    st.markdown("**Super-Makro:**")
+    cb_super_macro = st.checkbox(f"Super-Makro (Minst {slider_super_groups} av 8 Grupper)", value=True)
+    
+    cb_aimatrix = st.checkbox("AI-Matrix Rank", value=True)
+    cb_manual_ai_rank = st.checkbox("Styr AI-Rank manuellt", value=False)
+    max_rank = 3**antal_matcher
+    if cb_manual_ai_rank:
+        slider_ai_rank = st.slider("AI-Rank Slider", 1, max_rank, (1, max_rank))
+    
+    cb_structure = st.checkbox("Matcha Struktur (Viktad)", value=True)
+
+    st.markdown("---")
+    st.subheader("🎯 Soft Filtering")
+    active_filters_list = [
+        cb_u_favs, cb_sft, cb_fat, cb_points, cb_100minus, cb_rank24, 
+        cb_base, cb_streak, cb_gap, cb_single, cb_doublet, cb_triplet, cb_occur,
+        cb_super_macro, cb_aimatrix
+    ]
+    total_active = sum(active_filters_list)
+    slider_pass_req = st.slider("Minsta antal uppfyllda krav", 1, total_active, total_active) if total_active > 0 else 0
+
+
+# --- MAIN AREA FÖR INMATNING ---
+input_text = st.text_area(f"Klistra in VÄRDEN ({krav_odds} st oddsprocent):", height=120)
+
+if 'har_kort_analys' not in st.session_state:
+    st.session_state['har_kort_analys'] = False
+
+if st.button("🚀 KÖR ANALYS", use_container_width=True):
+    if input_text:
+        st.session_state['har_kort_analys'] = True
+    else:
+        st.error("⚠️ Klistra in oddsen först!")
+
+# ==========================================
+# RESULTAT-VISNING (Laddas från Cache-Motorn)
+# ==========================================
+if st.session_state.get('har_kort_analys') and input_text:
+    
+    pay_min, pay_max = slider_payout
+    v_m, input_vec, filnamn, err = run_core_analysis(
+        input_text, spelform, antal_matcher, krav_odds, cb_structure, 
+        slider_top_n, cb_payout, pay_min, pay_max
+    )
+    
+    if err:
+        st.error(err)
+    elif v_m is None or len(v_m) == 0:
+        st.error("❌ Inga matcher kvar efter filtrering. Testa att lätta på Utdelningskravet.")
+    else:
+        input_compare = get_structural_vector(input_vec) if cb_structure else input_vec
+        
+        # --- BERÄKNA DELTA FÖR ALLA HISTORISKA RADER INNAN TABELLEN RITAS ---
+        delta_list = []
+        for _, row in v_m.iterrows():
+            if len(row['Correct_Row']) == antal_matcher and len(row['Prob_Vector']) == krav_odds:
+                delta_list.append(calculate_delta(row['Correct_Row'], row['Prob_Vector']))
+            else:
+                delta_list.append(0)
+        v_m['Delta'] = delta_list
+
+        visnings_kolumner = [c for c in ['Datum', 'ID_Omg'] if c in v_m.columns] + ['Payout', 'Delta', 'Sim']
+        
+        if 'ID_Omg' in v_m.columns:
+            v_m['ID_Omg'] = pd.to_numeric(v_m['ID_Omg'], errors='coerce').fillna(0).astype(int).astype(str)
+            v_m['ID_Omg'] = v_m['ID_Omg'].replace('0', '')
+            
+        st.success(f"✅ Auto-laddade: **{filnamn}**. Exakt {len(v_m)} liknande omgångar hittades.")
+        
+        st.subheader(f"📋 Historiska Omgångar ({len(v_m)} st)")
+        st.dataframe(v_m[visnings_kolumner].rename(columns={'Payout':f'Utdelning ({antal_matcher}r)', 'Sim':'Likhet'}).style.format({f'Utdelning ({antal_matcher}r)': '{:.0f} kr', 'Likhet': '{:.2f}', 'Delta': '{:.1f}'}), use_container_width=True)
+
+        # --- DELTA FREKVENSTABELL ---
+        st.markdown("### 📐 Delta-Frekvens (Avvikelse från folket)")
+        st.markdown("Här ser du analytiskt hur mycket de vinnande raderna på denna typ av omgång skiljer sig från favoriterna. En hög Delta betyder att många tunga favoriter fälldes.")
+        
+        delta_bins = [-1, 20, 40, 60, 80, 100, 125, 150, 9999]
+        delta_labels = ['0-20 (Mycket Lätt)', '21-40 (Lätt)', '41-60 (Medel)', '61-80 (Svår)', '81-100 (Mycket Svår)', '101-125 (Extrem)', '126-150 (Brutal)', '151+ (Omsättning)']
+        v_m['Delta_Group'] = pd.cut(v_m['Delta'], bins=delta_bins, labels=delta_labels, right=True)
+        
+        delta_freq = v_m['Delta_Group'].value_counts().sort_index().reset_index()
+        delta_freq.columns = ['Delta-Intervall', 'Antal Omgångar']
+        delta_freq['Historisk Sannolikhet'] = (delta_freq['Antal Omgångar'] / len(v_m) * 100).apply(lambda x: f"{x:.1f} %")
+        st.table(delta_freq)
+
+        ones, draws, twos = [], [], []
+        s1, sx, s2, g1, gx, g2 = [], [], [], [], [], []
+        sing1, singx, sing2, sing_tot = [], [], [], []
+        dub1, dubx, dub2, dub_tot = [], [], [], []
+        trip1, tripx, trip2, trip_tot = [], [], [], []
+        occ1, occx, occ2, occ_tot = [], [], [], []
+        sft_sums, fat_f, fat_a, fat_t, fat_sums = [], [], [], [], []
+        points_vals, minus_sums, rank24_sums, u_wins, ai_ranks = [], [], [], [], []
+
+        for _, row in v_m.iterrows():
+            r, p = row['Correct_Row'], row['Prob_Vector']
+            if 'True_Rank' in row and pd.notna(row['True_Rank']) and row['True_Rank'] > 0:
+                ai_ranks.append(row['True_Rank'])
+            else:
+                h_matrix, h_scores_asc, h_tot = calculate_ai_matrix_from_values(p)
+                rank_c, _ = get_exact_rank(r, h_matrix, h_scores_asc, h_tot)
+                ai_ranks.append(rank_c)
+
+            ones.append(r.count('1')); draws.append(r.count('X')); twos.append(r.count('2'))
+            _s1, _sx, _s2, _ = get_streaks(r); s1.append(_s1); sx.append(_sx); s2.append(_s2)
+            _g1, _gx, _g2, _ = get_gaps(r); g1.append(_g1); gx.append(_gx); g2.append(_g2)
+            _si1, _six, _si2, _sitot, _ = get_singles(r); sing1.append(_si1); singx.append(_six); sing2.append(_si2); sing_tot.append(_sitot)
+            _d1, _dx, _d2, _dtot, _ = get_doublets(r); dub1.append(_d1); dubx.append(_dx); dub2.append(_d2); dub_tot.append(_dtot)
+            _t1, _tx, _t2, _ttot, _ = get_triplets(r); trip1.append(_t1); tripx.append(_tx); trip2.append(_t2); trip_tot.append(_ttot)
+            _o1, _ox, _o2, _otot, _ = get_occurrences(r); occ1.append(_o1); occx.append(_ox); occ2.append(_o2); occ_tot.append(_otot)
+            sft_sums.append(get_sft_sum(r, p))
+            _f, _a, _t, _fs = get_fat(r, p); fat_f.append(_f); fat_a.append(_a); fat_t.append(_t); fat_sums.append(_fs)
+            points_vals.append(get_rank_points(r, p))
+            minus_sums.append(get_100_minus_sum(r, p))
+            rank24_sums.append(get_rank_sum(r, p))
+            u_wins.append(get_top_n_favs_wins(r, p, slider_u_count))
+
+        c_v, c_s = slider_core_val, slider_core_str
+        
+        # --- STANDARD STRUKTUR ---
+        c_ones = get_best_interval(ones, c_s); c_draws = get_best_interval(draws, c_s); c_twos = get_best_interval(twos, c_s)
+        c_s1 = get_best_interval(s1, c_s); c_sx = get_best_interval(sx, c_s); c_s2 = get_best_interval(s2, c_s)
+        c_g1 = get_best_interval(g1, c_s); c_gx = get_best_interval(gx, c_s); c_g2 = get_best_interval(g2, c_s)
+        c_sing1 = get_best_interval(sing1, c_s); c_singx = get_best_interval(singx, c_s); c_sing2 = get_best_interval(sing2, c_s); c_singtot = get_best_interval(sing_tot, c_s)
+        c_dub1 = get_best_interval(dub1, c_s); c_dubx = get_best_interval(dubx, c_s); c_dub2 = get_best_interval(dub2, c_s); c_dubtot = get_best_interval(dub_tot, c_s)
+        c_trip1 = get_best_interval(trip1, c_s); c_tripx = get_best_interval(tripx, c_s); c_trip2 = get_best_interval(trip2, c_s); c_triptot = get_best_interval(trip_tot, c_s)
+        c_occ1 = get_best_interval(occ1, c_s); c_occx = get_best_interval(occx, c_s); c_occ2 = get_best_interval(occ2, c_s); c_occtot = get_best_interval(occ_tot, c_s)
+        
+        c_sft = get_best_interval(sft_sums, c_v)
+        c_fatf = get_best_interval(fat_f, c_v); c_fata = get_best_interval(fat_a, c_v); c_fatt = get_best_interval(fat_t, c_v); c_fatsum = get_best_interval(fat_sums, c_v)
+        c_points = get_best_interval(points_vals, c_v)
+        c_minus = get_best_interval(minus_sums, c_v)
+        c_rank24 = get_best_interval(rank24_sums, c_v)
+        c_u = get_best_interval(u_wins, c_v)
+        
+        c_ai_rank = get_best_interval(ai_ranks, c_v) if len(ai_ranks) > 0 else (1, max_rank)
+        active_ai_min, active_ai_max = slider_ai_rank if cb_manual_ai_rank else c_ai_rank
+        ai_txt = "AI-Rank (MANUELL)" if cb_manual_ai_rank else f"AI-Rank (AUTO {c_v}%)"
+
+        # --- SUPER-MAKRO (X av 8 grupper ska sitta, 2 av 3 internt) ---
+        def get_super_macro_bounds(total_rows, target_prob, req_groups):
+            lists_dict = {
+                '1': ones, 'X': draws, '2': twos,
+                's1': s1, 'sx': sx, 's2': s2,
+                'g1': g1, 'gx': gx, 'g2': g2,
+                'si1': sing1, 'six': singx, 'si2': sing2,
+                'd1': dub1, 'dx': dubx, 'd2': dub2,
+                't1': trip1, 'tx': tripx, 't2': trip2,
+                'o1': occ1, 'ox': occx, 'o2': occ2,
+                'f': fat_f, 'a': fat_a, 't': fat_t
+            }
+            if total_rows == 0: return {k: (0,0) for k in lists_dict}, 0.0
+            
+            for cov in range(0, 101, 1):
+                b = {}
+                for k, lst in lists_dict.items():
+                    if not lst: 
+                        b[k] = (0,0)
+                        continue
+                    if cov == 0:
+                        v = int(np.median(lst))
+                        b[k] = (v, v)
+                    else:
+                        low, upp = 50 - cov/2.0, 50 + cov/2.0
+                        b[k] = (int(round(np.percentile(lst, low))), int(round(np.percentile(lst, upp))))
+                
+                hits = 0
+                for i in range(total_rows):
+                    g_pass = 0
+                    if sum([b['1'][0] <= ones[i] <= b['1'][1], b['X'][0] <= draws[i] <= b['X'][1], b['2'][0] <= twos[i] <= b['2'][1]]) >= 2: g_pass += 1
+                    if sum([b['s1'][0] <= s1[i] <= b['s1'][1], b['sx'][0] <= sx[i] <= b['sx'][1], b['s2'][0] <= s2[i] <= b['s2'][1]]) >= 2: g_pass += 1
+                    if sum([b['g1'][0] <= g1[i] <= b['g1'][1], b['gx'][0] <= gx[i] <= b['gx'][1], b['g2'][0] <= g2[i] <= b['g2'][1]]) >= 2: g_pass += 1
+                    if sum([b['si1'][0] <= sing1[i] <= b['si1'][1], b['six'][0] <= singx[i] <= b['six'][1], b['si2'][0] <= sing2[i] <= b['si2'][1]]) >= 2: g_pass += 1
+                    if sum([b['d1'][0] <= dub1[i] <= b['d1'][1], b['dx'][0] <= dubx[i] <= b['dx'][1], b['d2'][0] <= dub2[i] <= b['d2'][1]]) >= 2: g_pass += 1
+                    if sum([b['t1'][0] <= trip1[i] <= b['t1'][1], b['tx'][0] <= tripx[i] <= b['tx'][1], b['t2'][0] <= trip2[i] <= b['t2'][1]]) >= 2: g_pass += 1
+                    if sum([b['o1'][0] <= occ1[i] <= b['o1'][1], b['ox'][0] <= occx[i] <= b['ox'][1], b['o2'][0] <= occ2[i] <= b['o2'][1]]) >= 2: g_pass += 1
+                    if sum([b['f'][0] <= fat_f[i] <= b['f'][1], b['a'][0] <= fat_a[i] <= b['a'][1], b['t'][0] <= fat_t[i] <= b['t'][1]]) >= 2: g_pass += 1
+                    
+                    if g_pass >= req_groups: hits += 1
+                    
+                prob = (hits / total_rows) * 100
+                if prob >= target_prob:
+                    return b, prob
+            return b, 100.0
+
+        n_rows = len(v_m)
+        sm_bounds, sm_prob = get_super_macro_bounds(n_rows, slider_macro_target, slider_super_groups)
+
+        st.markdown("---")
+        st.header(f"📋 VECKANS MALL ({spelform})")
+        
+        col_v, col_s = st.columns(2)
+        with col_v:
+            st.subheader(f"💰 VÄRDE & SVÅRIGHET ({c_v}%)")
+            if cb_payout: st.write(f"**Utdelning:** {v_m['Payout'].min():.0f} - {v_m['Payout'].max():.0f} kr")
+            if cb_aimatrix: st.write(f"**{ai_txt}:** {active_ai_min:.0f} - {active_ai_max:.0f}")
+            if cb_rank24: st.write(f"**Rank Summa:** {c_rank24[0]:.1f} - {c_rank24[1]:.1f}")
+            if cb_100minus: st.write(f"**100-minus Summa:** {c_minus[0]} - {c_minus[1]}")
+            if cb_sft: st.write(f"**SFT Summa:** {c_sft[0]} - {c_sft[1]}")
+            if cb_points: st.write(f"**Poängfilter:** {c_points[0]} - {c_points[1]}")
+            if cb_fat: st.write(f"**FAT (Standard):** F:{c_fatf[0]}-{c_fatf[1]} | A:{c_fata[0]}-{c_fata[1]} | T:{c_fatt[0]}-{c_fatt[1]} (Summa: {c_fatsum[0]}-{c_fatsum[1]})")
+            if cb_u_favs: st.write(f"**Topp {slider_u_count} Favoriter:** {c_u[0]} - {c_u[1]} st vinner")
+
+        with col_s:
+            st.subheader(f"⚽ STRUKTUR ({c_s}%)")
+            if cb_base: st.write(f"**1X2:** 1: {c_ones[0]}-{c_ones[1]} | X: {c_draws[0]}-{c_draws[1]} | 2: {c_twos[0]}-{c_twos[1]}")
+            if cb_streak: st.write(f"**Sviter:** 1: {c_s1[0]}-{c_s1[1]} | X: {c_sx[0]}-{c_sx[1]} | 2: {c_s2[0]}-{c_s2[1]}")
+            if cb_gap: st.write(f"**Luckor:** 1: {c_g1[0]}-{c_g1[1]} | X: {c_gx[0]}-{c_gx[1]} | 2: {c_g2[0]}-{c_g2[1]}")
+            if cb_single: st.write(f"**Singlar:** 1: {c_sing1[0]}-{c_sing1[1]} | X: {c_singx[0]}-{c_singx[1]} | 2: {c_sing2[0]}-{c_sing2[1]} | Tot: {c_singtot[0]}-{c_singtot[1]}")
+            if cb_doublet: st.write(f"**Dubbletter:** 1: {c_dub1[0]}-{c_dub1[1]} | X: {c_dubx[0]}-{c_dubx[1]} | 2: {c_dub2[0]}-{c_dub2[1]} | Tot: {c_dubtot[0]}-{c_dubtot[1]}")
+            if cb_triplet: st.write(f"**Tripplar:** 1: {c_trip1[0]}-{c_trip1[1]} | X: {c_tripx[0]}-{c_tripx[1]} | 2: {c_trip2[0]}-{c_trip2[1]} | Tot: {c_triptot[0]}-{c_triptot[1]}")
+            if cb_occur: st.write(f"**Uppkomster:** 1: {c_occ1[0]}-{c_occ1[1]} | X: {c_occx[0]}-{c_occx[1]} | 2: {c_occ2[0]}-{c_occ2[1]} | Tot: {c_occtot[0]}-{c_occtot[1]}")
+            
+            st.markdown("---")
+            st.subheader(f"🧩 SUPER-MAKRO (Krav: Minst {slider_super_groups} av 8 grupper)")
+            st.markdown(f"*Minst 2 av 3 interna tecken i en grupp måste sitta för att gruppen ska räknas som 'träffad'. Överlever historiskt **{sm_prob:.1f}%**.*")
+            if cb_super_macro:
+                b = sm_bounds
+                st.write(f"⚽ **Grp 1 (1X2):** 1: {b['1'][0]}-{b['1'][1]} | X: {b['X'][0]}-{b['X'][1]} | 2: {b['2'][0]}-{b['2'][1]}")
+                st.write(f"🔥 **Grp 2 (Sviter):** 1: {b['s1'][0]}-{b['s1'][1]} | X: {b['sx'][0]}-{b['sx'][1]} | 2: {b['s2'][0]}-{b['s2'][1]}")
+                st.write(f"🕳️ **Grp 3 (Luckor):** 1: {b['g1'][0]}-{b['g1'][1]} | X: {b['gx'][0]}-{b['gx'][1]} | 2: {b['g2'][0]}-{b['g2'][1]}")
+                st.write(f"🎯 **Grp 4 (Singlar):** 1: {b['si1'][0]}-{b['si1'][1]} | X: {b['six'][0]}-{b['six'][1]} | 2: {b['si2'][0]}-{b['si2'][1]}")
+                st.write(f"👯 **Grp 5 (Dubbletter):** 1: {b['d1'][0]}-{b['d1'][1]} | X: {b['dx'][0]}-{b['dx'][1]} | 2: {b['d2'][0]}-{b['d2'][1]}")
+                st.write(f"📐 **Grp 6 (Tripplar):** 1: {b['t1'][0]}-{b['t1'][1]} | X: {b['tx'][0]}-{b['tx'][1]} | 2: {b['t2'][0]}-{b['t2'][1]}")
+                st.write(f"💥 **Grp 7 (Uppkomster):** 1: {b['o1'][0]}-{b['o1'][1]} | X: {b['ox'][0]}-{b['ox'][1]} | 2: {b['o2'][0]}-{b['o2'][1]}")
+                st.write(f"🧬 **Grp 8 (FAT):** F: {b['f'][0]}-{b['f'][1]} | A: {b['a'][0]}-{b['a'][1]} | T: {b['t'][0]}-{b['t'][1]}")
+                
+                if antal_matcher == 8:
+                    test_rows = [''.join(tup) for tup in itertools.product(['1','X','2'], repeat=8)]
+                    total_test = 6561
+                    is_exact = True
+                else:
+                    mc_matrix = np.random.choice(['1', 'X', '2'], size=(10000, 13))
+                    test_rows = [''.join(row) for row in mc_matrix]
+                    total_test = 10000
+                    is_exact = False
+                    
+                sm_survivors = 0
+                for tr in test_rows:
+                    g_pass = 0
+                    c1, cx, c2 = tr.count('1'), tr.count('X'), tr.count('2')
+                    s1_c, sx_c, s2_c, _ = get_streaks(tr)
+                    g1_c, gx_c, g2_c, _ = get_gaps(tr)
+                    si1_c, six_c, si2_c, _, _ = get_singles(tr)
+                    d1_c, dx_c, d2_c, _, _ = get_doublets(tr)
+                    t1_c, tx_c, t2_c, _, _ = get_triplets(tr)
+                    o1_c, ox_c, o2_c, _, _ = get_occurrences(tr)
+                    f_c, a_c, t_c, _ = get_fat(tr, input_compare)
+                    
+                    if sum([b['1'][0] <= c1 <= b['1'][1], b['X'][0] <= cx <= b['X'][1], b['2'][0] <= c2 <= b['2'][1]]) >= 2: g_pass += 1
+                    if sum([b['s1'][0] <= s1_c <= b['s1'][1], b['sx'][0] <= sx_c <= b['sx'][1], b['s2'][0] <= s2_c <= b['s2'][1]]) >= 2: g_pass += 1
+                    if sum([b['g1'][0] <= g1_c <= b['g1'][1], b['gx'][0] <= gx_c <= b['gx'][1], b['g2'][0] <= g2_c <= b['g2'][1]]) >= 2: g_pass += 1
+                    if sum([b['si1'][0] <= si1_c <= b['si1'][1], b['six'][0] <= six_c <= b['six'][1], b['si2'][0] <= si2_c <= b['si2'][1]]) >= 2: g_pass += 1
+                    if sum([b['d1'][0] <= d1_c <= b['d1'][1], b['dx'][0] <= dx_c <= b['dx'][1], b['d2'][0] <= d2_c <= b['d2'][1]]) >= 2: g_pass += 1
+                    if sum([b['t1'][0] <= t1_c <= b['t1'][1], b['tx'][0] <= tx_c <= b['tx'][1], b['t2'][0] <= t2_c <= b['t2'][1]]) >= 2: g_pass += 1
+                    if sum([b['o1'][0] <= o1_c <= b['o1'][1], b['ox'][0] <= ox_c <= b['ox'][1], b['o2'][0] <= o2_c <= b['o2'][1]]) >= 2: g_pass += 1
+                    if sum([b['f'][0] <= f_c <= b['f'][1], b['a'][0] <= a_c <= b['a'][1], b['t'][0] <= t_c <= b['t'][1]]) >= 2: g_pass += 1
+                    
+                    if g_pass >= slider_super_groups:
+                        sm_survivors += 1
+                        
+                red_pct = 100 - ((sm_survivors / total_test) * 100)
+                if is_exact:
+                    st.success(f"✂️ **Omedelbar effekt:** Bara detta Super-Makro ensamt slaktar bort **{red_pct:.1f}%** av de matematiska raderna! (Kvar: {sm_survivors} av 6 561)")
+                else:
+                    est_rader = int(1594323 * (sm_survivors / total_test))
+                    st.success(f"✂️ **Omedelbar effekt (AI-Estimat):** Bara detta Super-Makro ensamt slaktar bort ca **{red_pct:.1f}%** av de matematiska raderna! (Kvar: ca {est_rader:,} av 1 594 323 rader)".replace(',', ' '))
+
+        mall_hits = 0
+        for i in range(len(v_m)):
+            pts = 0
+            if cb_base and (c_ones[0] <= ones[i] <= c_ones[1] and c_draws[0] <= draws[i] <= c_draws[1] and c_twos[0] <= twos[i] <= c_twos[1]): pts += 1
+            if cb_streak and (c_s1[0] <= s1[i] <= c_s1[1] and c_sx[0] <= sx[i] <= c_sx[1] and c_s2[0] <= s2[i] <= c_s2[1]): pts += 1
+            if cb_gap and (c_g1[0] <= g1[i] <= c_g1[1] and c_gx[0] <= gx[i] <= c_gx[1] and c_g2[0] <= g2[i] <= c_g2[1]): pts += 1
+            if cb_single and (c_sing1[0] <= sing1[i] <= c_sing1[1] and c_singx[0] <= singx[i] <= c_singx[1] and c_sing2[0] <= sing2[i] <= c_sing2[1] and c_singtot[0] <= sing_tot[i] <= c_singtot[1]): pts += 1
+            if cb_doublet and (c_dub1[0] <= dub1[i] <= c_dub1[1] and c_dubx[0] <= dubx[i] <= c_dubx[1] and c_dub2[0] <= dub2[i] <= c_dub2[1] and c_dubtot[0] <= dub_tot[i] <= c_dubtot[1]): pts += 1
+            if cb_triplet and (c_trip1[0] <= trip1[i] <= c_trip1[1] and c_tripx[0] <= tripx[i] <= c_tripx[1] and c_trip2[0] <= trip2[i] <= c_trip2[1] and c_triptot[0] <= trip_tot[i] <= c_triptot[1]): pts += 1
+            if cb_occur and (c_occ1[0] <= occ1[i] <= c_occ1[1] and c_occx[0] <= occx[i] <= c_occx[1] and c_occ2[0] <= occ2[i] <= c_occ2[1] and c_occtot[0] <= occ_tot[i] <= c_occtot[1]): pts += 1
+            
+            if cb_super_macro:
+                g_pass = 0
+                b = sm_bounds
+                if sum([b['1'][0] <= ones[i] <= b['1'][1], b['X'][0] <= draws[i] <= b['X'][1], b['2'][0] <= twos[i] <= b['2'][1]]) >= 2: g_pass += 1
+                if sum([b['s1'][0] <= s1[i] <= b['s1'][1], b['sx'][0] <= sx[i] <= b['sx'][1], b['s2'][0] <= s2[i] <= b['s2'][1]]) >= 2: g_pass += 1
+                if sum([b['g1'][0] <= g1[i] <= b['g1'][1], b['gx'][0] <= gx[i] <= b['gx'][1], b['g2'][0] <= g2[i] <= b['g2'][1]]) >= 2: g_pass += 1
+                if sum([b['si1'][0] <= sing1[i] <= b['si1'][1], b['six'][0] <= singx[i] <= b['six'][1], b['si2'][0] <= sing2[i] <= b['si2'][1]]) >= 2: g_pass += 1
+                if sum([b['d1'][0] <= dub1[i] <= b['d1'][1], b['dx'][0] <= dubx[i] <= b['dx'][1], b['d2'][0] <= dub2[i] <= b['d2'][1]]) >= 2: g_pass += 1
+                if sum([b['t1'][0] <= trip1[i] <= b['t1'][1], b['tx'][0] <= tripx[i] <= b['tx'][1], b['t2'][0] <= trip2[i] <= b['t2'][1]]) >= 2: g_pass += 1
+                if sum([b['o1'][0] <= occ1[i] <= b['o1'][1], b['ox'][0] <= occx[i] <= b['ox'][1], b['o2'][0] <= occ2[i] <= b['o2'][1]]) >= 2: g_pass += 1
+                if sum([b['f'][0] <= fat_f[i] <= b['f'][1], b['a'][0] <= fat_a[i] <= b['a'][1], b['t'][0] <= fat_t[i] <= b['t'][1]]) >= 2: g_pass += 1
+                if g_pass >= slider_super_groups: pts += 1
+            
+            if cb_fat and (c_fatf[0] <= fat_f[i] <= c_fatf[1] and c_fata[0] <= fat_a[i] <= c_fata[1] and c_fatt[0] <= fat_t[i] <= c_fatt[1] and c_fatsum[0] <= fat_sums[i] <= c_fatsum[1]): pts += 1
+            if cb_u_favs and (c_u[0] <= u_wins[i] <= c_u[1]): pts += 1
+            if cb_sft and (c_sft[0] <= sft_sums[i] <= c_sft[1]): pts += 1
+            if cb_points and (c_points[0] <= points_vals[i] <= c_points[1]): pts += 1
+            if cb_100minus and (c_minus[0] <= minus_sums[i] <= c_minus[1]): pts += 1
+            if cb_rank24 and (c_rank24[0] <= rank24_sums[i] <= c_rank24[1]): pts += 1
+            if cb_aimatrix and (active_ai_min <= ai_ranks[i] <= active_ai_max): pts += 1
+            
+            if pts >= slider_pass_req: mall_hits += 1
+
+        st.info(f"📈 **HISTORISK TRÄFFSÄKERHET:** {mall_hits} av {len(v_m)} rader ({mall_hits/len(v_m)*100:.1f}%) fick tillräckligt med poäng ({slider_pass_req} poäng) för att passera Soft-filtret.")
+
+        st.markdown("---")
+        st.subheader("🧬 Dagens Bästa FAT-Sekvenser (Byggklossar)")
+        st.markdown("Här analyserar AI:n vilka specifika mönster (1=Fav, 2=Andrahand, 3=Skräll) som bäst täcker in **exakt denna typ av omgång**.")
+        
+        def get_fat_string(row_str, prob_vector):
+            fat_str = ""
+            for i, char in enumerate(row_str):
+                idx = i * 3
+                ranked = sorted([('1', prob_vector[idx]), ('X', prob_vector[idx+1]), ('2', prob_vector[idx+2])], key=lambda x: x[1], reverse=True)
+                if char == ranked[0][0]: fat_str += '1'
+                elif char == ranked[1][0]: fat_str += '2'
+                else: fat_str += '3'
+            return fat_str
+
+        fat_strings = [get_fat_string(row['Correct_Row'], row['Prob_Vector']) for _, row in v_m.iterrows() if len(row['Correct_Row']) == antal_matcher]
+        total_twins = len(fat_strings)
+        
+        if total_twins > 0:
+            col_seq2, col_seq3, col_combo = st.columns(3)
+            
+            def calculate_top_seqs(fat_list, length, top_n=5):
+                seqs = [''.join(p) for p in itertools.product('123', repeat=length)]
+                counts = {s: sum(1 for r in fat_list if s in r) for s in seqs}
+                return sorted(counts.items(), key=lambda x: x[1], reverse=True)[:top_n]
+
+            with col_seq2:
+                st.markdown("**Två i rad (Längd 2)**")
+                for seq, count in calculate_top_seqs(fat_strings, 2):
+                    chans = (count/total_twins)*100
+                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} st)")
+                    
+            with col_seq3:
+                st.markdown("**Tre i rad (Längd 3)**")
+                for seq, count in calculate_top_seqs(fat_strings, 3):
+                    chans = (count/total_twins)*100
+                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} st)")
+                    
+            with col_combo:
+                st.markdown("**Dubbelchans (Minst 1 av 2)**")
+                st.caption("Kombinationer av Längd 3")
+                
+                seqs3 = [''.join(p) for p in itertools.product('123', repeat=3)]
+                pair_counts = []
+                for s1, s2 in itertools.combinations(seqs3, 2):
+                    covered = sum(1 for r in fat_strings if s1 in r or s2 in r)
+                    pair_counts.append(((s1, s2), covered))
+                
+                best_pairs = sorted(pair_counts, key=lambda x: x[1], reverse=True)[:5]
+                for (s1, s2), count in best_pairs:
+                    chans = (count/total_twins)*100
+                    st.write(f"**{s1}** / **{s2}** ➡️ **{chans:.1f}%** ({count} st)")
+                    
+        st.markdown("---")
+        st.subheader("🧠 AI:ns Strategiska Byggklossar (För reducering)")
+        
+        match_data = []
+        for m in range(antal_matcher):
+            hist_outcomes = [row['Correct_Row'][m] for _, row in v_m.iterrows() if len(row['Correct_Row']) == antal_matcher]
+            if not hist_outcomes: continue
+                
+            tot = len(hist_outcomes)
+            c1, cx, c2 = hist_outcomes.count('1'), hist_outcomes.count('X'), hist_outcomes.count('2')
+            p1, px, p2 = (c1/tot)*100, (cx/tot)*100, (c2/tot)*100
+            utfall = [('1', p1), ('X', px), ('2', p2)]
+            utfall.sort(key=lambda x: x[1], reverse=True)
+            
+            odds_idag = {'1': input_vec[m*3], 'X': input_vec[m*3+1], '2': input_vec[m*3+2]}
+            
+            best_single = utfall[0]
+            value_single = best_single[1] - odds_idag[best_single[0]]
+            
+            best_double_signs = sorted([utfall[0][0], utfall[1][0]])
+            best_double_str = "1X" if best_double_signs==['1','X'] else "12" if best_double_signs==['1','2'] else "X2"
+            best_double_pct = utfall[0][1] + utfall[1][1]
+            
+            skrällar = []
+            for sign, hist_pct in utfall:
+                if odds_idag[sign] < 20:
+                    skrällar.append({
+                        'match': m+1, 'sign': sign, 'hist_pct': hist_pct, 'odds_idag': odds_idag[sign]
+                    })
+                    
+            match_data.append({
+                'match': m+1,
+                'odds_idag': odds_idag,
+                'best_single_sign': best_single[0],
+                'best_single_pct': best_single[1],
+                'value_single': value_single,
+                'best_double_str': best_double_str,
+                'best_double_pct': best_double_pct,
+                'skrällar': skrällar
+            })
+
+        spikar_sorted = sorted(match_data, key=lambda x: (x['best_single_pct'], x['value_single']), reverse=True)
+        top_5_spikar = spikar_sorted[:5]
+        
+        las_sorted = sorted(match_data, key=lambda x: x['best_double_pct'], reverse=True)
+        top_5_las = las_sorted[:5]
+        
+        all_skrallar = []
+        for md in match_data:
+            all_skrallar.extend(md['skrällar'])
+        top_5_skrallar = sorted(all_skrallar, key=lambda x: x['hist_pct'], reverse=True)[:5]
+        
+        kv_spikar = spikar_sorted[:2]
+        used_matches_for_kv = [m['match'] for m in kv_spikar]
+        
+        kv_las_candidates = [m for m in las_sorted if m['match'] not in used_matches_for_kv]
+        kv_las = kv_las_candidates[:4]
+        
+        group_a = [kv_spikar[0], kv_las[0], kv_las[1]] if len(kv_las) >= 2 else []
+        group_b = [kv_spikar[1], kv_las[2], kv_las[3]] if len(kv_las) >= 4 else []
+
+        col_spik, col_las, col_skrall = st.columns(3)
+        
+        with col_spik:
+            st.markdown("🔥 **Topp 5 Spikarna**")
+            for s in top_5_spikar:
+                st.write(f"**M{s['match']}: {s['best_single_sign']}** (Vinner {s['best_single_pct']:.0f}%, Streck {s['odds_idag'][s['best_single_sign']]:.0f}%)")
+
+        with col_las:
+            st.markdown("🔒 **Topp 5 Låsen**")
+            for l in top_5_las:
+                st.write(f"**M{l['match']}: {l['best_double_str']}** (Täcker {l['best_double_pct']:.0f}%)")
+
+        with col_skrall:
+            st.markdown("💣 **Topp 5 Skrälldrag (<20%)**")
+            if not top_5_skrallar:
+                st.write("Hittade inga skrällar under 20% idag.")
+            for sk in top_5_skrallar:
+                st.write(f"**M{sk['match']}: {sk['sign']}** (Vinner {sk['hist_pct']:.0f}%, Streck {sk['odds_idag']:.0f}%)")
+
+        if group_a and group_b:
+            st.markdown("---")
+            st.markdown("🎯 **Dina Dubbla Kärnvillkor (Reducerings-förslag)**")
+            st.markdown("Ställ in dessa som *'U-tecken/Utgångsrad'* i ditt program med kravet att **exakt 2 eller 3 måste sitta**.")
+            
+            def calc_2_of_3_prob(p1, p2, p3):
+                p1, p2, p3 = p1/100.0, p2/100.0, p3/100.0
+                q1, q2, q3 = 1-p1, 1-p2, 1-p3
+                exakt_2 = (p1 * p2 * q3) + (p1 * p3 * q2) + (p2 * p3 * q1)
+                alla_3 = p1 * p2 * p3
+                return (exakt_2 + alla_3) * 100
+
+            prob_a = calc_2_of_3_prob(group_a[0]['best_single_pct'], group_a[1]['best_double_pct'], group_a[2]['best_double_pct'])
+            prob_b = calc_2_of_3_prob(group_b[0]['best_single_pct'], group_b[1]['best_double_pct'], group_b[2]['best_double_pct'])
+
+            col_kva, col_kvb = st.columns(2)
+            with col_kva:
+                st.info(f"🛡️ **Grupp A (Krav: Minst 2 av 3 ska sitta)**\n\n"
+                        f"✅ **M{group_a[0]['match']}**: Spik {group_a[0]['best_single_sign']} *(Vinner {group_a[0]['best_single_pct']:.0f}%)*\n\n"
+                        f"✅ **M{group_a[1]['match']}**: Lås {group_a[1]['best_double_str']} *(Täcker {group_a[1]['best_double_pct']:.0f}%)*\n\n"
+                        f"✅ **M{group_a[2]['match']}**: Lås {group_a[2]['best_double_str']} *(Täcker {group_a[2]['best_double_pct']:.0f}%)*\n\n"
+                        f"📊 **Överlever: {prob_a:.1f}%**")
+            with col_kvb:
+                st.info(f"⚔️ **Grupp B (Krav: Minst 2 av 3 ska sitta)**\n\n"
+                        f"✅ **M{group_b[0]['match']}**: Spik {group_b[0]['best_single_sign']} *(Vinner {group_b[0]['best_single_pct']:.0f}%)*\n\n"
+                        f"✅ **M{group_b[1]['match']}**: Lås {group_b[1]['best_double_str']} *(Täcker {group_b[1]['best_double_pct']:.0f}%)*\n\n"
+                        f"✅ **M{group_b[2]['match']}**: Lås {group_b[2]['best_double_str']} *(Täcker {group_b[2]['best_double_pct']:.0f}%)*\n\n"
+                        f"📊 **Överlever: {prob_b:.1f}%**")
+
+        if antal_matcher == 8:
+            st.markdown("---")
+            st.subheader("🎲 EXAKT UTRÄKNING (6 561 rader)")
+            all_possible_rows = [''.join(tup) for tup in itertools.product(['1','X','2'], repeat=8)]
+            ai_matrix, ai_scores_asc, ai_tot = calculate_ai_matrix_from_values(input_compare)
+            
+            valid_exact_rows = [] 
+            
+            for tr in all_possible_rows:
+                pts = 0
+                c1, cx, c2 = tr.count('1'), tr.count('X'), tr.count('2')
+                s1_c, sx_c, s2_c, _ = get_streaks(tr)
+                g1_c, gx_c, g2_c, _ = get_gaps(tr)
+                si1_c, six_c, si2_c, singtot_c, _ = get_singles(tr)
+                d1_c, dx_c, d2_c, dubtot_c, _ = get_doublets(tr)
+                t1_c, tx_c, t2_c, triptot_c, _ = get_triplets(tr)
+                o1_c, ox_c, o2_c, occtot_c, _ = get_occurrences(tr)
+                f_c, a_c, t_c, fsum_c = get_fat(tr, input_compare)
+                
+                if cb_base and (c_ones[0] <= c1 <= c_ones[1] and c_draws[0] <= cx <= c_draws[1] and c_twos[0] <= c2 <= c_twos[1]): pts += 1
+                if cb_streak and (c_s1[0] <= s1_c <= c_s1[1] and c_sx[0] <= sx_c <= c_sx[1] and c_s2[0] <= s2_c <= c_s2[1]): pts += 1
+                if cb_gap and (c_g1[0] <= g1_c <= c_g1[1] and c_gx[0] <= gx_c <= c_gx[1] and c_g2[0] <= g2_c <= c_g2[1]): pts += 1
+                if cb_single and (c_sing1[0] <= si1_c <= c_sing1[1] and c_singx[0] <= six_c <= c_singx[1] and c_sing2[0] <= si2_c <= c_sing2[1] and c_singtot[0] <= singtot_c <= c_singtot[1]): pts += 1
+                if cb_doublet and (c_dub1[0] <= d1_c <= c_dub1[1] and c_dubx[0] <= dx_c <= c_dubx[1] and c_dub2[0] <= d2_c <= c_dub2[1] and c_dubtot[0] <= dubtot_c <= c_dubtot[1]): pts += 1
+                if cb_triplet and (c_trip1[0] <= t1_c <= c_trip1[1] and c_tripx[0] <= tx_c <= c_tripx[1] and c_trip2[0] <= t2_c <= c_trip2[1] and c_triptot[0] <= triptot_c <= c_triptot[1]): pts += 1
+                if cb_occur and (c_occ1[0] <= o1_c <= c_occ1[1] and c_occx[0] <= ox_c <= c_occx[1] and c_occ2[0] <= o2_c <= c_occ2[1] and c_occtot[0] <= occtot_c <= c_occtot[1]): pts += 1
+                
+                if cb_super_macro:
+                    g_pass = 0
+                    b = sm_bounds
+                    if sum([b['1'][0] <= c1 <= b['1'][1], b['X'][0] <= cx <= b['X'][1], b['2'][0] <= c2 <= b['2'][1]]) >= 2: g_pass += 1
+                    if sum([b['s1'][0] <= s1_c <= b['s1'][1], b['sx'][0] <= sx_c <= b['sx'][1], b['s2'][0] <= s2_c <= b['s2'][1]]) >= 2: g_pass += 1
+                    if sum([b['g1'][0] <= g1_c <= b['g1'][1], b['gx'][0] <= gx_c <= b['gx'][1], b['g2'][0] <= g2_c <= b['g2'][1]]) >= 2: g_pass += 1
+                    if sum([b['si1'][0] <= si1_c <= b['si1'][1], b['six'][0] <= six_c <= b['six'][1], b['si2'][0] <= si2_c <= b['si2'][1]]) >= 2: g_pass += 1
+                    if sum([b['d1'][0] <= d1_c <= b['d1'][1], b['dx'][0] <= dx_c <= b['dx'][1], b['d2'][0] <= d2_c <= b['d2'][1]]) >= 2: g_pass += 1
+                    if sum([b['t1'][0] <= t1_c <= b['t1'][1], b['tx'][0] <= tx_c <= b['tx'][1], b['t2'][0] <= t2_c <= b['t2'][1]]) >= 2: g_pass += 1
+                    if sum([b['o1'][0] <= o1_c <= b['o1'][1], b['ox'][0] <= ox_c <= b['ox'][1], b['o2'][0] <= o2_c <= b['o2'][1]]) >= 2: g_pass += 1
+                    if sum([b['f'][0] <= f_c <= b['f'][1], b['a'][0] <= a_c <= b['a'][1], b['t'][0] <= t_c <= b['t'][1]]) >= 2: g_pass += 1
+                    if g_pass >= slider_super_groups: pts += 1
+
+                if cb_fat and (c_fatf[0] <= f_c <= c_fatf[1] and c_fata[0] <= a_c <= c_fata[1] and c_fatt[0] <= t_c <= c_fatt[1] and c_fatsum[0] <= fsum_c <= c_fatsum[1]): pts += 1
+                if cb_u_favs and (c_u[0] <= get_top_n_favs_wins(tr, input_compare, slider_u_count) <= c_u[1]): pts += 1
+                if cb_sft and (c_sft[0] <= get_sft_sum(tr, input_compare) <= c_sft[1]): pts += 1
+                if cb_points and (c_points[0] <= get_rank_points(tr, input_compare) <= c_points[1]): pts += 1
+                if cb_100minus and (c_minus[0] <= get_100_minus_sum(tr, input_compare) <= c_minus[1]): pts += 1
+                if cb_rank24 and (c_rank24[0] <= get_rank_sum(tr, input_compare) <= c_rank24[1]): pts += 1
+                if cb_aimatrix:
+                    rank_c, _ = get_exact_rank(tr, ai_matrix, ai_scores_asc, ai_tot)
+                    if (active_ai_min <= rank_c <= active_ai_max): pts += 1
+                
+                if pts >= slider_pass_req: 
+                    valid_exact_rows.append(tr)
+            
+            sim_hits = len(valid_exact_rows)
+            st.success(f"🎯 **EXAKT KVARVARANDE RADANTAL:** {sim_hits} st (Skurit bort {100 - ((sim_hits / 6561) * 100):.2f}%) med Soft Filtering.")
+            
+            if sim_hits > 0:
+                st.markdown("### 📊 Frekvenstabell (Mallen)")
+                freq_data = []
+                for m in range(antal_matcher):
+                    c1 = sum(1 for r in valid_exact_rows if r[m] == '1')
+                    cx = sum(1 for r in valid_exact_rows if r[m] == 'X')
+                    c2 = sum(1 for r in valid_exact_rows if r[m] == '2')
+                    freq_data.append({
+                        "Match": f"M{m+1}",
+                        "1 (%)": f"{(c1/sim_hits)*100:.1f} %",
+                        "X (%)": f"{(cx/sim_hits)*100:.1f} %",
+                        "2 (%)": f"{(c2/sim_hits)*100:.1f} %"
+                    })
+                st.dataframe(pd.DataFrame(freq_data).set_index("Match"), use_container_width=True)
+
+        else:
+            st.info("💡 Exakt uträkning är avstängd för 13 matcher (för snabbhetens skull). Mallen är dock helt redo för reducering!")
+
+        st.markdown("---")
+        st.subheader("📊 Datadistribution")
+        fig = plt.figure(figsize=(18, 16)) 
+        def smart_plot(data_list, col_idx, color, title, xlabel, is_active, val_min, val_max):
+            plt.subplot(3, 3, col_idx) 
+            valid_data = [d for d in data_list if not pd.isna(d)]
+            if not valid_data: plt.text(0.5, 0.5, 'Ingen data', ha='center', va='center'); plt.title(title); return
+            d_min, d_max = min(valid_data), max(valid_data)
+            d_range = d_max - d_min
+            bins = np.arange(np.floor(d_min)-0.5, np.ceil(d_max)+1.5, 1) if d_range <= 40 else int(d_range) if d_range <= 150 else 25
+            plt.hist(valid_data, bins=bins, color=color, edgecolor='black', alpha=0.8)
+            plt.title(title, fontweight='bold'); plt.xlabel(xlabel); plt.ylabel('Antal')
+            
+            if d_range == 0: ticks = [d_min]
+            elif d_range <= 20: ticks = np.arange(np.floor(d_min), np.ceil(d_max) + 1, 1)
+            elif d_range <= 60: ticks = np.arange(np.floor(d_min), np.ceil(d_max) + 2, 2)
+            elif d_range <= 150: ticks = np.arange(np.floor(d_min), np.ceil(d_max) + 5, 5)
+            elif d_range <= 400: ticks = np.arange(np.floor(d_min), np.ceil(d_max) + 10, 10)
+            else: ticks = np.linspace(d_min, d_max, 10).astype(int)
+            
+            plt.xticks(ticks, rotation=45); plt.grid(axis='y', linestyle='--', alpha=0.5)
+            if is_active:
+                plt.axvline(val_min, color='red', linestyle='dashed', linewidth=2, label='Mallen Min')
+                plt.axvline(val_max, color='darkred', linestyle='dashed', linewidth=2, label='Mallen Max')
+                plt.legend()
+
+        smart_plot([r for r in ai_ranks if r > 0], 1, 'skyblue', 'AI-Rank', 'AI-Rank', cb_aimatrix, active_ai_min, active_ai_max)
+        smart_plot(sft_sums, 2, 'coral', 'SFT Summa', 'SFT Summa', cb_sft, c_sft[0], c_sft[1])
+        smart_plot(fat_sums, 3, 'gold', 'FAT Summa', 'FAT Summa', cb_fat, c_fatsum[0], c_fatsum[1]) 
+        smart_plot(points_vals, 4, 'mediumpurple', 'Poängfilter', 'Poäng', cb_points, c_points[0], c_points[1])
+        smart_plot(minus_sums, 5, 'tan', '100-minus Summa', '100-minus', cb_100minus, c_minus[0], c_minus[1])
+        smart_plot(rank24_sums, 6, 'lightpink', 'Rank Summa', 'Rank Summa', cb_rank24, c_rank24[0], c_rank24[1])
+        smart_plot(list(v_m['Delta']), 7, 'lightgreen', 'Delta (Avvikelse)', 'Delta Poäng', False, 0, 0) # Delta är statisk, ingen röd linje
+        
+        plt.tight_layout(pad=2.0, h_pad=2.0)
+        
+        st.pyplot(fig)
+        plt.close(fig)
