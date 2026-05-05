@@ -807,62 +807,50 @@ if st.session_state.get('har_kort_analys') and input_text:
             all_skrallar.extend(md['skrällar'])
         top_5_skrallar = sorted(all_skrallar, key=lambda x: x['hist_pct'], reverse=True)[:5]
         
-        kv_spikar = spikar_sorted[:2]
-        used_matches_for_kv = [m['match'] for m in kv_spikar]
+        # --- BERÄKNA HISTORISKT UTFALL FÖR BYGGKLOSSARNA ---
+        spik_hits, las_hits, skrall_hits = [], [], []
+        valid_rows_for_stats = [row['Correct_Row'] for _, row in v_m.iterrows() if len(row['Correct_Row']) == antal_matcher]
         
-        kv_las_candidates = [m for m in las_sorted if m['match'] not in used_matches_for_kv]
-        kv_las = kv_las_candidates[:4]
-        
-        group_a = [kv_spikar[0], kv_las[0], kv_las[1]] if len(kv_las) >= 2 else []
-        group_b = [kv_spikar[1], kv_las[2], kv_las[3]] if len(kv_las) >= 4 else []
+        for r_str in valid_rows_for_stats:
+            spik_hits.append(sum(1 for s in top_5_spikar if r_str[s['match']-1] == s['best_single_sign']))
+            las_hits.append(sum(1 for l in top_5_las if r_str[l['match']-1] in l['best_double_str']))
+            skrall_hits.append(sum(1 for sk in top_5_skrallar if r_str[sk['match']-1] == sk['sign']))
+            
+        def get_stat_strings(hits, max_items):
+            if not hits or max_items == 0: return "Kan inte beräkna."
+            tot = len(hits)
+            lines = [f"📊 **Historiskt utfall:** Min {min(hits)} | Max {max(hits)}"]
+            for i in range(max_items + 1):
+                pct = (hits.count(i) / tot) * 100
+                lines.append(f"**Exakt {i} sitter:** {pct:.1f} %")
+            return "\n".join(lines)
 
+        # --- RITA UPP BYGGKLOSSARNA ---
         col_spik, col_las, col_skrall = st.columns(3)
         
         with col_spik:
             st.markdown("🔥 **Topp 5 Spikarna**")
             for s in top_5_spikar:
                 st.write(f"**M{s['match']}: {s['best_single_sign']}** (Vinner {s['best_single_pct']:.0f}%, Streck {s['odds_idag'][s['best_single_sign']]:.0f}%)")
+            st.markdown("---")
+            st.markdown(get_stat_strings(spik_hits, len(top_5_spikar)))
 
         with col_las:
             st.markdown("🔒 **Topp 5 Låsen**")
             for l in top_5_las:
                 st.write(f"**M{l['match']}: {l['best_double_str']}** (Täcker {l['best_double_pct']:.0f}%)")
+            st.markdown("---")
+            st.markdown(get_stat_strings(las_hits, len(top_5_las)))
 
         with col_skrall:
             st.markdown("💣 **Topp 5 Skrälldrag (<20%)**")
             if not top_5_skrallar:
                 st.write("Hittade inga skrällar under 20% idag.")
-            for sk in top_5_skrallar:
-                st.write(f"**M{sk['match']}: {sk['sign']}** (Vinner {sk['hist_pct']:.0f}%, Streck {sk['odds_idag']:.0f}%)")
-
-        if group_a and group_b:
-            st.markdown("---")
-            st.markdown("🎯 **Dina Dubbla Kärnvillkor (Reducerings-förslag)**")
-            st.markdown("Ställ in dessa som *'U-tecken/Utgångsrad'* i ditt program med kravet att **exakt 2 eller 3 måste sitta**.")
-            
-            def calc_2_of_3_prob(p1, p2, p3):
-                p1, p2, p3 = p1/100.0, p2/100.0, p3/100.0
-                q1, q2, q3 = 1-p1, 1-p2, 1-p3
-                exakt_2 = (p1 * p2 * q3) + (p1 * p3 * q2) + (p2 * p3 * q1)
-                alla_3 = p1 * p2 * p3
-                return (exakt_2 + alla_3) * 100
-
-            prob_a = calc_2_of_3_prob(group_a[0]['best_single_pct'], group_a[1]['best_double_pct'], group_a[2]['best_double_pct'])
-            prob_b = calc_2_of_3_prob(group_b[0]['best_single_pct'], group_b[1]['best_double_pct'], group_b[2]['best_double_pct'])
-
-            col_kva, col_kvb = st.columns(2)
-            with col_kva:
-                st.info(f"🛡️ **Grupp A (Krav: Minst 2 av 3 ska sitta)**\n\n"
-                        f"✅ **M{group_a[0]['match']}**: Spik {group_a[0]['best_single_sign']} *(Vinner {group_a[0]['best_single_pct']:.0f}%)*\n\n"
-                        f"✅ **M{group_a[1]['match']}**: Lås {group_a[1]['best_double_str']} *(Täcker {group_a[1]['best_double_pct']:.0f}%)*\n\n"
-                        f"✅ **M{group_a[2]['match']}**: Lås {group_a[2]['best_double_str']} *(Täcker {group_a[2]['best_double_pct']:.0f}%)*\n\n"
-                        f"📊 **Överlever: {prob_a:.1f}%**")
-            with col_kvb:
-                st.info(f"⚔️ **Grupp B (Krav: Minst 2 av 3 ska sitta)**\n\n"
-                        f"✅ **M{group_b[0]['match']}**: Spik {group_b[0]['best_single_sign']} *(Vinner {group_b[0]['best_single_pct']:.0f}%)*\n\n"
-                        f"✅ **M{group_b[1]['match']}**: Lås {group_b[1]['best_double_str']} *(Täcker {group_b[1]['best_double_pct']:.0f}%)*\n\n"
-                        f"✅ **M{group_b[2]['match']}**: Lås {group_b[2]['best_double_str']} *(Täcker {group_b[2]['best_double_pct']:.0f}%)*\n\n"
-                        f"📊 **Överlever: {prob_b:.1f}%**")
+            else:
+                for sk in top_5_skrallar:
+                    st.write(f"**M{sk['match']}: {sk['sign']}** (Vinner {sk['hist_pct']:.0f}%, Streck {sk['odds_idag']:.0f}%)")
+                st.markdown("---")
+                st.markdown(get_stat_strings(skrall_hits, len(top_5_skrallar)))
 
         if antal_matcher == 8:
             st.markdown("---")
