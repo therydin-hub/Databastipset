@@ -214,7 +214,6 @@ def calculate_total_diff(match_odds, correct_results):
         
     return total_diff
 
-# --- DELTA-KALKYLATOR ---
 def calculate_delta(row_str, prob_vector):
     if not row_str or len(prob_vector) != len(row_str) * 3: return 0
     delta_sum = 0
@@ -226,7 +225,6 @@ def calculate_delta(row_str, prob_vector):
         delta_sum += (fav_pct - win_pct)
     return round(delta_sum, 1)
 
-# --- STATISTIK-UTSKRIFT (Standard) ---
 def get_stat_strings(hits, max_items):
     if not hits or max_items == 0: return "Kan inte beräkna."
     tot = len(hits)
@@ -236,7 +234,6 @@ def get_stat_strings(hits, max_items):
         lines.append(f"**Exakt {i} sitter:** {pct:.1f} %")
     return "\n".join(lines)
 
-# --- NY STATISTIK-UTSKRIFT (Kompakt för långa sviter) ---
 def get_compact_stat_strings(title, hits):
     if not hits: return f"**{title}:** Kan inte beräkna."
     tot = len(hits)
@@ -249,7 +246,6 @@ def get_compact_stat_strings(title, hits):
     lines.append(" | ".join(stats))
     return "\n\n".join(lines)
 
-# --- NY FUNKTION: LÄNGSTA SVIT AV SPECIFIKA TECKEN ---
 def get_longest_subset_streak(row_str, allowed_chars):
     max_streak = 0
     current_streak = 0
@@ -260,7 +256,6 @@ def get_longest_subset_streak(row_str, allowed_chars):
         else:
             current_streak = 0
     return max_streak
-
 
 # ==========================================
 # 2. AUTO-LADDNING & DATABAS
@@ -438,6 +433,8 @@ with st.sidebar:
     cb_doublet = st.checkbox("Dubbletter", value=True)
     cb_triplet = st.checkbox("Tripplar", value=True)
     cb_occur = st.checkbox("Uppkomster", value=True)
+    cb_block_streak = st.checkbox("Max-Block (1X, 12, X2)", value=True)
+    cb_block_fat = st.checkbox("Max-Block FAT (12, 13, 23)", value=True)
     
     st.markdown("**Super-Makro:**")
     cb_super_macro = st.checkbox(f"Super-Makro (Minst {slider_super_groups} av 8 Grupper)", value=True)
@@ -455,6 +452,7 @@ with st.sidebar:
     active_filters_list = [
         cb_u_favs, cb_sft, cb_fat, cb_points, cb_100minus, cb_rank24, cb_totaldiff,
         cb_base, cb_streak, cb_gap, cb_single, cb_doublet, cb_triplet, cb_occur,
+        cb_block_streak, cb_block_fat,
         cb_super_macro, cb_aimatrix
     ]
     total_active = sum(active_filters_list)
@@ -590,6 +588,15 @@ if st.session_state.get('har_kort_analys') and input_text:
         c_ai_rank = get_best_interval(ai_ranks, c_v) if len(ai_ranks) > 0 else (1, max_rank)
         active_ai_min, active_ai_max = slider_ai_rank if cb_manual_ai_rank else c_ai_rank
         ai_txt = "AI-Rank (MANUELL)" if cb_manual_ai_rank else f"AI-Rank (AUTO {c_v}%)"
+        
+        # --- NYA INTERVALLER FÖR MAX-BLOCK ---
+        c_streak_1x = get_best_interval(streak_1x_list, c_s)
+        c_streak_12 = get_best_interval(streak_12_list, c_s)
+        c_streak_x2 = get_best_interval(streak_x2_list, c_s)
+        
+        c_fat_streak_12 = get_best_interval(fat_streak_12_list, c_s)
+        c_fat_streak_13 = get_best_interval(fat_streak_13_list, c_s)
+        c_fat_streak_23 = get_best_interval(fat_streak_23_list, c_s)
 
         # --- SUPER-MAKRO ---
         def get_super_macro_bounds(total_rows, target_prob, req_groups):
@@ -667,6 +674,9 @@ if st.session_state.get('har_kort_analys') and input_text:
             if cb_triplet: st.write(f"**Tripplar:** 1: {c_trip1[0]}-{c_trip1[1]} | X: {c_tripx[0]}-{c_tripx[1]} | 2: {c_trip2[0]}-{c_trip2[1]} | Tot: {c_triptot[0]}-{c_triptot[1]}")
             if cb_occur: st.write(f"**Uppkomster:** 1: {c_occ1[0]}-{c_occ1[1]} | X: {c_occx[0]}-{c_occx[1]} | 2: {c_occ2[0]}-{c_occ2[1]} | Tot: {c_occtot[0]}-{c_occtot[1]}")
             
+            if cb_block_streak: st.write(f"**Max-Block 1X2:** 1X: {c_streak_1x[0]}-{c_streak_1x[1]} | 12: {c_streak_12[0]}-{c_streak_12[1]} | X2: {c_streak_x2[0]}-{c_streak_x2[1]}")
+            if cb_block_fat: st.write(f"**Max-Block FAT:** 12: {c_fat_streak_12[0]}-{c_fat_streak_12[1]} | 13: {c_fat_streak_13[0]}-{c_fat_streak_13[1]} | 23: {c_fat_streak_23[0]}-{c_fat_streak_23[1]}")
+            
             st.markdown("---")
             st.subheader(f"🧩 SUPER-MAKRO (Krav: Minst {slider_super_groups} av 8 grupper)")
             st.markdown(f"*Minst 2 av 3 interna tecken i en grupp måste sitta för att gruppen ska räknas som 'träffad'. Överlever historiskt **{sm_prob:.1f}%**.*")
@@ -733,6 +743,10 @@ if st.session_state.get('har_kort_analys') and input_text:
             if cb_triplet and (c_trip1[0] <= trip1[i] <= c_trip1[1] and c_tripx[0] <= tripx[i] <= c_tripx[1] and c_trip2[0] <= trip2[i] <= c_trip2[1] and c_triptot[0] <= trip_tot[i] <= c_triptot[1]): pts += 1
             if cb_occur and (c_occ1[0] <= occ1[i] <= c_occ1[1] and c_occx[0] <= occx[i] <= c_occx[1] and c_occ2[0] <= occ2[i] <= c_occ2[1] and c_occtot[0] <= occ_tot[i] <= c_occtot[1]): pts += 1
             
+            # --- NYA FILTREN LÄGGS TILL FÖR POÄNG BERÄKNING ---
+            if cb_block_streak and (c_streak_1x[0] <= streak_1x_list[i] <= c_streak_1x[1] and c_streak_12[0] <= streak_12_list[i] <= c_streak_12[1] and c_streak_x2[0] <= streak_x2_list[i] <= c_streak_x2[1]): pts += 1
+            if cb_block_fat and (c_fat_streak_12[0] <= fat_streak_12_list[i] <= c_fat_streak_12[1] and c_fat_streak_13[0] <= fat_streak_13_list[i] <= c_fat_streak_13[1] and c_fat_streak_23[0] <= fat_streak_23_list[i] <= c_fat_streak_23[1]): pts += 1
+
             if cb_super_macro:
                 g_pass = 0
                 b = sm_bounds
@@ -956,6 +970,23 @@ if st.session_state.get('har_kort_analys') and input_text:
                 o1_c, ox_c, o2_c, occtot_c, _ = get_occurrences(tr)
                 f_c, a_c, t_c, fsum_c = get_fat(tr, input_compare)
                 
+                # --- BERÄKNA NYA BLOCK-SVITER FÖR RADEN TR ---
+                bs_1x = get_longest_subset_streak(tr, ['1','X'])
+                bs_12 = get_longest_subset_streak(tr, ['1','2'])
+                bs_x2 = get_longest_subset_streak(tr, ['X','2'])
+                
+                fat_tr = ""
+                for i_m, char in enumerate(tr):
+                    idx_m = i_m * 3
+                    ranked = sorted([('1', input_compare[idx_m]), ('X', input_compare[idx_m+1]), ('2', input_compare[idx_m+2])], key=lambda x: x[1], reverse=True)
+                    if char == ranked[0][0]: fat_tr += '1'
+                    elif char == ranked[1][0]: fat_tr += '2'
+                    else: fat_tr += '3'
+                    
+                bf_12 = get_longest_subset_streak(fat_tr, ['1','2'])
+                bf_13 = get_longest_subset_streak(fat_tr, ['1','3'])
+                bf_23 = get_longest_subset_streak(fat_tr, ['2','3'])
+                
                 if cb_base and (c_ones[0] <= c1 <= c_ones[1] and c_draws[0] <= cx <= c_draws[1] and c_twos[0] <= c2 <= c_twos[1]): pts += 1
                 if cb_streak and (c_s1[0] <= s1_c <= c_s1[1] and c_sx[0] <= sx_c <= c_sx[1] and c_s2[0] <= s2_c <= c_s2[1]): pts += 1
                 if cb_gap and (c_g1[0] <= g1_c <= c_g1[1] and c_gx[0] <= gx_c <= c_gx[1] and c_g2[0] <= g2_c <= c_g2[1]): pts += 1
@@ -963,6 +994,10 @@ if st.session_state.get('har_kort_analys') and input_text:
                 if cb_doublet and (c_dub1[0] <= d1_c <= c_dub1[1] and c_dubx[0] <= dx_c <= c_dubx[1] and c_dub2[0] <= d2_c <= c_dub2[1] and c_dubtot[0] <= dubtot_c <= c_dubtot[1]): pts += 1
                 if cb_triplet and (c_trip1[0] <= t1_c <= c_trip1[1] and c_tripx[0] <= tx_c <= c_tripx[1] and c_trip2[0] <= t2_c <= c_trip2[1] and c_triptot[0] <= triptot_c <= c_triptot[1]): pts += 1
                 if cb_occur and (c_occ1[0] <= o1_c <= c_occ1[1] and c_occx[0] <= ox_c <= c_occx[1] and c_occ2[0] <= o2_c <= c_occ2[1] and c_occtot[0] <= occtot_c <= c_occtot[1]): pts += 1
+                
+                # --- LÄGG TILL DE NYA FILTREN HÄR I EXAKT UTRÄKNING ---
+                if cb_block_streak and (c_streak_1x[0] <= bs_1x <= c_streak_1x[1] and c_streak_12[0] <= bs_12 <= c_streak_12[1] and c_streak_x2[0] <= bs_x2 <= c_streak_x2[1]): pts += 1
+                if cb_block_fat and (c_fat_streak_12[0] <= bf_12 <= c_fat_streak_12[1] and c_fat_streak_13[0] <= bf_13 <= c_fat_streak_13[1] and c_fat_streak_23[0] <= bf_23 <= c_fat_streak_23[1]): pts += 1
                 
                 if cb_super_macro:
                     g_pass = 0
