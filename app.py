@@ -246,6 +246,7 @@ def get_compact_stat_strings(title, hits):
     lines.append(" | ".join(stats))
     return "\n\n".join(lines)
 
+# --- NY FUNKTION: HITTAR LÄNGSTA BLOCK ---
 def get_longest_subset_streak(row_str, allowed_chars):
     max_streak = 0
     current_streak = 0
@@ -256,6 +257,7 @@ def get_longest_subset_streak(row_str, allowed_chars):
         else:
             current_streak = 0
     return max_streak
+
 
 # ==========================================
 # 2. AUTO-LADDNING & DATABAS
@@ -433,6 +435,8 @@ with st.sidebar:
     cb_doublet = st.checkbox("Dubbletter", value=True)
     cb_triplet = st.checkbox("Tripplar", value=True)
     cb_occur = st.checkbox("Uppkomster", value=True)
+    
+    st.markdown("**Struktur (Max-Block):**")
     cb_block_streak = st.checkbox("Max-Block (1X, 12, X2)", value=True)
     cb_block_fat = st.checkbox("Max-Block FAT (12, 13, 23)", value=True)
     
@@ -449,6 +453,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("🎯 Soft Filtering")
+    # Uppdaterad lista för poängberäkningen
     active_filters_list = [
         cb_u_favs, cb_sft, cb_fat, cb_points, cb_100minus, cb_rank24, cb_totaldiff,
         cb_base, cb_streak, cb_gap, cb_single, cb_doublet, cb_triplet, cb_occur,
@@ -518,7 +523,7 @@ if st.session_state.get('har_kort_analys') and input_text:
         sft_sums, fat_f, fat_a, fat_t, fat_sums = [], [], [], [], []
         points_vals, minus_sums, rank24_sums, total_diff_vals, u_wins, ai_ranks = [], [], [], [], [], []
         
-        # NYA LISTOR FÖR LÄNGSTA BLOCK
+        # --- LISTOR FÖR LÄNGSTA BLOCK ---
         streak_1x_list, streak_12_list, streak_x2_list = [], [], []
         fat_streak_12_list, fat_streak_13_list, fat_streak_23_list = [], [], []
 
@@ -674,6 +679,7 @@ if st.session_state.get('har_kort_analys') and input_text:
             if cb_triplet: st.write(f"**Tripplar:** 1: {c_trip1[0]}-{c_trip1[1]} | X: {c_tripx[0]}-{c_tripx[1]} | 2: {c_trip2[0]}-{c_trip2[1]} | Tot: {c_triptot[0]}-{c_triptot[1]}")
             if cb_occur: st.write(f"**Uppkomster:** 1: {c_occ1[0]}-{c_occ1[1]} | X: {c_occx[0]}-{c_occx[1]} | 2: {c_occ2[0]}-{c_occ2[1]} | Tot: {c_occtot[0]}-{c_occtot[1]}")
             
+            # --- NYA FILTREN VISAS I MALLEN ---
             if cb_block_streak: st.write(f"**Max-Block 1X2:** 1X: {c_streak_1x[0]}-{c_streak_1x[1]} | 12: {c_streak_12[0]}-{c_streak_12[1]} | X2: {c_streak_x2[0]}-{c_streak_x2[1]}")
             if cb_block_fat: st.write(f"**Max-Block FAT:** 12: {c_fat_streak_12[0]}-{c_fat_streak_12[1]} | 13: {c_fat_streak_13[0]}-{c_fat_streak_13[1]} | 23: {c_fat_streak_23[0]}-{c_fat_streak_23[1]}")
             
@@ -743,7 +749,7 @@ if st.session_state.get('har_kort_analys') and input_text:
             if cb_triplet and (c_trip1[0] <= trip1[i] <= c_trip1[1] and c_tripx[0] <= tripx[i] <= c_tripx[1] and c_trip2[0] <= trip2[i] <= c_trip2[1] and c_triptot[0] <= trip_tot[i] <= c_triptot[1]): pts += 1
             if cb_occur and (c_occ1[0] <= occ1[i] <= c_occ1[1] and c_occx[0] <= occx[i] <= c_occx[1] and c_occ2[0] <= occ2[i] <= c_occ2[1] and c_occtot[0] <= occ_tot[i] <= c_occtot[1]): pts += 1
             
-            # --- NYA FILTREN LÄGGS TILL FÖR POÄNG BERÄKNING ---
+            # --- NYA FILTREN LÄGGS TILL FÖR HISTORISKA POÄNGEN ---
             if cb_block_streak and (c_streak_1x[0] <= streak_1x_list[i] <= c_streak_1x[1] and c_streak_12[0] <= streak_12_list[i] <= c_streak_12[1] and c_streak_x2[0] <= streak_x2_list[i] <= c_streak_x2[1]): pts += 1
             if cb_block_fat and (c_fat_streak_12[0] <= fat_streak_12_list[i] <= c_fat_streak_12[1] and c_fat_streak_13[0] <= fat_streak_13_list[i] <= c_fat_streak_13[1] and c_fat_streak_23[0] <= fat_streak_23_list[i] <= c_fat_streak_23[1]): pts += 1
 
