@@ -226,9 +226,19 @@ def calculate_delta(row_str, prob_vector):
         delta_sum += (fav_pct - win_pct)
     return round(delta_sum, 1)
 
+# --- STATISTIK-UTSKRIFT ---
+def get_stat_strings(hits, max_items):
+    if not hits or max_items == 0: return "Kan inte beräkna."
+    tot = len(hits)
+    lines = [f"📊 **Historiskt utfall:** Min {min(hits)} | Max {max(hits)}"]
+    for i in range(max_items + 1):
+        pct = (hits.count(i) / tot) * 100
+        lines.append(f"**Exakt {i} sitter:** {pct:.1f} %")
+    return "\n".join(lines)
+
 
 # ==========================================
-# 2. AUTO-LADDNING & DATABAS (BULLETPROOF)
+# 2. AUTO-LADDNING & DATABAS
 # ==========================================
 
 def find_local_database(spelform):
@@ -705,7 +715,7 @@ if st.session_state.get('har_kort_analys') and input_text:
 
         st.markdown("---")
         st.subheader("🧬 Dagens Bästa FAT-Sekvenser (Byggklossar)")
-        st.markdown("Här analyserar AI:n vilka specifika mönster (1=Fav, 2=Andrahand, 3=Skräll) som bäst täcker in **exakt denna typ av omgång**.")
+        st.markdown("Här analyserar AI:n vilka specifika mönster (1=Fav, 2=Andrahand, 3=Skräll) som bäst täcker in **exakt denna typ av omgång**. Statistiken visar hur många av de 5 sekvenserna som brukar dyka upp i en och samma vinnarrad.")
         
         def get_fat_string(row_str, prob_vector):
             fat_str = ""
@@ -730,15 +740,29 @@ if st.session_state.get('har_kort_analys') and input_text:
 
             with col_seq2:
                 st.markdown("**Två i rad (Längd 2)**")
-                for seq, count in calculate_top_seqs(fat_strings, 2):
+                top2 = calculate_top_seqs(fat_strings, 2)
+                for seq, count in top2:
                     chans = (count/total_twins)*100
                     st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} st)")
+                
+                if top2:
+                    top2_seqs = [x[0] for x in top2]
+                    hits2 = [sum(1 for seq in top2_seqs if seq in r) for r in fat_strings]
+                    st.markdown("---")
+                    st.markdown(get_stat_strings(hits2, len(top2_seqs)))
                     
             with col_seq3:
                 st.markdown("**Tre i rad (Längd 3)**")
-                for seq, count in calculate_top_seqs(fat_strings, 3):
+                top3 = calculate_top_seqs(fat_strings, 3)
+                for seq, count in top3:
                     chans = (count/total_twins)*100
                     st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} st)")
+                
+                if top3:
+                    top3_seqs = [x[0] for x in top3]
+                    hits3 = [sum(1 for seq in top3_seqs if seq in r) for r in fat_strings]
+                    st.markdown("---")
+                    st.markdown(get_stat_strings(hits3, len(top3_seqs)))
                     
             with col_combo:
                 st.markdown("**Dubbelchans (Minst 1 av 2)**")
@@ -754,6 +778,12 @@ if st.session_state.get('har_kort_analys') and input_text:
                 for (s1, s2), count in best_pairs:
                     chans = (count/total_twins)*100
                     st.write(f"**{s1}** / **{s2}** ➡️ **{chans:.1f}%** ({count} st)")
+                
+                if best_pairs:
+                    # En Dubbelchans räknas som "satt" om minst en av de två sekvenserna finns i raden
+                    hits_pairs = [sum(1 for pair in best_pairs if pair[0][0] in r or pair[0][1] in r) for r in fat_strings]
+                    st.markdown("---")
+                    st.markdown(get_stat_strings(hits_pairs, len(best_pairs)))
                     
         st.markdown("---")
         st.subheader("🧠 AI:ns Strategiska Byggklossar (För reducering)")
@@ -815,15 +845,6 @@ if st.session_state.get('har_kort_analys') and input_text:
             spik_hits.append(sum(1 for s in top_5_spikar if r_str[s['match']-1] == s['best_single_sign']))
             las_hits.append(sum(1 for l in top_5_las if r_str[l['match']-1] in l['best_double_str']))
             skrall_hits.append(sum(1 for sk in top_5_skrallar if r_str[sk['match']-1] == sk['sign']))
-            
-        def get_stat_strings(hits, max_items):
-            if not hits or max_items == 0: return "Kan inte beräkna."
-            tot = len(hits)
-            lines = [f"📊 **Historiskt utfall:** Min {min(hits)} | Max {max(hits)}"]
-            for i in range(max_items + 1):
-                pct = (hits.count(i) / tot) * 100
-                lines.append(f"**Exakt {i} sitter:** {pct:.1f} %")
-            return "\n".join(lines)
 
         # --- RITA UPP BYGGKLOSSARNA ---
         col_spik, col_las, col_skrall = st.columns(3)
