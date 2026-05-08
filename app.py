@@ -226,7 +226,7 @@ def calculate_delta(row_str, prob_vector):
         delta_sum += (fav_pct - win_pct)
     return round(delta_sum, 1)
 
-# --- STATISTIK-UTSKRIFT ---
+# --- STATISTIK-UTSKRIFT (Standard) ---
 def get_stat_strings(hits, max_items):
     if not hits or max_items == 0: return "Kan inte beräkna."
     tot = len(hits)
@@ -235,6 +235,31 @@ def get_stat_strings(hits, max_items):
         pct = (hits.count(i) / tot) * 100
         lines.append(f"**Exakt {i} sitter:** {pct:.1f} %")
     return "\n".join(lines)
+
+# --- NY STATISTIK-UTSKRIFT (Kompakt för långa sviter) ---
+def get_compact_stat_strings(title, hits):
+    if not hits: return f"**{title}:** Kan inte beräkna."
+    tot = len(hits)
+    lines = [f"📊 **{title}:** Min {min(hits)} | Max {max(hits)}"]
+    stats = []
+    for i in range(min(hits), max(hits) + 1):
+        pct = (hits.count(i) / tot) * 100
+        if pct > 0:
+            stats.append(f"**{i} st:** {pct:.1f}%")
+    lines.append(" | ".join(stats))
+    return "\n\n".join(lines)
+
+# --- NY FUNKTION: LÄNGSTA SVIT AV SPECIFIKA TECKEN ---
+def get_longest_subset_streak(row_str, allowed_chars):
+    max_streak = 0
+    current_streak = 0
+    for char in row_str:
+        if char in allowed_chars:
+            current_streak += 1
+            max_streak = max(max_streak, current_streak)
+        else:
+            current_streak = 0
+    return max_streak
 
 
 # ==========================================
@@ -494,6 +519,10 @@ if st.session_state.get('har_kort_analys') and input_text:
         occ1, occx, occ2, occ_tot = [], [], [], []
         sft_sums, fat_f, fat_a, fat_t, fat_sums = [], [], [], [], []
         points_vals, minus_sums, rank24_sums, total_diff_vals, u_wins, ai_ranks = [], [], [], [], [], []
+        
+        # NYA LISTOR FÖR LÄNGSTA BLOCK
+        streak_1x_list, streak_12_list, streak_x2_list = [], [], []
+        fat_streak_12_list, fat_streak_13_list, fat_streak_23_list = [], [], []
 
         for _, row in v_m.iterrows():
             r, p = row['Correct_Row'], row['Prob_Vector']
@@ -520,6 +549,23 @@ if st.session_state.get('har_kort_analys') and input_text:
             
             match_odds_list = [p[j:j+3] for j in range(0, len(p), 3)]
             total_diff_vals.append(calculate_total_diff(match_odds_list, list(r)))
+            
+            # --- BERÄKNA MAX-SVITER FÖR DENNA RAD ---
+            streak_1x_list.append(get_longest_subset_streak(r, ['1', 'X']))
+            streak_12_list.append(get_longest_subset_streak(r, ['1', '2']))
+            streak_x2_list.append(get_longest_subset_streak(r, ['X', '2']))
+            
+            fat_str = ""
+            for i, char in enumerate(r):
+                idx = i * 3
+                ranked = sorted([('1', p[idx]), ('X', p[idx+1]), ('2', p[idx+2])], key=lambda x: x[1], reverse=True)
+                if char == ranked[0][0]: fat_str += '1'
+                elif char == ranked[1][0]: fat_str += '2'
+                else: fat_str += '3'
+                
+            fat_streak_12_list.append(get_longest_subset_streak(fat_str, ['1', '2']))
+            fat_streak_13_list.append(get_longest_subset_streak(fat_str, ['1', '3']))
+            fat_streak_23_list.append(get_longest_subset_streak(fat_str, ['2', '3']))
 
         c_v, c_s = slider_core_val, slider_core_str
         
@@ -712,6 +758,23 @@ if st.session_state.get('har_kort_analys') and input_text:
             if pts >= slider_pass_req: mall_hits += 1
 
         st.info(f"📈 **HISTORISK TRÄFFSÄKERHET:** {mall_hits} av {len(v_m)} rader ({mall_hits/len(v_m)*100:.1f}%) fick tillräckligt med poäng ({slider_pass_req} poäng) för att passera Soft-filtret.")
+
+        st.markdown("---")
+        st.subheader("📏 Max-Sviter (Längsta block i rad)")
+        st.markdown("Här ser du svart på vitt, baserat på din lokala databas, den **längsta sammanhängande sviten** av exakt två tecken som brukar finnas på kupongen.")
+        
+        col_st1, col_st2 = st.columns(2)
+        with col_st1:
+            st.markdown("🛡️ **1X2-Sviter (Halvgarderingar)**")
+            st.markdown(get_compact_stat_strings("1X i rad (Inga 2:or)", streak_1x_list))
+            st.markdown(get_compact_stat_strings("12 i rad (Inga X)", streak_12_list))
+            st.markdown(get_compact_stat_strings("X2 i rad (Inga 1:or)", streak_x2_list))
+            
+        with col_st2:
+            st.markdown("🧬 **FAT-Sviter (Favorit/Andrahand/Skräll)**")
+            st.markdown(get_compact_stat_strings("FAT 12 i rad (Inga Skrällar)", fat_streak_12_list))
+            st.markdown(get_compact_stat_strings("FAT 13 i rad (Inga Andrahandare)", fat_streak_13_list))
+            st.markdown(get_compact_stat_strings("FAT 23 i rad (Inga Favoriter)", fat_streak_23_list))
 
         st.markdown("---")
         st.subheader("🧬 Dagens Bästa FAT-Sekvenser (Byggklossar)")
