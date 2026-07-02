@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v4.0 – sammanlagd mallträff"
+APP_VERSION = "v5.0 – pro-filter: favorittryck, skrällstyrka, favorit-delta"
 
 # ==========================================
 # 1. FUNKTIONER (FÖR 8 & 13 MATCHER)
@@ -230,6 +230,107 @@ def calculate_delta(row_str, prob_vector):
         win_pct = probs.get(char, 0)
         delta_sum += (fav_pct - win_pct)
     return round(delta_sum, 1)
+
+
+
+def get_favorite_threshold_counts(prob_vector, thresholds=(70, 60, 50)):
+    """Antal matcher där favoritens procent ligger över respektive gräns."""
+    counts = {int(t): 0 for t in thresholds}
+    matcher = len(prob_vector) // 3
+    for m in range(matcher):
+        idx = m * 3
+        fav_pct = max(prob_vector[idx:idx+3])
+        for t in thresholds:
+            if fav_pct >= t:
+                counts[int(t)] += 1
+    return counts
+
+
+def get_favorite_pressure(row_str, prob_vector, thresholds=(70, 60, 50)):
+    """
+    Favorittryck: hur många favoriter över 70/60/50 % som fanns,
+    och hur många av dessa som vann på raden.
+    """
+    counts = get_favorite_threshold_counts(prob_vector, thresholds)
+    wins = {int(t): 0 for t in thresholds}
+    matcher = min(len(row_str), len(prob_vector) // 3)
+    for m in range(matcher):
+        idx = m * 3
+        probs = [('1', prob_vector[idx]), ('X', prob_vector[idx+1]), ('2', prob_vector[idx+2])]
+        fav_sign, fav_pct = max(probs, key=lambda x: x[1])
+        for t in thresholds:
+            if fav_pct >= t and row_str[m] == fav_sign:
+                wins[int(t)] += 1
+    return {
+        'F70_Count': counts.get(70, 0), 'F70_Wins': wins.get(70, 0),
+        'F60_Count': counts.get(60, 0), 'F60_Wins': wins.get(60, 0),
+        'F50_Count': counts.get(50, 0), 'F50_Wins': wins.get(50, 0),
+    }
+
+
+def get_shock_capacity(prob_vector, thresholds=(10, 15, 20)):
+    """Max antal möjliga skrällträffar per gräns på dagens kupong, räknat max 1 per match."""
+    counts = {int(t): 0 for t in thresholds}
+    matcher = len(prob_vector) // 3
+    for m in range(matcher):
+        vals = prob_vector[m*3:m*3+3]
+        for t in thresholds:
+            if any(v < t for v in vals):
+                counts[int(t)] += 1
+    return counts
+
+
+def get_shock_strength(row_str, prob_vector):
+    """
+    Skrällstyrka: hur många vinnande tecken som låg under 10/15/20 %,
+    plus lägsta vinnande procent och summa på vinnande tecken under 20 %.
+    """
+    win_pcts = []
+    matcher = min(len(row_str), len(prob_vector) // 3)
+    for i in range(matcher):
+        idx = i * 3
+        if row_str[i] == '1': p = prob_vector[idx]
+        elif row_str[i] == 'X': p = prob_vector[idx+1]
+        elif row_str[i] == '2': p = prob_vector[idx+2]
+        else: p = 0
+        win_pcts.append(float(p))
+    if not win_pcts:
+        return {'U10_Wins': 0, 'U15_Wins': 0, 'U20_Wins': 0, 'Lowest_Win_Pct': 0.0, 'Shock_Sum_U20': 0.0}
+    return {
+        'U10_Wins': sum(1 for p in win_pcts if p < 10),
+        'U15_Wins': sum(1 for p in win_pcts if p < 15),
+        'U20_Wins': sum(1 for p in win_pcts if p < 20),
+        'Lowest_Win_Pct': round(min(win_pcts), 1),
+        'Shock_Sum_U20': round(sum(p for p in win_pcts if p < 20), 1),
+    }
+
+
+def get_favorite_delta(row_str, prob_vector):
+    """
+    Favorit-delta = faktiska favoritvinster - förväntade favoritvinster.
+    Tar hänsyn till om kupongen hade stora eller små favoriter från början.
+    """
+    expected = 0.0
+    actual = 0
+    matcher = min(len(row_str), len(prob_vector) // 3)
+    for m in range(matcher):
+        idx = m * 3
+        probs = [('1', prob_vector[idx]), ('X', prob_vector[idx+1]), ('2', prob_vector[idx+2])]
+        fav_sign, fav_pct = max(probs, key=lambda x: x[1])
+        expected += fav_pct / 100.0
+        if row_str[m] == fav_sign:
+            actual += 1
+    return round(actual - expected, 2)
+
+
+def clamp_interval(interval, low, high):
+    """Klipper ett historiskt intervall så det är möjligt på dagens kupong."""
+    a, b = interval
+    a = max(low, min(a, high))
+    b = max(low, min(b, high))
+    if a > b:
+        a = b
+    return (a, b)
 
 def get_stat_strings(hits, max_items):
     if not hits or max_items == 0: return "Kan inte beräkna."
@@ -546,6 +647,9 @@ with st.sidebar:
     cb_100minus = st.checkbox("100-minus Summa", value=True)
     cb_rank24 = st.checkbox(f"Rank 1-{krav_odds} Summa", value=True)
     cb_totaldiff = st.checkbox("Total Diff (T1 - T2)", value=True)
+    cb_fav_pressure = st.checkbox("Favorittryck (70/60/50%)", value=True)
+    cb_shock_strength = st.checkbox("Skrällstyrka (<10/<15/<20%)", value=True)
+    cb_fav_delta = st.checkbox("Favorit-delta", value=True)
     
     st.markdown("**Struktur (Standard):**")
     cb_base = st.checkbox("Grundfilter (1, X, 2)", value=True)
@@ -572,6 +676,7 @@ with st.sidebar:
     # Uppdaterad lista för poängberäkningen
     active_filters_list = [
         cb_u_favs, cb_sft, cb_fat, cb_points, cb_100minus, cb_rank24, cb_totaldiff,
+        cb_fav_pressure, cb_shock_strength, cb_fav_delta,
         cb_base, cb_streak, cb_gap, cb_single, cb_doublet, cb_triplet, cb_occur,
         cb_super_macro, cb_aimatrix
     ]
@@ -642,6 +747,9 @@ if st.session_state.get('har_kort_analys') and input_text:
         occ1, occx, occ2, occ_tot = [], [], [], []
         sft_sums, fat_f, fat_a, fat_t, fat_sums = [], [], [], [], []
         points_vals, minus_sums, rank24_sums, total_diff_vals, u_wins, ai_ranks = [], [], [], [], [], []
+        fav70_wins, fav60_wins, fav50_wins = [], [], []
+        shock_u10, shock_u15, shock_u20, shock_lowest = [], [], [], []
+        fav_delta_vals = []
         
         for _, row in v_m.iterrows():
             r, p = row['Correct_Row'], row['Prob_Vector']
@@ -668,6 +776,12 @@ if st.session_state.get('har_kort_analys') and input_text:
             
             match_odds_list = [p[j:j+3] for j in range(0, len(p), 3)]
             total_diff_vals.append(calculate_total_diff(match_odds_list, list(r)))
+
+            fp = get_favorite_pressure(r, p)
+            fav70_wins.append(fp['F70_Wins']); fav60_wins.append(fp['F60_Wins']); fav50_wins.append(fp['F50_Wins'])
+            sh = get_shock_strength(r, p)
+            shock_u10.append(sh['U10_Wins']); shock_u15.append(sh['U15_Wins']); shock_u20.append(sh['U20_Wins']); shock_lowest.append(sh['Lowest_Win_Pct'])
+            fav_delta_vals.append(get_favorite_delta(r, p))
             
 
 
@@ -690,6 +804,24 @@ if st.session_state.get('har_kort_analys') and input_text:
         c_totaldiff = get_best_interval(total_diff_vals, c_v)
         c_u = get_best_interval(u_wins, c_v)
         c_delta = get_best_interval(list(v_m['Delta']), c_v)
+
+        c_fav70_raw = get_best_interval(fav70_wins, c_v)
+        c_fav60_raw = get_best_interval(fav60_wins, c_v)
+        c_fav50_raw = get_best_interval(fav50_wins, c_v)
+        todays_fav_counts = get_favorite_threshold_counts(filter_vec)
+        c_fav70 = clamp_interval(c_fav70_raw, 0, todays_fav_counts.get(70, 0))
+        c_fav60 = clamp_interval(c_fav60_raw, 0, todays_fav_counts.get(60, 0))
+        c_fav50 = clamp_interval(c_fav50_raw, 0, todays_fav_counts.get(50, 0))
+
+        c_shock10_raw = get_best_interval(shock_u10, c_v)
+        c_shock15_raw = get_best_interval(shock_u15, c_v)
+        c_shock20_raw = get_best_interval(shock_u20, c_v)
+        todays_shock_capacity = get_shock_capacity(filter_vec)
+        c_shock10 = clamp_interval(c_shock10_raw, 0, todays_shock_capacity.get(10, 0))
+        c_shock15 = clamp_interval(c_shock15_raw, 0, todays_shock_capacity.get(15, 0))
+        c_shock20 = clamp_interval(c_shock20_raw, 0, todays_shock_capacity.get(20, 0))
+        c_shock_lowest = get_best_interval(shock_lowest, c_v)
+        c_fav_delta = get_best_interval(fav_delta_vals, c_v)
         
         c_ai_rank = get_best_interval(ai_ranks, c_v) if len(ai_ranks) > 0 else (1, max_rank)
         active_ai_min, active_ai_max = slider_ai_rank if cb_manual_ai_rank else c_ai_rank
@@ -760,6 +892,9 @@ if st.session_state.get('har_kort_analys') and input_text:
             if cb_points: st.write(f"**Poängfilter:** {c_points[0]} - {c_points[1]}")
             if cb_fat: st.write(f"**FAT (Standard):** F:{c_fatf[0]}-{c_fatf[1]} | A:{c_fata[0]}-{c_fata[1]} | T:{c_fatt[0]}-{c_fatt[1]} (Summa: {c_fatsum[0]}-{c_fatsum[1]})")
             if cb_u_favs: st.write(f"**Topp {slider_u_count} Favoriter:** {c_u[0]} - {c_u[1]} st vinner")
+            if cb_fav_pressure: st.write(f"**Favorittryck:** ≥70% {fmt_interval(c_fav70)} av {todays_fav_counts.get(70,0)} | ≥60% {fmt_interval(c_fav60)} av {todays_fav_counts.get(60,0)} | ≥50% {fmt_interval(c_fav50)} av {todays_fav_counts.get(50,0)}")
+            if cb_shock_strength: st.write(f"**Skrällstyrka:** <10% {fmt_interval(c_shock10)} | <15% {fmt_interval(c_shock15)} | <20% {fmt_interval(c_shock20)} | Lägsta vinnande % {fmt_interval(c_shock_lowest, 1)}")
+            if cb_fav_delta: st.write(f"**Favorit-delta:** {fmt_interval(c_fav_delta, 2)}")
 
         with col_s:
             st.subheader(f"⚽ STRUKTUR ({c_s}%)")
@@ -859,6 +994,9 @@ if st.session_state.get('har_kort_analys') and input_text:
             if cb_100minus and (c_minus[0] <= minus_sums[i] <= c_minus[1]): pts += 1
             if cb_rank24 and (c_rank24[0] <= rank24_sums[i] <= c_rank24[1]): pts += 1
             if cb_totaldiff and (c_totaldiff[0] <= total_diff_vals[i] <= c_totaldiff[1]): pts += 1
+            if cb_fav_pressure and (in_range(fav70_wins[i], c_fav70) and in_range(fav60_wins[i], c_fav60) and in_range(fav50_wins[i], c_fav50)): pts += 1
+            if cb_shock_strength and (in_range(shock_u10[i], c_shock10) and in_range(shock_u15[i], c_shock15) and in_range(shock_u20[i], c_shock20) and in_range(shock_lowest[i], c_shock_lowest)): pts += 1
+            if cb_fav_delta and in_range(fav_delta_vals[i], c_fav_delta): pts += 1
             if cb_aimatrix and (active_ai_min <= ai_ranks[i] <= active_ai_max): pts += 1
             
             history_filter_scores.append(pts)
@@ -908,6 +1046,13 @@ if st.session_state.get('har_kort_analys') and input_text:
             if cb_100minus and in_range(get_100_minus_sum(tr, filter_vec), c_minus): pts += 1
             if cb_rank24 and in_range(get_rank_sum(tr, filter_vec), c_rank24): pts += 1
             if cb_totaldiff and in_range(calculate_total_diff(match_odds_filter, list(tr)), c_totaldiff): pts += 1
+            if cb_fav_pressure:
+                fp_c = get_favorite_pressure(tr, filter_vec)
+                if in_range(fp_c['F70_Wins'], c_fav70) and in_range(fp_c['F60_Wins'], c_fav60) and in_range(fp_c['F50_Wins'], c_fav50): pts += 1
+            if cb_shock_strength:
+                sh_c = get_shock_strength(tr, filter_vec)
+                if in_range(sh_c['U10_Wins'], c_shock10) and in_range(sh_c['U15_Wins'], c_shock15) and in_range(sh_c['U20_Wins'], c_shock20) and in_range(sh_c['Lowest_Win_Pct'], c_shock_lowest): pts += 1
+            if cb_fav_delta and in_range(get_favorite_delta(tr, filter_vec), c_fav_delta): pts += 1
             if cb_aimatrix and cand_ai_matrix is not None:
                 rank_c, _ = get_exact_rank(tr, cand_ai_matrix, cand_ai_scores_asc, cand_ai_tot)
                 if active_ai_min <= rank_c <= active_ai_max: pts += 1
@@ -974,6 +1119,30 @@ if st.session_state.get('har_kort_analys') and input_text:
             hist_pct = pct_count(lambda i: in_range(u_wins[i], c_u), n_rows)
             keep_pct = keep_pct_rows(lambda tr: in_range(get_top_n_favs_wins(tr, filter_vec, slider_u_count), c_u))
             rule_rows.append(filter_strength_row(f"Topp {slider_u_count} favoriter", f"{fmt_interval(c_u)} st vinner", hist_pct, keep_pct, "Utgång/U-tecken", f"Topp {slider_u_count} favoriter: {fmt_interval(c_u)} st", "Värde"))
+        if cb_fav_pressure:
+            hist_pct = pct_count(lambda i: in_range(fav70_wins[i], c_fav70) and in_range(fav60_wins[i], c_fav60) and in_range(fav50_wins[i], c_fav50), n_rows)
+            def _fav_pressure_ok(tr):
+                fp0 = get_favorite_pressure(tr, filter_vec)
+                return in_range(fp0['F70_Wins'], c_fav70) and in_range(fp0['F60_Wins'], c_fav60) and in_range(fp0['F50_Wins'], c_fav50)
+            keep_pct = keep_pct_rows(_fav_pressure_ok)
+            rule_rows.append(filter_strength_row(
+                "Favorittryck", f"≥70 {fmt_interval(c_fav70)} | ≥60 {fmt_interval(c_fav60)} | ≥50 {fmt_interval(c_fav50)}",
+                hist_pct, keep_pct, "Tecken/FAT", f"Favorittryck: ≥70% {fmt_interval(c_fav70)} av {todays_fav_counts.get(70,0)}, ≥60% {fmt_interval(c_fav60)} av {todays_fav_counts.get(60,0)}, ≥50% {fmt_interval(c_fav50)} av {todays_fav_counts.get(50,0)}", "Värde"
+            ))
+        if cb_shock_strength:
+            hist_pct = pct_count(lambda i: in_range(shock_u10[i], c_shock10) and in_range(shock_u15[i], c_shock15) and in_range(shock_u20[i], c_shock20) and in_range(shock_lowest[i], c_shock_lowest), n_rows)
+            def _shock_ok(tr):
+                sh0 = get_shock_strength(tr, filter_vec)
+                return in_range(sh0['U10_Wins'], c_shock10) and in_range(sh0['U15_Wins'], c_shock15) and in_range(sh0['U20_Wins'], c_shock20) and in_range(sh0['Lowest_Win_Pct'], c_shock_lowest)
+            keep_pct = keep_pct_rows(_shock_ok)
+            rule_rows.append(filter_strength_row(
+                "Skrällstyrka", f"<10 {fmt_interval(c_shock10)} | <15 {fmt_interval(c_shock15)} | <20 {fmt_interval(c_shock20)} | Lägsta {fmt_interval(c_shock_lowest,1)}%",
+                hist_pct, keep_pct, "Poängsumma/Tecken", f"Skrällstyrka: <10% {fmt_interval(c_shock10)}, <15% {fmt_interval(c_shock15)}, <20% {fmt_interval(c_shock20)}, lägsta vinnande % {fmt_interval(c_shock_lowest,1)}", "Värde"
+            ))
+        if cb_fav_delta:
+            hist_pct = pct_count(lambda i: in_range(fav_delta_vals[i], c_fav_delta), n_rows)
+            keep_pct = keep_pct_rows(lambda tr: in_range(get_favorite_delta(tr, filter_vec), c_fav_delta))
+            rule_rows.append(filter_strength_row("Favorit-delta", fmt_interval(c_fav_delta, 2), hist_pct, keep_pct, "Poängdifferens", f"Favorit-delta: {fmt_interval(c_fav_delta, 2)}", "Värde"))
         if cb_base:
             hist_pct = pct_count(lambda i: in_range(ones[i], c_ones) and in_range(draws[i], c_draws) and in_range(twos[i], c_twos), n_rows)
             keep_pct = keep_pct_rows(lambda tr: in_range(tr.count('1'), c_ones) and in_range(tr.count('X'), c_draws) and in_range(tr.count('2'), c_twos))
@@ -1361,6 +1530,13 @@ if st.session_state.get('har_kort_analys') and input_text:
                 if cb_totaldiff:
                     td_c = calculate_total_diff(match_odds_input, list(tr))
                     if (c_totaldiff[0] <= td_c <= c_totaldiff[1]): pts += 1
+                if cb_fav_pressure:
+                    fp_c = get_favorite_pressure(tr, filter_vec)
+                    if in_range(fp_c['F70_Wins'], c_fav70) and in_range(fp_c['F60_Wins'], c_fav60) and in_range(fp_c['F50_Wins'], c_fav50): pts += 1
+                if cb_shock_strength:
+                    sh_c = get_shock_strength(tr, filter_vec)
+                    if in_range(sh_c['U10_Wins'], c_shock10) and in_range(sh_c['U15_Wins'], c_shock15) and in_range(sh_c['U20_Wins'], c_shock20) and in_range(sh_c['Lowest_Win_Pct'], c_shock_lowest): pts += 1
+                if cb_fav_delta and in_range(get_favorite_delta(tr, filter_vec), c_fav_delta): pts += 1
                 if cb_aimatrix:
                     rank_c, _ = get_exact_rank(tr, ai_matrix, ai_scores_asc, ai_tot)
                     if (active_ai_min <= rank_c <= active_ai_max): pts += 1
