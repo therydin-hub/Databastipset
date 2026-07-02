@@ -6,6 +6,8 @@ import os
 import itertools
 import bisect
 import matplotlib.pyplot as plt
+from datetime import datetime
+from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
 
@@ -129,7 +131,10 @@ def get_best_interval(values, target_coverage_percent):
     return best_int
 
 def parse_input_string(text, max_vals):
-    return [float(p) for p in re.sub(r'[^\d\.\s]', '', text).split()[:max_vals]]
+    # Tillåt svensk decimal-komma och klistra in från tabeller med %, kr, semikolon osv.
+    cleaned = str(text).replace(',', '.')
+    tokens = re.findall(r'-?\d+(?:\.\d+)?', cleaned)
+    return [float(p) for p in tokens[:max_vals]]
 
 def get_structural_vector(vec):
     matches = [sorted(vec[i:i+3], reverse=True) for i in range(0, len(vec), 3)]
@@ -258,13 +263,115 @@ def get_longest_subset_streak(row_str, allowed_chars):
             current_streak = 0
     return max_streak
 
+def get_fat_string(row_str, prob_vector):
+    fat_str = ""
+    for i, char in enumerate(row_str):
+        idx = i * 3
+        ranked = sorted([('1', prob_vector[idx]), ('X', prob_vector[idx+1]), ('2', prob_vector[idx+2])], key=lambda x: x[1], reverse=True)
+        if char == ranked[0][0]: fat_str += '1'
+        elif char == ranked[1][0]: fat_str += '2'
+        else: fat_str += '3'
+    return fat_str
+
+def fmt_interval(interval, decimals=0):
+    if interval is None: return "-"
+    a, b = interval
+    if decimals == 0:
+        return f"{float(a):.0f}-{float(b):.0f}"
+    return f"{float(a):.{decimals}f}-{float(b):.{decimals}f}"
+
+def in_range(value, interval):
+    return interval[0] <= value <= interval[1]
+
+def make_candidate_rows(antal_matcher, sample_size=25000):
+    if antal_matcher == 8:
+        return [''.join(tup) for tup in itertools.product(['1','X','2'], repeat=8)], True
+    rng = np.random.default_rng(42)
+    arr = rng.choice(['1', 'X', '2'], size=(sample_size, antal_matcher))
+    return [''.join(row) for row in arr], False
+
+def pass_super_macro_row(row_str, prob_vector, bounds, req_groups):
+    c1, cx, c2 = row_str.count('1'), row_str.count('X'), row_str.count('2')
+    s1_c, sx_c, s2_c, _ = get_streaks(row_str)
+    g1_c, gx_c, g2_c, _ = get_gaps(row_str)
+    si1_c, six_c, si2_c, _, _ = get_singles(row_str)
+    d1_c, dx_c, d2_c, _, _ = get_doublets(row_str)
+    t1_c, tx_c, t2_c, _, _ = get_triplets(row_str)
+    o1_c, ox_c, o2_c, _, _ = get_occurrences(row_str)
+    f_c, a_c, t_c, _ = get_fat(row_str, prob_vector)
+    g_pass = 0
+    b = bounds
+    if sum([b['1'][0] <= c1 <= b['1'][1], b['X'][0] <= cx <= b['X'][1], b['2'][0] <= c2 <= b['2'][1]]) >= 2: g_pass += 1
+    if sum([b['s1'][0] <= s1_c <= b['s1'][1], b['sx'][0] <= sx_c <= b['sx'][1], b['s2'][0] <= s2_c <= b['s2'][1]]) >= 2: g_pass += 1
+    if sum([b['g1'][0] <= g1_c <= b['g1'][1], b['gx'][0] <= gx_c <= b['gx'][1], b['g2'][0] <= g2_c <= b['g2'][1]]) >= 2: g_pass += 1
+    if sum([b['si1'][0] <= si1_c <= b['si1'][1], b['six'][0] <= six_c <= b['six'][1], b['si2'][0] <= si2_c <= b['si2'][1]]) >= 2: g_pass += 1
+    if sum([b['d1'][0] <= d1_c <= b['d1'][1], b['dx'][0] <= dx_c <= b['dx'][1], b['d2'][0] <= d2_c <= b['d2'][1]]) >= 2: g_pass += 1
+    if sum([b['t1'][0] <= t1_c <= b['t1'][1], b['tx'][0] <= tx_c <= b['tx'][1], b['t2'][0] <= t2_c <= b['t2'][1]]) >= 2: g_pass += 1
+    if sum([b['o1'][0] <= o1_c <= b['o1'][1], b['ox'][0] <= ox_c <= b['ox'][1], b['o2'][0] <= o2_c <= b['o2'][1]]) >= 2: g_pass += 1
+    if sum([b['f'][0] <= f_c <= b['f'][1], b['a'][0] <= a_c <= b['a'][1], b['t'][0] <= t_c <= b['t'][1]]) >= 2: g_pass += 1
+    return g_pass >= req_groups
+
+def classify_filter(hist_pct, keep_pct):
+    if keep_pct is None or pd.isna(keep_pct):
+        return "Info", None
+    lift = hist_pct - keep_pct
+    if lift >= 35 and keep_pct <= 65:
+        return "Mycket stark", lift
+    if lift >= 20 and keep_pct <= 75:
+        return "Stark", lift
+    if lift >= 10:
+        return "OK", lift
+    if lift >= 0:
+        return "Svag", lift
+    return "Irrationell", lift
+
+def filter_strength_row(name, interval_text, hist_pct, keep_pct, module, hg_text, group="", active=True):
+    cls, lift = classify_filter(hist_pct, keep_pct)
+    reduction = None if keep_pct is None or pd.isna(keep_pct) else 100 - keep_pct
+    return {
+        "Aktiv": "Ja" if active else "Nej",
+        "Filter": name,
+        "Intervall": interval_text,
+        "Grupp": group,
+        "Historisk träff %": round(hist_pct, 1),
+        "Kvar rad %": None if keep_pct is None or pd.isna(keep_pct) else round(keep_pct, 1),
+        "Reducerar %": None if reduction is None else round(reduction, 1),
+        "Rationell faktor": None if lift is None else round(lift, 1),
+        "Klass": cls,
+        "Helgardering-modul": module,
+        "Helgardering-rad": hg_text
+    }
+
+def build_database_quality_report(df, antal_matcher):
+    report = []
+    n = len(df)
+    report.append(("Antal omgångar", n))
+    if 'Datum' in df.columns:
+        dates = pd.to_datetime(df['Datum'], errors='coerce')
+        report.append(("Datum min", dates.min().date() if dates.notna().any() else "-"))
+        report.append(("Datum max", dates.max().date() if dates.notna().any() else "-"))
+        report.append(("Felaktiga datum", int(dates.isna().sum())))
+    valid_row = df['Correct_Row'].astype(str).str.fullmatch(f"[1X2]{{{antal_matcher}}}") if 'Correct_Row' in df.columns else pd.Series([False]*n)
+    report.append(("Ogiltiga Correct_Row", int((~valid_row).sum())))
+    good_vec = df['Prob_Vector'].apply(lambda v: isinstance(v, list) and len(v) == antal_matcher * 3) if 'Prob_Vector' in df.columns else pd.Series([False]*n)
+    report.append(("Ogiltiga procentvektorer", int((~good_vec).sum())))
+    if 'True_Rank' in df.columns:
+        ranks = pd.to_numeric(df['True_Rank'], errors='coerce')
+        max_rank = 3**antal_matcher
+        bad = ranks.isna() | (ranks < 1) | (ranks > max_rank)
+        report.append(("Ogiltiga True_Rank", int(bad.sum())))
+    if 'Payout' in df.columns:
+        report.append(("Utdelning min", int(df['Payout'].min())))
+        report.append(("Utdelning max", int(df['Payout'].max())))
+    return pd.DataFrame(report, columns=["Kontroll", "Värde"])
+
 
 # ==========================================
 # 2. AUTO-LADDNING & DATABAS
 # ==========================================
 
 def find_local_database(spelform):
-    mapp = os.path.dirname(os.path.abspath(__file__)) if '__file__' in locals() else '.'
+    mapp = str(Path(__file__).resolve().parent) if '__file__' in globals() else str(Path.cwd())
     alla_filer = [f for f in os.listdir(mapp) if f.endswith('.csv') or f.endswith('.xlsx')]
     def match(f, inc, exc):
         f_lower = f.lower()
@@ -356,20 +463,31 @@ def run_core_analysis(input_text, spelform, antal_matcher, krav_odds, cb_structu
         return None, None, None, f"⚠️ Fel: {spelform} kräver exakt {krav_odds} värden. Hittade {len(input_vec)}."
 
     global_db = load_database(fil_sökväg, antal_matcher)
-    
-    input_compare = get_structural_vector(input_vec) if cb_structure else input_vec
-    weights_arr = np.array([w for i in range(0, krav_odds, 3) for w in [(max(input_compare[i:i+3])/100.0)**2]*3])
+
+    # Viktigt: similarity_vec används bara för att hitta liknande historiska kuponger.
+    # input_vec behåller riktig matchordning och används i alla faktiska filterberäkningar.
+    similarity_vec = get_structural_vector(input_vec) if cb_structure else input_vec
+    weights_arr = np.array([w for i in range(0, krav_odds, 3) for w in [(max(similarity_vec[i:i+3])/100.0)**2]*3])
 
     df_s = global_db.copy()
-    df_s['Sim'] = [weighted_euclidean(input_compare, get_structural_vector(r['Prob_Vector']) if cb_structure else r['Prob_Vector'], weights_arr) if len(r['Prob_Vector'])==krav_odds else 9999 for _, r in df_s.iterrows()]
+
+    # Utdelningskravet ska ligga före top-N, annars kan top-N först plockas fram och därefter rasa bort.
+    if cb_payout:
+        df_s = df_s[(df_s['Payout'] >= pay_min) & (df_s['Payout'] <= pay_max)]
+    if len(df_s) == 0:
+        return df_s, input_vec, os.path.basename(fil_sökväg), None
+
+    df_s['Sim'] = [
+        weighted_euclidean(
+            similarity_vec,
+            get_structural_vector(r['Prob_Vector']) if cb_structure else r['Prob_Vector'],
+            weights_arr
+        ) if len(r['Prob_Vector']) == krav_odds else 9999
+        for _, r in df_s.iterrows()
+    ]
     
     v_m = df_s.sort_values('Sim').head(slider_top_n)
-    
-    if cb_payout: 
-        v_m = v_m[(v_m['Payout'] >= pay_min) & (v_m['Payout'] <= pay_max)]
-        
     return v_m, input_vec, os.path.basename(fil_sökväg), None
-
 
 # ==========================================
 # STREAMLIT UI & SIDEBAR
@@ -436,10 +554,6 @@ with st.sidebar:
     cb_triplet = st.checkbox("Tripplar", value=True)
     cb_occur = st.checkbox("Uppkomster", value=True)
     
-    st.markdown("**Struktur (Max-Block):**")
-    cb_block_streak = st.checkbox("Max-Block (1X, 12, X2)", value=True)
-    cb_block_fat = st.checkbox("Max-Block FAT (12, 13, 23)", value=True)
-    
     st.markdown("**Super-Makro:**")
     cb_super_macro = st.checkbox(f"Super-Makro (Minst {slider_super_groups} av 8 Grupper)", value=True)
     
@@ -457,7 +571,6 @@ with st.sidebar:
     active_filters_list = [
         cb_u_favs, cb_sft, cb_fat, cb_points, cb_100minus, cb_rank24, cb_totaldiff,
         cb_base, cb_streak, cb_gap, cb_single, cb_doublet, cb_triplet, cb_occur,
-        cb_block_streak, cb_block_fat,
         cb_super_macro, cb_aimatrix
     ]
     total_active = sum(active_filters_list)
@@ -492,8 +605,13 @@ if st.session_state.get('har_kort_analys') and input_text:
     elif v_m is None or len(v_m) == 0:
         st.error("❌ Inga matcher kvar efter filtrering. Testa att lätta på Utdelningskravet.")
     else:
-        input_compare = get_structural_vector(input_vec) if cb_structure else input_vec
+        filter_vec = input_vec  # Faktisk matchordning. Används för alla filterberäkningar.
         
+        # --- DATABASKONTROLL ---
+        db_full = load_database(find_local_database(spelform), antal_matcher)
+        with st.expander("🧪 Databaskontroll", expanded=False):
+            st.dataframe(build_database_quality_report(db_full, antal_matcher), use_container_width=True, hide_index=True)
+
         # --- BERÄKNA DELTA FÖR ALLA HISTORISKA RADER ---
         delta_list = []
         for _, row in v_m.iterrows():
@@ -523,10 +641,6 @@ if st.session_state.get('har_kort_analys') and input_text:
         sft_sums, fat_f, fat_a, fat_t, fat_sums = [], [], [], [], []
         points_vals, minus_sums, rank24_sums, total_diff_vals, u_wins, ai_ranks = [], [], [], [], [], []
         
-        # --- LISTOR FÖR LÄNGSTA BLOCK ---
-        streak_1x_list, streak_12_list, streak_x2_list = [], [], []
-        fat_streak_12_list, fat_streak_13_list, fat_streak_23_list = [], [], []
-
         for _, row in v_m.iterrows():
             r, p = row['Correct_Row'], row['Prob_Vector']
             if 'True_Rank' in row and pd.notna(row['True_Rank']) and row['True_Rank'] > 0:
@@ -553,22 +667,7 @@ if st.session_state.get('har_kort_analys') and input_text:
             match_odds_list = [p[j:j+3] for j in range(0, len(p), 3)]
             total_diff_vals.append(calculate_total_diff(match_odds_list, list(r)))
             
-            # --- BERÄKNA MAX-SVITER FÖR DENNA RAD ---
-            streak_1x_list.append(get_longest_subset_streak(r, ['1', 'X']))
-            streak_12_list.append(get_longest_subset_streak(r, ['1', '2']))
-            streak_x2_list.append(get_longest_subset_streak(r, ['X', '2']))
-            
-            fat_str = ""
-            for i, char in enumerate(r):
-                idx = i * 3
-                ranked = sorted([('1', p[idx]), ('X', p[idx+1]), ('2', p[idx+2])], key=lambda x: x[1], reverse=True)
-                if char == ranked[0][0]: fat_str += '1'
-                elif char == ranked[1][0]: fat_str += '2'
-                else: fat_str += '3'
-                
-            fat_streak_12_list.append(get_longest_subset_streak(fat_str, ['1', '2']))
-            fat_streak_13_list.append(get_longest_subset_streak(fat_str, ['1', '3']))
-            fat_streak_23_list.append(get_longest_subset_streak(fat_str, ['2', '3']))
+
 
         c_v, c_s = slider_core_val, slider_core_str
         
@@ -593,15 +692,6 @@ if st.session_state.get('har_kort_analys') and input_text:
         c_ai_rank = get_best_interval(ai_ranks, c_v) if len(ai_ranks) > 0 else (1, max_rank)
         active_ai_min, active_ai_max = slider_ai_rank if cb_manual_ai_rank else c_ai_rank
         ai_txt = "AI-Rank (MANUELL)" if cb_manual_ai_rank else f"AI-Rank (AUTO {c_v}%)"
-        
-        # --- NYA INTERVALLER FÖR MAX-BLOCK ---
-        c_streak_1x = get_best_interval(streak_1x_list, c_s)
-        c_streak_12 = get_best_interval(streak_12_list, c_s)
-        c_streak_x2 = get_best_interval(streak_x2_list, c_s)
-        
-        c_fat_streak_12 = get_best_interval(fat_streak_12_list, c_s)
-        c_fat_streak_13 = get_best_interval(fat_streak_13_list, c_s)
-        c_fat_streak_23 = get_best_interval(fat_streak_23_list, c_s)
 
         # --- SUPER-MAKRO ---
         def get_super_macro_bounds(total_rows, target_prob, req_groups):
@@ -679,10 +769,6 @@ if st.session_state.get('har_kort_analys') and input_text:
             if cb_triplet: st.write(f"**Tripplar:** 1: {c_trip1[0]}-{c_trip1[1]} | X: {c_tripx[0]}-{c_tripx[1]} | 2: {c_trip2[0]}-{c_trip2[1]} | Tot: {c_triptot[0]}-{c_triptot[1]}")
             if cb_occur: st.write(f"**Uppkomster:** 1: {c_occ1[0]}-{c_occ1[1]} | X: {c_occx[0]}-{c_occx[1]} | 2: {c_occ2[0]}-{c_occ2[1]} | Tot: {c_occtot[0]}-{c_occtot[1]}")
             
-            # --- NYA FILTREN VISAS I MALLEN ---
-            if cb_block_streak: st.write(f"**Max-Block 1X2:** 1X: {c_streak_1x[0]}-{c_streak_1x[1]} | 12: {c_streak_12[0]}-{c_streak_12[1]} | X2: {c_streak_x2[0]}-{c_streak_x2[1]}")
-            if cb_block_fat: st.write(f"**Max-Block FAT:** 12: {c_fat_streak_12[0]}-{c_fat_streak_12[1]} | 13: {c_fat_streak_13[0]}-{c_fat_streak_13[1]} | 23: {c_fat_streak_23[0]}-{c_fat_streak_23[1]}")
-            
             st.markdown("---")
             st.subheader(f"🧩 SUPER-MAKRO (Krav: Minst {slider_super_groups} av 8 grupper)")
             st.markdown(f"*Minst 2 av 3 interna tecken i en grupp måste sitta för att gruppen ska räknas som 'träffad'. Överlever historiskt **{sm_prob:.1f}%**.*")
@@ -717,7 +803,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                     d1_c, dx_c, d2_c, _, _ = get_doublets(tr)
                     t1_c, tx_c, t2_c, _, _ = get_triplets(tr)
                     o1_c, ox_c, o2_c, _, _ = get_occurrences(tr)
-                    f_c, a_c, t_c, _ = get_fat(tr, input_compare)
+                    f_c, a_c, t_c, _ = get_fat(tr, filter_vec)
                     
                     if sum([b['1'][0] <= c1 <= b['1'][1], b['X'][0] <= cx <= b['X'][1], b['2'][0] <= c2 <= b['2'][1]]) >= 2: g_pass += 1
                     if sum([b['s1'][0] <= s1_c <= b['s1'][1], b['sx'][0] <= sx_c <= b['sx'][1], b['s2'][0] <= s2_c <= b['s2'][1]]) >= 2: g_pass += 1
@@ -748,10 +834,6 @@ if st.session_state.get('har_kort_analys') and input_text:
             if cb_doublet and (c_dub1[0] <= dub1[i] <= c_dub1[1] and c_dubx[0] <= dubx[i] <= c_dubx[1] and c_dub2[0] <= dub2[i] <= c_dub2[1] and c_dubtot[0] <= dub_tot[i] <= c_dubtot[1]): pts += 1
             if cb_triplet and (c_trip1[0] <= trip1[i] <= c_trip1[1] and c_tripx[0] <= tripx[i] <= c_tripx[1] and c_trip2[0] <= trip2[i] <= c_trip2[1] and c_triptot[0] <= trip_tot[i] <= c_triptot[1]): pts += 1
             if cb_occur and (c_occ1[0] <= occ1[i] <= c_occ1[1] and c_occx[0] <= occx[i] <= c_occx[1] and c_occ2[0] <= occ2[i] <= c_occ2[1] and c_occtot[0] <= occ_tot[i] <= c_occtot[1]): pts += 1
-            
-            # --- NYA FILTREN LÄGGS TILL FÖR HISTORISKA POÄNGEN ---
-            if cb_block_streak and (c_streak_1x[0] <= streak_1x_list[i] <= c_streak_1x[1] and c_streak_12[0] <= streak_12_list[i] <= c_streak_12[1] and c_streak_x2[0] <= streak_x2_list[i] <= c_streak_x2[1]): pts += 1
-            if cb_block_fat and (c_fat_streak_12[0] <= fat_streak_12_list[i] <= c_fat_streak_12[1] and c_fat_streak_13[0] <= fat_streak_13_list[i] <= c_fat_streak_13[1] and c_fat_streak_23[0] <= fat_streak_23_list[i] <= c_fat_streak_23[1]): pts += 1
 
             if cb_super_macro:
                 g_pass = 0
@@ -779,39 +861,166 @@ if st.session_state.get('har_kort_analys') and input_text:
 
         st.info(f"📈 **HISTORISK TRÄFFSÄKERHET:** {mall_hits} av {len(v_m)} rader ({mall_hits/len(v_m)*100:.1f}%) fick tillräckligt med poäng ({slider_pass_req} poäng) för att passera Soft-filtret.")
 
+        # --- FILTERSTYRKA, FILTERREGLER OCH HELGARDERING-EXPORT ---
+        candidate_rows, exact_universe = make_candidate_rows(antal_matcher)
+        total_candidates = len(candidate_rows)
+        match_odds_filter = [filter_vec[j:j+3] for j in range(0, len(filter_vec), 3)]
+
+        def pct_count(predicate, n_items):
+            return (sum(1 for i in range(n_items) if predicate(i)) / n_items) * 100 if n_items else 0.0
+
+        def keep_pct_rows(predicate):
+            return (sum(1 for tr in candidate_rows if predicate(tr)) / total_candidates) * 100 if total_candidates else 0.0
+
+        rule_rows = []
+        if cb_payout:
+            rule_rows.append(filter_strength_row(
+                "Utdelning", f"{v_m['Payout'].min():.0f}-{v_m['Payout'].max():.0f} kr", 100.0, None,
+                "Föranalys", "Utdelning används före historisk matchning, inte som Helgardering-filter", "Värde"
+            ))
+        if cb_aimatrix:
+            ai_keep = ((active_ai_max - active_ai_min + 1) / max_rank) * 100
+            hist_pct = pct_count(lambda i: active_ai_min <= ai_ranks[i] <= active_ai_max, n_rows)
+            rule_rows.append(filter_strength_row("AI-Matrix Rank", fmt_interval((active_ai_min, active_ai_max)), hist_pct, ai_keep, "AI-Matrix", f"AI-Matrix Rank: {active_ai_min:.0f}-{active_ai_max:.0f}", "Värde"))
+        if cb_totaldiff:
+            hist_pct = pct_count(lambda i: in_range(total_diff_vals[i], c_totaldiff), n_rows)
+            keep_pct = keep_pct_rows(lambda tr: in_range(calculate_total_diff(match_odds_filter, list(tr)), c_totaldiff))
+            rule_rows.append(filter_strength_row("Total Diff", fmt_interval(c_totaldiff), hist_pct, keep_pct, "Poängdifferens", f"Total Diff: {fmt_interval(c_totaldiff)}", "Värde"))
+        if cb_rank24:
+            hist_pct = pct_count(lambda i: in_range(rank24_sums[i], c_rank24), n_rows)
+            keep_pct = keep_pct_rows(lambda tr: in_range(get_rank_sum(tr, filter_vec), c_rank24))
+            rule_rows.append(filter_strength_row("Rank Summa", fmt_interval(c_rank24, 1), hist_pct, keep_pct, "Poängsumma", f"Rank Summa: {fmt_interval(c_rank24, 1)}", "Värde"))
+        if cb_100minus:
+            hist_pct = pct_count(lambda i: in_range(minus_sums[i], c_minus), n_rows)
+            keep_pct = keep_pct_rows(lambda tr: in_range(get_100_minus_sum(tr, filter_vec), c_minus))
+            rule_rows.append(filter_strength_row("100-minus Summa", fmt_interval(c_minus, 1), hist_pct, keep_pct, "Poängsumma", f"100-minus Summa: {fmt_interval(c_minus, 1)}", "Värde"))
+        if cb_sft:
+            hist_pct = pct_count(lambda i: in_range(sft_sums[i], c_sft), n_rows)
+            keep_pct = keep_pct_rows(lambda tr: in_range(get_sft_sum(tr, filter_vec), c_sft))
+            rule_rows.append(filter_strength_row("SFT Summa", fmt_interval(c_sft, 1), hist_pct, keep_pct, "SFT/Poängsumma", f"SFT Summa: {fmt_interval(c_sft, 1)}", "Värde"))
+        if cb_points:
+            hist_pct = pct_count(lambda i: in_range(points_vals[i], c_points), n_rows)
+            keep_pct = keep_pct_rows(lambda tr: in_range(get_rank_points(tr, filter_vec), c_points))
+            rule_rows.append(filter_strength_row("Poängfilter", fmt_interval(c_points), hist_pct, keep_pct, "Poängsumma", f"Poängfilter: {fmt_interval(c_points)}", "Värde"))
+        if cb_fat:
+            hist_pct = pct_count(lambda i: in_range(fat_f[i], c_fatf) and in_range(fat_a[i], c_fata) and in_range(fat_t[i], c_fatt) and in_range(fat_sums[i], c_fatsum), n_rows)
+            def _fat_ok(tr):
+                f0, a0, t0, fs0 = get_fat(tr, filter_vec)
+                return in_range(f0, c_fatf) and in_range(a0, c_fata) and in_range(t0, c_fatt) and in_range(fs0, c_fatsum)
+            keep_pct = keep_pct_rows(_fat_ok)
+            rule_rows.append(filter_strength_row("FAT", f"F {fmt_interval(c_fatf)} | A {fmt_interval(c_fata)} | T {fmt_interval(c_fatt)} | Summa {fmt_interval(c_fatsum)}", hist_pct, keep_pct, "FAT", f"FAT: F {fmt_interval(c_fatf)}, A {fmt_interval(c_fata)}, T {fmt_interval(c_fatt)}, Summa {fmt_interval(c_fatsum)}", "Värde"))
+        if cb_u_favs:
+            hist_pct = pct_count(lambda i: in_range(u_wins[i], c_u), n_rows)
+            keep_pct = keep_pct_rows(lambda tr: in_range(get_top_n_favs_wins(tr, filter_vec, slider_u_count), c_u))
+            rule_rows.append(filter_strength_row(f"Topp {slider_u_count} favoriter", f"{fmt_interval(c_u)} st vinner", hist_pct, keep_pct, "Utgång/U-tecken", f"Topp {slider_u_count} favoriter: {fmt_interval(c_u)} st", "Värde"))
+        if cb_base:
+            hist_pct = pct_count(lambda i: in_range(ones[i], c_ones) and in_range(draws[i], c_draws) and in_range(twos[i], c_twos), n_rows)
+            keep_pct = keep_pct_rows(lambda tr: in_range(tr.count('1'), c_ones) and in_range(tr.count('X'), c_draws) and in_range(tr.count('2'), c_twos))
+            rule_rows.append(filter_strength_row("Tecken 1X2", f"1 {fmt_interval(c_ones)} | X {fmt_interval(c_draws)} | 2 {fmt_interval(c_twos)}", hist_pct, keep_pct, "Tecken", f"Tecken: 1 {fmt_interval(c_ones)}, X {fmt_interval(c_draws)}, 2 {fmt_interval(c_twos)}", "Struktur"))
+        if cb_streak:
+            hist_pct = pct_count(lambda i: in_range(s1[i], c_s1) and in_range(sx[i], c_sx) and in_range(s2[i], c_s2), n_rows)
+            def _streak_ok(tr):
+                x = get_streaks(tr)
+                return in_range(x[0], c_s1) and in_range(x[1], c_sx) and in_range(x[2], c_s2)
+            keep_pct = keep_pct_rows(_streak_ok)
+            rule_rows.append(filter_strength_row("Teckenföljd/Sviter", f"1 {fmt_interval(c_s1)} | X {fmt_interval(c_sx)} | 2 {fmt_interval(c_s2)}", hist_pct, keep_pct, "Teckenföljd", f"Teckenföljd: 1 {fmt_interval(c_s1)}, X {fmt_interval(c_sx)}, 2 {fmt_interval(c_s2)}", "Struktur"))
+        if cb_gap:
+            hist_pct = pct_count(lambda i: in_range(g1[i], c_g1) and in_range(gx[i], c_gx) and in_range(g2[i], c_g2), n_rows)
+            def _gap_ok(tr):
+                x = get_gaps(tr)
+                return in_range(x[0], c_g1) and in_range(x[1], c_gx) and in_range(x[2], c_g2)
+            keep_pct = keep_pct_rows(_gap_ok)
+            rule_rows.append(filter_strength_row("Teckenlucka", f"1 {fmt_interval(c_g1)} | X {fmt_interval(c_gx)} | 2 {fmt_interval(c_g2)}", hist_pct, keep_pct, "Teckenlucka", f"Teckenlucka: 1 {fmt_interval(c_g1)}, X {fmt_interval(c_gx)}, 2 {fmt_interval(c_g2)}", "Struktur"))
+        if cb_single:
+            hist_pct = pct_count(lambda i: in_range(sing1[i], c_sing1) and in_range(singx[i], c_singx) and in_range(sing2[i], c_sing2) and in_range(sing_tot[i], c_singtot), n_rows)
+            def _single_ok(tr):
+                x = get_singles(tr)
+                return in_range(x[0], c_sing1) and in_range(x[1], c_singx) and in_range(x[2], c_sing2) and in_range(x[3], c_singtot)
+            keep_pct = keep_pct_rows(_single_ok)
+            rule_rows.append(filter_strength_row("Singlar", f"1 {fmt_interval(c_sing1)} | X {fmt_interval(c_singx)} | 2 {fmt_interval(c_sing2)} | Tot {fmt_interval(c_singtot)}", hist_pct, keep_pct, "Singlar", f"Singlar: 1 {fmt_interval(c_sing1)}, X {fmt_interval(c_singx)}, 2 {fmt_interval(c_sing2)}, Tot {fmt_interval(c_singtot)}", "Struktur"))
+        if cb_doublet:
+            hist_pct = pct_count(lambda i: in_range(dub1[i], c_dub1) and in_range(dubx[i], c_dubx) and in_range(dub2[i], c_dub2) and in_range(dub_tot[i], c_dubtot), n_rows)
+            def _doublet_ok(tr):
+                x = get_doublets(tr)
+                return in_range(x[0], c_dub1) and in_range(x[1], c_dubx) and in_range(x[2], c_dub2) and in_range(x[3], c_dubtot)
+            keep_pct = keep_pct_rows(_doublet_ok)
+            rule_rows.append(filter_strength_row("Dubbletter", f"1 {fmt_interval(c_dub1)} | X {fmt_interval(c_dubx)} | 2 {fmt_interval(c_dub2)} | Tot {fmt_interval(c_dubtot)}", hist_pct, keep_pct, "Dubbletter", f"Dubbletter: 1 {fmt_interval(c_dub1)}, X {fmt_interval(c_dubx)}, 2 {fmt_interval(c_dub2)}, Tot {fmt_interval(c_dubtot)}", "Struktur"))
+        if cb_triplet:
+            hist_pct = pct_count(lambda i: in_range(trip1[i], c_trip1) and in_range(tripx[i], c_tripx) and in_range(trip2[i], c_trip2) and in_range(trip_tot[i], c_triptot), n_rows)
+            def _triplet_ok(tr):
+                x = get_triplets(tr)
+                return in_range(x[0], c_trip1) and in_range(x[1], c_tripx) and in_range(x[2], c_trip2) and in_range(x[3], c_triptot)
+            keep_pct = keep_pct_rows(_triplet_ok)
+            rule_rows.append(filter_strength_row("Tripplar", f"1 {fmt_interval(c_trip1)} | X {fmt_interval(c_tripx)} | 2 {fmt_interval(c_trip2)} | Tot {fmt_interval(c_triptot)}", hist_pct, keep_pct, "Tripplar", f"Tripplar: 1 {fmt_interval(c_trip1)}, X {fmt_interval(c_tripx)}, 2 {fmt_interval(c_trip2)}, Tot {fmt_interval(c_triptot)}", "Struktur"))
+        if cb_occur:
+            hist_pct = pct_count(lambda i: in_range(occ1[i], c_occ1) and in_range(occx[i], c_occx) and in_range(occ2[i], c_occ2) and in_range(occ_tot[i], c_occtot), n_rows)
+            def _occur_ok(tr):
+                x = get_occurrences(tr)
+                return in_range(x[0], c_occ1) and in_range(x[1], c_occx) and in_range(x[2], c_occ2) and in_range(x[3], c_occtot)
+            keep_pct = keep_pct_rows(_occur_ok)
+            rule_rows.append(filter_strength_row("Uppkomster", f"1 {fmt_interval(c_occ1)} | X {fmt_interval(c_occx)} | 2 {fmt_interval(c_occ2)} | Tot {fmt_interval(c_occtot)}", hist_pct, keep_pct, "Uppkomster", f"Uppkomster: 1 {fmt_interval(c_occ1)}, X {fmt_interval(c_occx)}, 2 {fmt_interval(c_occ2)}, Tot {fmt_interval(c_occtot)}", "Struktur"))
+        if cb_super_macro:
+            hist_pct = pct_count(lambda i: pass_super_macro_row(v_m.iloc[i]['Correct_Row'], v_m.iloc[i]['Prob_Vector'], sm_bounds, slider_super_groups), n_rows)
+            keep_pct = keep_pct_rows(lambda tr: pass_super_macro_row(tr, filter_vec, sm_bounds, slider_super_groups))
+            rule_rows.append(filter_strength_row("Super-Makro", f"Minst {slider_super_groups} av 8 grupper", hist_pct, keep_pct, "Gruppmodul", f"Super-Makro: minst {slider_super_groups} av 8 grupper, minst 2 av 3 interna villkor", "Super-Makro"))
+
+        filter_rules_df = pd.DataFrame(rule_rows)
         st.markdown("---")
-        st.subheader("📏 Max-Sviter (Längsta block i rad)")
-        st.markdown("Här ser du svart på vitt, baserat på din lokala databas, den **längsta sammanhängande sviten** av exakt två tecken som brukar finnas på kupongen.")
-        
-        col_st1, col_st2 = st.columns(2)
-        with col_st1:
-            st.markdown("🛡️ **1X2-Sviter (Halvgarderingar)**")
-            st.markdown(get_compact_stat_strings("1X i rad (Inga 2:or)", streak_1x_list))
-            st.markdown(get_compact_stat_strings("12 i rad (Inga X)", streak_12_list))
-            st.markdown(get_compact_stat_strings("X2 i rad (Inga 1:or)", streak_x2_list))
-            
-        with col_st2:
-            st.markdown("🧬 **FAT-Sviter (Favorit/Andrahand/Skräll)**")
-            st.markdown(get_compact_stat_strings("FAT 12 i rad (Inga Skrällar)", fat_streak_12_list))
-            st.markdown(get_compact_stat_strings("FAT 13 i rad (Inga Andrahandare)", fat_streak_13_list))
-            st.markdown(get_compact_stat_strings("FAT 23 i rad (Inga Favoriter)", fat_streak_23_list))
+        st.subheader("🧪 Filterstyrka & Helgardering-regler")
+        st.caption("Kvar rad % är exakt för 8 matcher och Monte Carlo-estimat för 13 matcher. Rationell faktor = historisk träff % minus kvar rad %.")
+        if not filter_rules_df.empty:
+            st.dataframe(filter_rules_df, use_container_width=True, hide_index=True)
+            weak = filter_rules_df[filter_rules_df['Klass'].isin(['Svag', 'Irrationell'])]
+            if len(weak) > 0:
+                st.warning("Svaga filter att granska: " + ", ".join(weak['Filter'].tolist()))
+
+            helg_lines = [
+                f"HELGARDERING-EXPORT - {spelform}",
+                f"Skapad: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                f"Historiska omgångar: {len(v_m)} | Softfilterkrav: {slider_pass_req} av {total_active}",
+                "",
+                "GRUNDRAMSFILTER / TABELLFILTER"
+            ]
+            for _, rr in filter_rules_df.iterrows():
+                if rr['Helgardering-modul'] not in ['Föranalys', 'Gruppmodul']:
+                    keep_txt = '-' if pd.isna(rr['Kvar rad %']) else f"{rr['Kvar rad %']:.1f}%"
+                    helg_lines.append(f"- {rr['Helgardering-rad']}  [{rr['Klass']}, hist {rr['Historisk träff %']:.1f}%, kvar {keep_txt}]")
+            helg_lines += ["", "GRUPPER / SUPER-MAKRO"]
+            if cb_super_macro:
+                b = sm_bounds
+                helg_lines.append(f"- Super-Makro: minst {slider_super_groups} av 8 grupper")
+                helg_lines.append(f"  Grp 1 Tecken: 1 {fmt_interval(b['1'])}, X {fmt_interval(b['X'])}, 2 {fmt_interval(b['2'])}")
+                helg_lines.append(f"  Grp 2 Sviter: 1 {fmt_interval(b['s1'])}, X {fmt_interval(b['sx'])}, 2 {fmt_interval(b['s2'])}")
+                helg_lines.append(f"  Grp 3 Luckor: 1 {fmt_interval(b['g1'])}, X {fmt_interval(b['gx'])}, 2 {fmt_interval(b['g2'])}")
+                helg_lines.append(f"  Grp 4 Singlar: 1 {fmt_interval(b['si1'])}, X {fmt_interval(b['six'])}, 2 {fmt_interval(b['si2'])}")
+                helg_lines.append(f"  Grp 5 Dubbletter: 1 {fmt_interval(b['d1'])}, X {fmt_interval(b['dx'])}, 2 {fmt_interval(b['d2'])}")
+                helg_lines.append(f"  Grp 6 Tripplar: 1 {fmt_interval(b['t1'])}, X {fmt_interval(b['tx'])}, 2 {fmt_interval(b['t2'])}")
+                helg_lines.append(f"  Grp 7 Uppkomster: 1 {fmt_interval(b['o1'])}, X {fmt_interval(b['ox'])}, 2 {fmt_interval(b['o2'])}")
+                helg_lines.append(f"  Grp 8 FAT: F {fmt_interval(b['f'])}, A {fmt_interval(b['a'])}, T {fmt_interval(b['t'])}")
+            helg_text = "\n".join(helg_lines)
+
+            col_dl1, col_dl2, col_dl3 = st.columns(3)
+            with col_dl1:
+                st.download_button("⬇️ Ladda ner filterregler CSV", filter_rules_df.to_csv(index=False, sep=';').encode('utf-8-sig'), file_name=f"filterregler_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
+            with col_dl2:
+                st.download_button("⬇️ Ladda ner Helgardering TXT", helg_text.encode('utf-8'), file_name=f"helgardering_export_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt", mime="text/plain")
+            with col_dl3:
+                if st.button("💾 Spara analys lokalt"):
+                    outdir = Path("analysis_exports")
+                    outdir.mkdir(exist_ok=True)
+                    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    filter_rules_df.to_csv(outdir / f"filterregler_{spelform}_{stamp}.csv", index=False, sep=';', encoding='utf-8-sig')
+                    (outdir / f"helgardering_export_{spelform}_{stamp}.txt").write_text(helg_text, encoding='utf-8')
+                    st.success(f"Sparat i {outdir.resolve()}")
 
         st.markdown("---")
         st.subheader("🧬 Dagens Bästa FAT-Sekvenser (Byggklossar)")
         st.markdown("Här analyserar AI:n vilka specifika mönster (1=Fav, 2=Andrahand, 3=Skräll) som bäst täcker in **exakt denna typ av omgång**. Statistiken visar hur många av de 5 sekvenserna som brukar dyka upp i en och samma vinnarrad.")
-        
-        def get_fat_string(row_str, prob_vector):
-            fat_str = ""
-            for i, char in enumerate(row_str):
-                idx = i * 3
-                ranked = sorted([('1', prob_vector[idx]), ('X', prob_vector[idx+1]), ('2', prob_vector[idx+2])], key=lambda x: x[1], reverse=True)
-                if char == ranked[0][0]: fat_str += '1'
-                elif char == ranked[1][0]: fat_str += '2'
-                else: fat_str += '3'
-            return fat_str
 
         fat_strings = [get_fat_string(row['Correct_Row'], row['Prob_Vector']) for _, row in v_m.iterrows() if len(row['Correct_Row']) == antal_matcher]
+        base_fat_strings = [get_fat_string(row['Correct_Row'], row['Prob_Vector']) for _, row in db_full.iterrows() if len(str(row['Correct_Row'])) == antal_matcher]
         total_twins = len(fat_strings)
+        total_base_fat = len(base_fat_strings)
         
         if total_twins > 0:
             col_seq2, col_seq3, col_combo = st.columns(3)
@@ -826,7 +1035,8 @@ if st.session_state.get('har_kort_analys') and input_text:
                 top2 = calculate_top_seqs(fat_strings, 2)
                 for seq, count in top2:
                     chans = (count/total_twins)*100
-                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} st)")
+                    base_pct = (sum(1 for r in base_fat_strings if seq in r) / total_base_fat) * 100 if total_base_fat else 0
+                    st.write(f"**{seq}** ➡️ **{chans:.1f}%** ({count} st) | Bas {base_pct:.1f}% | Lift {chans-base_pct:+.1f}")
                 
                 if top2:
                     top2_seqs = [x[0] for x in top2]
@@ -839,7 +1049,8 @@ if st.session_state.get('har_kort_analys') and input_text:
                 top3 = calculate_top_seqs(fat_strings, 3)
                 for seq, count in top3:
                     chans = (count/total_twins)*100
-                    st.write(f"**{seq}** ➡️ **{chans:.1f}% chans** ({count} st)")
+                    base_pct = (sum(1 for r in base_fat_strings if seq in r) / total_base_fat) * 100 if total_base_fat else 0
+                    st.write(f"**{seq}** ➡️ **{chans:.1f}%** ({count} st) | Bas {base_pct:.1f}% | Lift {chans-base_pct:+.1f}")
                 
                 if top3:
                     top3_seqs = [x[0] for x in top3]
@@ -860,7 +1071,8 @@ if st.session_state.get('har_kort_analys') and input_text:
                 best_pairs = sorted(pair_counts, key=lambda x: x[1], reverse=True)[:5]
                 for (s1, s2), count in best_pairs:
                     chans = (count/total_twins)*100
-                    st.write(f"**{s1}** / **{s2}** ➡️ **{chans:.1f}%** ({count} st)")
+                    base_pct = (sum(1 for r in base_fat_strings if s1 in r or s2 in r) / total_base_fat) * 100 if total_base_fat else 0
+                    st.write(f"**{s1}** / **{s2}** ➡️ **{chans:.1f}%** ({count} st) | Bas {base_pct:.1f}% | Lift {chans-base_pct:+.1f}")
                 
                 if best_pairs:
                     # En Dubbelchans räknas som "satt" om minst en av de två sekvenserna finns i raden
@@ -960,10 +1172,10 @@ if st.session_state.get('har_kort_analys') and input_text:
             st.markdown("---")
             st.subheader("🎲 EXAKT UTRÄKNING (6 561 rader)")
             all_possible_rows = [''.join(tup) for tup in itertools.product(['1','X','2'], repeat=8)]
-            ai_matrix, ai_scores_asc, ai_tot = calculate_ai_matrix_from_values(input_compare)
+            ai_matrix, ai_scores_asc, ai_tot = calculate_ai_matrix_from_values(filter_vec)
             
             valid_exact_rows = [] 
-            match_odds_input = [input_compare[j:j+3] for j in range(0, len(input_compare), 3)]
+            match_odds_input = [filter_vec[j:j+3] for j in range(0, len(filter_vec), 3)]
             
             for tr in all_possible_rows:
                 pts = 0
@@ -974,24 +1186,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                 d1_c, dx_c, d2_c, dubtot_c, _ = get_doublets(tr)
                 t1_c, tx_c, t2_c, triptot_c, _ = get_triplets(tr)
                 o1_c, ox_c, o2_c, occtot_c, _ = get_occurrences(tr)
-                f_c, a_c, t_c, fsum_c = get_fat(tr, input_compare)
-                
-                # --- BERÄKNA NYA BLOCK-SVITER FÖR RADEN TR ---
-                bs_1x = get_longest_subset_streak(tr, ['1','X'])
-                bs_12 = get_longest_subset_streak(tr, ['1','2'])
-                bs_x2 = get_longest_subset_streak(tr, ['X','2'])
-                
-                fat_tr = ""
-                for i_m, char in enumerate(tr):
-                    idx_m = i_m * 3
-                    ranked = sorted([('1', input_compare[idx_m]), ('X', input_compare[idx_m+1]), ('2', input_compare[idx_m+2])], key=lambda x: x[1], reverse=True)
-                    if char == ranked[0][0]: fat_tr += '1'
-                    elif char == ranked[1][0]: fat_tr += '2'
-                    else: fat_tr += '3'
-                    
-                bf_12 = get_longest_subset_streak(fat_tr, ['1','2'])
-                bf_13 = get_longest_subset_streak(fat_tr, ['1','3'])
-                bf_23 = get_longest_subset_streak(fat_tr, ['2','3'])
+                f_c, a_c, t_c, fsum_c = get_fat(tr, filter_vec)
                 
                 if cb_base and (c_ones[0] <= c1 <= c_ones[1] and c_draws[0] <= cx <= c_draws[1] and c_twos[0] <= c2 <= c_twos[1]): pts += 1
                 if cb_streak and (c_s1[0] <= s1_c <= c_s1[1] and c_sx[0] <= sx_c <= c_sx[1] and c_s2[0] <= s2_c <= c_s2[1]): pts += 1
@@ -1000,10 +1195,6 @@ if st.session_state.get('har_kort_analys') and input_text:
                 if cb_doublet and (c_dub1[0] <= d1_c <= c_dub1[1] and c_dubx[0] <= dx_c <= c_dubx[1] and c_dub2[0] <= d2_c <= c_dub2[1] and c_dubtot[0] <= dubtot_c <= c_dubtot[1]): pts += 1
                 if cb_triplet and (c_trip1[0] <= t1_c <= c_trip1[1] and c_tripx[0] <= tx_c <= c_tripx[1] and c_trip2[0] <= t2_c <= c_trip2[1] and c_triptot[0] <= triptot_c <= c_triptot[1]): pts += 1
                 if cb_occur and (c_occ1[0] <= o1_c <= c_occ1[1] and c_occx[0] <= ox_c <= c_occx[1] and c_occ2[0] <= o2_c <= c_occ2[1] and c_occtot[0] <= occtot_c <= c_occtot[1]): pts += 1
-                
-                # --- LÄGG TILL DE NYA FILTREN HÄR I EXAKT UTRÄKNING ---
-                if cb_block_streak and (c_streak_1x[0] <= bs_1x <= c_streak_1x[1] and c_streak_12[0] <= bs_12 <= c_streak_12[1] and c_streak_x2[0] <= bs_x2 <= c_streak_x2[1]): pts += 1
-                if cb_block_fat and (c_fat_streak_12[0] <= bf_12 <= c_fat_streak_12[1] and c_fat_streak_13[0] <= bf_13 <= c_fat_streak_13[1] and c_fat_streak_23[0] <= bf_23 <= c_fat_streak_23[1]): pts += 1
                 
                 if cb_super_macro:
                     g_pass = 0
@@ -1019,11 +1210,11 @@ if st.session_state.get('har_kort_analys') and input_text:
                     if g_pass >= slider_super_groups: pts += 1
 
                 if cb_fat and (c_fatf[0] <= f_c <= c_fatf[1] and c_fata[0] <= a_c <= c_fata[1] and c_fatt[0] <= t_c <= c_fatt[1] and c_fatsum[0] <= fsum_c <= c_fatsum[1]): pts += 1
-                if cb_u_favs and (c_u[0] <= get_top_n_favs_wins(tr, input_compare, slider_u_count) <= c_u[1]): pts += 1
-                if cb_sft and (c_sft[0] <= get_sft_sum(tr, input_compare) <= c_sft[1]): pts += 1
-                if cb_points and (c_points[0] <= get_rank_points(tr, input_compare) <= c_points[1]): pts += 1
-                if cb_100minus and (c_minus[0] <= get_100_minus_sum(tr, input_compare) <= c_minus[1]): pts += 1
-                if cb_rank24 and (c_rank24[0] <= get_rank_sum(tr, input_compare) <= c_rank24[1]): pts += 1
+                if cb_u_favs and (c_u[0] <= get_top_n_favs_wins(tr, filter_vec, slider_u_count) <= c_u[1]): pts += 1
+                if cb_sft and (c_sft[0] <= get_sft_sum(tr, filter_vec) <= c_sft[1]): pts += 1
+                if cb_points and (c_points[0] <= get_rank_points(tr, filter_vec) <= c_points[1]): pts += 1
+                if cb_100minus and (c_minus[0] <= get_100_minus_sum(tr, filter_vec) <= c_minus[1]): pts += 1
+                if cb_rank24 and (c_rank24[0] <= get_rank_sum(tr, filter_vec) <= c_rank24[1]): pts += 1
                 if cb_totaldiff:
                     td_c = calculate_total_diff(match_odds_input, list(tr))
                     if (c_totaldiff[0] <= td_c <= c_totaldiff[1]): pts += 1
