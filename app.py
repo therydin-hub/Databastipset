@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
+APP_VERSION = "v4.0 – sammanlagd mallträff"
 
 # ==========================================
 # 1. FUNKTIONER (FÖR 8 & 13 MATCHER)
@@ -496,6 +497,7 @@ def run_core_analysis(input_text, spelform, antal_matcher, krav_odds, cb_structu
 col_header1, col_header2 = st.columns([2, 1])
 with col_header1:
     st.title("🎯 Tipset AI-Analys")
+    st.caption(f"Version: {APP_VERSION}")
 with col_header2:
     spelform = st.selectbox("⚽ Välj Spelform:", [
         "Stryktips", "Europatips", "Topptips ST", "Topptips EU", "Topptips Övrigt", "Powerplay"
@@ -743,7 +745,7 @@ if st.session_state.get('har_kort_analys') and input_text:
         sm_bounds, sm_prob = get_super_macro_bounds(n_rows, slider_macro_target, slider_super_groups)
 
         st.markdown("---")
-        st.header(f"📋 VECKANS MALL ({spelform})")
+        st.header(f"📋 VECKANS MALL ({spelform}) – snabb inmatning")
         
         col_v, col_s = st.columns(2)
         with col_v:
@@ -825,6 +827,8 @@ if st.session_state.get('har_kort_analys') and input_text:
                     st.success(f"✂️ **Omedelbar effekt (AI-Estimat):** Bara detta Super-Makro ensamt slaktar bort ca **{red_pct:.1f}%** av de matematiska raderna! (Kvar: ca {est_rader:,} av 1 594 323 rader)".replace(',', ' '))
 
         mall_hits = 0
+        hard_all_hits = 0
+        history_filter_scores = []
         for i in range(len(v_m)):
             pts = 0
             if cb_base and (c_ones[0] <= ones[i] <= c_ones[1] and c_draws[0] <= draws[i] <= c_draws[1] and c_twos[0] <= twos[i] <= c_twos[1]): pts += 1
@@ -857,14 +861,71 @@ if st.session_state.get('har_kort_analys') and input_text:
             if cb_totaldiff and (c_totaldiff[0] <= total_diff_vals[i] <= c_totaldiff[1]): pts += 1
             if cb_aimatrix and (active_ai_min <= ai_ranks[i] <= active_ai_max): pts += 1
             
+            history_filter_scores.append(pts)
+            if pts == total_active: hard_all_hits += 1
             if pts >= slider_pass_req: mall_hits += 1
 
-        st.info(f"📈 **HISTORISK TRÄFFSÄKERHET:** {mall_hits} av {len(v_m)} rader ({mall_hits/len(v_m)*100:.1f}%) fick tillräckligt med poäng ({slider_pass_req} poäng) för att passera Soft-filtret.")
+        hard_all_pct = (hard_all_hits / len(v_m) * 100) if len(v_m) else 0.0
+        soft_hit_pct = (mall_hits / len(v_m) * 100) if len(v_m) else 0.0
+        st.info(f"📈 **SAMMANLAGD HISTORISK TRÄFF:** Softfilter {mall_hits} av {len(v_m)} rader ({soft_hit_pct:.1f}%) klarade minst {slider_pass_req} av {total_active} aktiva filter.")
+        if total_active > 0:
+            st.caption(f"Om samma filter hade körts som helt hårda AND-filter hade {hard_all_hits} av {len(v_m)} historiska rader klarat alla {total_active} filter ({hard_all_pct:.1f}%).")
 
         # --- FILTERSTYRKA, FILTERREGLER OCH HELGARDERING-EXPORT ---
         candidate_rows, exact_universe = make_candidate_rows(antal_matcher)
         total_candidates = len(candidate_rows)
         match_odds_filter = [filter_vec[j:j+3] for j in range(0, len(filter_vec), 3)]
+
+        # Sammanlagd reducering: räkna hela mallen tillsammans, inte filter för filter.
+        # För Topptips är detta exakt. För 13 matcher används ett stabilt Monte Carlo-estimat.
+        cand_ai_matrix = cand_ai_scores_asc = cand_ai_tot = None
+        if cb_aimatrix:
+            cand_ai_matrix, cand_ai_scores_asc, cand_ai_tot = calculate_ai_matrix_from_values(filter_vec)
+
+        def score_candidate_row(tr):
+            pts = 0
+            c1, cx, c2 = tr.count('1'), tr.count('X'), tr.count('2')
+            s1_c, sx_c, s2_c, _ = get_streaks(tr)
+            g1_c, gx_c, g2_c, _ = get_gaps(tr)
+            si1_c, six_c, si2_c, singtot_c, _ = get_singles(tr)
+            d1_c, dx_c, d2_c, dubtot_c, _ = get_doublets(tr)
+            t1_c, tx_c, t2_c, triptot_c, _ = get_triplets(tr)
+            o1_c, ox_c, o2_c, occtot_c, _ = get_occurrences(tr)
+            f_c, a_c, t_c, fsum_c = get_fat(tr, filter_vec)
+
+            if cb_base and (in_range(c1, c_ones) and in_range(cx, c_draws) and in_range(c2, c_twos)): pts += 1
+            if cb_streak and (in_range(s1_c, c_s1) and in_range(sx_c, c_sx) and in_range(s2_c, c_s2)): pts += 1
+            if cb_gap and (in_range(g1_c, c_g1) and in_range(gx_c, c_gx) and in_range(g2_c, c_g2)): pts += 1
+            if cb_single and (in_range(si1_c, c_sing1) and in_range(six_c, c_singx) and in_range(si2_c, c_sing2) and in_range(singtot_c, c_singtot)): pts += 1
+            if cb_doublet and (in_range(d1_c, c_dub1) and in_range(dx_c, c_dubx) and in_range(d2_c, c_dub2) and in_range(dubtot_c, c_dubtot)): pts += 1
+            if cb_triplet and (in_range(t1_c, c_trip1) and in_range(tx_c, c_tripx) and in_range(t2_c, c_trip2) and in_range(triptot_c, c_triptot)): pts += 1
+            if cb_occur and (in_range(o1_c, c_occ1) and in_range(ox_c, c_occx) and in_range(o2_c, c_occ2) and in_range(occtot_c, c_occtot)): pts += 1
+            if cb_super_macro and pass_super_macro_row(tr, filter_vec, sm_bounds, slider_super_groups): pts += 1
+            if cb_fat and (in_range(f_c, c_fatf) and in_range(a_c, c_fata) and in_range(t_c, c_fatt) and in_range(fsum_c, c_fatsum)): pts += 1
+            if cb_u_favs and in_range(get_top_n_favs_wins(tr, filter_vec, slider_u_count), c_u): pts += 1
+            if cb_sft and in_range(get_sft_sum(tr, filter_vec), c_sft): pts += 1
+            if cb_points and in_range(get_rank_points(tr, filter_vec), c_points): pts += 1
+            if cb_100minus and in_range(get_100_minus_sum(tr, filter_vec), c_minus): pts += 1
+            if cb_rank24 and in_range(get_rank_sum(tr, filter_vec), c_rank24): pts += 1
+            if cb_totaldiff and in_range(calculate_total_diff(match_odds_filter, list(tr)), c_totaldiff): pts += 1
+            if cb_aimatrix and cand_ai_matrix is not None:
+                rank_c, _ = get_exact_rank(tr, cand_ai_matrix, cand_ai_scores_asc, cand_ai_tot)
+                if active_ai_min <= rank_c <= active_ai_max: pts += 1
+            return pts
+
+        combined_soft_survivors = combined_hard_survivors = 0
+        combined_score_counts = {}
+        if total_active > 0 and total_candidates > 0:
+            for tr in candidate_rows:
+                pts_c = score_candidate_row(tr)
+                combined_score_counts[pts_c] = combined_score_counts.get(pts_c, 0) + 1
+                if pts_c == total_active:
+                    combined_hard_survivors += 1
+                if pts_c >= slider_pass_req:
+                    combined_soft_survivors += 1
+        combined_hard_keep_pct = (combined_hard_survivors / total_candidates * 100) if total_candidates else 0.0
+        combined_soft_keep_pct = (combined_soft_survivors / total_candidates * 100) if total_candidates else 0.0
+        combined_est_label = "exakt" if exact_universe else "estimat"
 
         def pct_count(predicate, n_items):
             return (sum(1 for i in range(n_items) if predicate(i)) / n_items) * 100 if n_items else 0.0
@@ -966,13 +1027,95 @@ if st.session_state.get('har_kort_analys') and input_text:
 
         filter_rules_df = pd.DataFrame(rule_rows)
         st.markdown("---")
-        st.subheader("🧪 Filterstyrka & Helgardering-regler")
-        st.caption("Kvar rad % är exakt för 8 matcher och Monte Carlo-estimat för 13 matcher. Rationell faktor = historisk träff % minus kvar rad %.")
+        st.subheader("🧪 Filterdiagnos")
+        st.caption("Här visas bara värderingen av filtren. Själva inmatningsmallen ligger ovanför i VECKANS MALL.")
         if not filter_rules_df.empty:
-            st.dataframe(filter_rules_df, use_container_width=True, hide_index=True)
-            weak = filter_rules_df[filter_rules_df['Klass'].isin(['Svag', 'Irrationell'])]
-            if len(weak) > 0:
-                st.warning("Svaga filter att granska: " + ", ".join(weak['Filter'].tolist()))
+            diag_df = filter_rules_df.copy()
+            if 'Rationell faktor' in diag_df.columns:
+                diag_df = diag_df.sort_values('Rationell faktor', ascending=False, na_position='last')
+
+            numeric_lift = pd.to_numeric(diag_df['Rationell faktor'], errors='coerce')
+            numeric_keep = pd.to_numeric(diag_df['Kvar rad %'], errors='coerce')
+            numeric_red = pd.to_numeric(diag_df['Reducerar %'], errors='coerce')
+
+            st.markdown("**Sammanlagd mallträff**")
+            csum1, csum2, csum3, csum4 = st.columns(4)
+            with csum1:
+                st.metric("Historisk soft-träff", f"{soft_hit_pct:.1f}%", f"{mall_hits}/{len(v_m)}")
+            with csum2:
+                st.metric("Historisk hård träff", f"{hard_all_pct:.1f}%", f"{hard_all_hits}/{len(v_m)}")
+            with csum3:
+                st.metric(f"Kvar rader soft ({combined_est_label})", f"{combined_soft_keep_pct:.1f}%", f"{combined_soft_survivors}/{total_candidates}")
+            with csum4:
+                st.metric(f"Kvar rader hårt ({combined_est_label})", f"{combined_hard_keep_pct:.1f}%", f"{combined_hard_survivors}/{total_candidates}")
+
+            st.caption(
+                "Individuella filter på 90-95 % kan tillsammans få mycket lägre träff om de körs som hårda AND-filter. "
+                "Softfiltret räknar i stället hur många filter raden klarar, och är därför huvudvärdet att styra på."
+            )
+
+            cdiag1, cdiag2, cdiag3, cdiag4 = st.columns(4)
+            with cdiag1:
+                st.metric("Aktiva filter", len(diag_df))
+            with cdiag2:
+                st.metric("Snitt reducering/filter", f"{numeric_red.mean():.1f}%" if numeric_red.notna().any() else "-")
+            with cdiag3:
+                st.metric("Snitt rationell faktor", f"{numeric_lift.mean():+.1f}" if numeric_lift.notna().any() else "-")
+            with cdiag4:
+                strong_count = int(diag_df['Klass'].isin(['Mycket stark', 'Stark']).sum())
+                st.metric("Starka filter", strong_count)
+
+            ctop, cweak = st.columns(2)
+            with ctop:
+                st.markdown("**Bäst filter just nu**")
+                top_cols = ['Filter', 'Klass', 'Rationell faktor', 'Kvar rad %', 'Reducerar %']
+                st.dataframe(diag_df[top_cols].head(6), use_container_width=True, hide_index=True)
+            with cweak:
+                st.markdown("**Filter att granska**")
+                weak = diag_df[diag_df['Klass'].isin(['Svag', 'Irrationell'])]
+                if len(weak) > 0:
+                    st.dataframe(weak[['Filter', 'Klass', 'Rationell faktor', 'Kvar rad %']].head(8), use_container_width=True, hide_index=True)
+                else:
+                    st.success("Inga filter är klassade som svaga/irrationella i denna körning.")
+
+            with st.expander("Visa full filterdiagnos och exakta regelrader"):
+                st.markdown("**Diagnoskolumner**")
+                metric_cols = [
+                    'Filter', 'Grupp', 'Helgardering-modul', 'Historisk träff %',
+                    'Kvar rad %', 'Reducerar %', 'Rationell faktor', 'Klass'
+                ]
+                metric_cols = [c for c in metric_cols if c in diag_df.columns]
+                st.dataframe(diag_df[metric_cols], use_container_width=True, hide_index=True)
+
+                st.markdown("**Poängfördelning historiskt**")
+                score_dist = pd.DataFrame([
+                    {
+                        "Antal träffade filter": score,
+                        "Historiska rader": history_filter_scores.count(score),
+                        "Historisk %": round((history_filter_scores.count(score) / len(history_filter_scores)) * 100, 1) if history_filter_scores else 0.0
+                    }
+                    for score in range(total_active, -1, -1)
+                    if history_filter_scores.count(score) > 0
+                ])
+                st.dataframe(score_dist, use_container_width=True, hide_index=True)
+
+                st.markdown("**Poängfördelning radmassa**")
+                cand_score_dist = pd.DataFrame([
+                    {
+                        "Antal träffade filter": score,
+                        "Rader": count,
+                        "Rad %": round((count / total_candidates) * 100, 2) if total_candidates else 0.0
+                    }
+                    for score, count in sorted(combined_score_counts.items(), reverse=True)
+                ])
+                st.dataframe(cand_score_dist, use_container_width=True, hide_index=True)
+
+                st.markdown("**Exakta regelrader / Helgardering-text**")
+                st.dataframe(
+                    diag_df[['Filter', 'Intervall', 'Helgardering-modul', 'Helgardering-rad']],
+                    use_container_width=True,
+                    hide_index=True
+                )
 
             helg_lines = [
                 f"HELGARDERING-EXPORT - {spelform}",
