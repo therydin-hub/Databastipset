@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v5.0 – pro-filter: favorittryck, skrällstyrka, favorit-delta"
+APP_VERSION = "v7.0 – pro-grupper"
 
 # ==========================================
 # 1. FUNKTIONER (FÖR 8 & 13 MATCHER)
@@ -31,6 +31,24 @@ def get_exact_rank(row_str, matrix, scores_ascending, total_count):
 
 def get_100_minus_sum(row_str, prob_vector):
     return sum((100 - (prob_vector[i*3] if c == '1' else prob_vector[i*3+1] if c == 'X' else prob_vector[i*3+2])) for i, c in enumerate(row_str))
+
+def get_log_surprise_sum(row_str, prob_vector):
+    """
+    Skrälltryck Log Summa.
+    Poäng per valt tecken = -10 * ln(procent / 100), avrundat till heltal.
+    Låga procenttal får mycket hårdare poäng än i vanligt 100-minus.
+    """
+    total = 0
+    matcher = min(len(row_str), len(prob_vector) // 3)
+    for i in range(matcher):
+        idx = i * 3
+        if row_str[i] == '1': p = prob_vector[idx]
+        elif row_str[i] == 'X': p = prob_vector[idx+1]
+        elif row_str[i] == '2': p = prob_vector[idx+2]
+        else: p = 0
+        p = max(float(p), 0.1)
+        total += round(-10 * np.log(p / 100.0))
+    return int(total)
 
 def get_rank_points(row_str, prob_vector):
     matcher = len(row_str)
@@ -444,6 +462,68 @@ def filter_strength_row(name, interval_text, hist_pct, keep_pct, module, hg_text
         "Helgardering-rad": hg_text
     }
 
+
+def recommend_group_requirement(group_name, hist_scores, cand_scores, rule_names, target_hist_pct=90.0):
+    """
+    Testar alla möjliga gruppkrav, t.ex. 1 av 4, 2 av 4, 3 av 4.
+    Väljer hårdaste krav som fortfarande klarar önskad historisk träff.
+    Om inget krav når målet väljs kravet med högst historisk träff och därefter bäst reducering.
+    """
+    n_rules = len(rule_names)
+    if n_rules == 0:
+        return None, pd.DataFrame()
+
+    hist_total = len(hist_scores)
+    cand_total = len(cand_scores)
+    rows = []
+    for req in range(1, n_rules + 1):
+        hist_pass = sum(1 for s in hist_scores if s >= req)
+        cand_pass = sum(1 for s in cand_scores if s >= req)
+        hist_pct = (hist_pass / hist_total) * 100 if hist_total else 0.0
+        keep_pct = (cand_pass / cand_total) * 100 if cand_total else 0.0
+        cls, lift = classify_filter(hist_pct, keep_pct)
+        rows.append({
+            "Grupp": group_name,
+            "Krav": f"{req} av {n_rules}",
+            "Kravtal": req,
+            "Antal filter": n_rules,
+            "Historisk träff %": round(hist_pct, 1),
+            "Kvar rad %": round(keep_pct, 1),
+            "Reducerar %": round(100 - keep_pct, 1),
+            "Rationell faktor": round(lift, 1) if lift is not None else None,
+            "Klass": cls,
+            "Ingående filter": ", ".join(rule_names),
+            "Helgardering-rad": f"{group_name}: minst {req} av {n_rules} filter ska vara sanna"
+        })
+
+    # Först: hårdaste/lägst kvarvarande radmassa som klarar historiskt mål.
+    valid = [r for r in rows if r["Historisk träff %"] >= target_hist_pct]
+    if valid:
+        best = min(valid, key=lambda r: (r["Kvar rad %"], -r["Kravtal"]))
+    else:
+        # Fallback: högsta historiska träff, sedan bäst reducering.
+        best = max(rows, key=lambda r: (r["Historisk träff %"], r["Reducerar %"]))
+
+    return best, pd.DataFrame(rows)
+
+
+def score_bool_columns(bool_columns, n_rows):
+    """Summerar True/False-kolumner radvis."""
+    if not bool_columns:
+        return []
+    scores = []
+    for i in range(n_rows):
+        scores.append(sum(1 for col in bool_columns if col[i]))
+    return scores
+
+
+def score_candidate_group(candidate_rows, predicates):
+    """Räknar hur många villkor varje kandidat-rad klarar i en pro-grupp."""
+    scores = []
+    for tr in candidate_rows:
+        scores.append(sum(1 for _, pred in predicates if pred(tr)))
+    return scores
+
 def build_database_quality_report(df, antal_matcher):
     report = []
     n = len(df)
@@ -645,6 +725,7 @@ with st.sidebar:
     cb_fat = st.checkbox("FAT-Tabell & Summa (Standard)", value=True)
     cb_points = st.checkbox("POÄNGFILTER (Eget)", value=True)
     cb_100minus = st.checkbox("100-minus Summa", value=True)
+    cb_log_surprise = st.checkbox("Skrälltryck Log Summa", value=True)
     cb_rank24 = st.checkbox(f"Rank 1-{krav_odds} Summa", value=True)
     cb_totaldiff = st.checkbox("Total Diff (T1 - T2)", value=True)
     cb_fav_pressure = st.checkbox("Favorittryck (70/60/50%)", value=True)
@@ -672,10 +753,19 @@ with st.sidebar:
     cb_structure = st.checkbox("Matcha Struktur (Viktad)", value=True)
 
     st.markdown("---")
+    st.subheader("🧩 Pro-grupper")
+    cb_pro_groups = st.checkbox("Visa pro-grupper", value=True)
+    slider_group_target = st.slider("Gruppmål historisk träff %", 70, 100, 90, step=5)
+    cb_group_risk = st.checkbox("Riskgrupp", value=True)
+    cb_group_shock = st.checkbox("Skrällgrupp", value=True)
+    cb_group_fat = st.checkbox("FAT-profilgrupp", value=True)
+    cb_group_structure = st.checkbox("Strukturgrupp", value=True)
+
+    st.markdown("---")
     st.subheader("🎯 Soft Filtering")
     # Uppdaterad lista för poängberäkningen
     active_filters_list = [
-        cb_u_favs, cb_sft, cb_fat, cb_points, cb_100minus, cb_rank24, cb_totaldiff,
+        cb_u_favs, cb_sft, cb_fat, cb_points, cb_100minus, cb_log_surprise, cb_rank24, cb_totaldiff,
         cb_fav_pressure, cb_shock_strength, cb_fav_delta,
         cb_base, cb_streak, cb_gap, cb_single, cb_doublet, cb_triplet, cb_occur,
         cb_super_macro, cb_aimatrix
@@ -746,7 +836,7 @@ if st.session_state.get('har_kort_analys') and input_text:
         trip1, tripx, trip2, trip_tot = [], [], [], []
         occ1, occx, occ2, occ_tot = [], [], [], []
         sft_sums, fat_f, fat_a, fat_t, fat_sums = [], [], [], [], []
-        points_vals, minus_sums, rank24_sums, total_diff_vals, u_wins, ai_ranks = [], [], [], [], [], []
+        points_vals, minus_sums, log_surprise_sums, rank24_sums, total_diff_vals, u_wins, ai_ranks = [], [], [], [], [], [], []
         fav70_wins, fav60_wins, fav50_wins = [], [], []
         shock_u10, shock_u15, shock_u20, shock_lowest = [], [], [], []
         fav_delta_vals = []
@@ -771,6 +861,7 @@ if st.session_state.get('har_kort_analys') and input_text:
             _f, _a, _t, _fs = get_fat(r, p); fat_f.append(_f); fat_a.append(_a); fat_t.append(_t); fat_sums.append(_fs)
             points_vals.append(get_rank_points(r, p))
             minus_sums.append(get_100_minus_sum(r, p))
+            log_surprise_sums.append(get_log_surprise_sum(r, p))
             rank24_sums.append(get_rank_sum(r, p))
             u_wins.append(get_top_n_favs_wins(r, p, slider_u_count))
             
@@ -800,6 +891,7 @@ if st.session_state.get('har_kort_analys') and input_text:
         c_fatf = get_best_interval(fat_f, c_v); c_fata = get_best_interval(fat_a, c_v); c_fatt = get_best_interval(fat_t, c_v); c_fatsum = get_best_interval(fat_sums, c_v)
         c_points = get_best_interval(points_vals, c_v)
         c_minus = get_best_interval(minus_sums, c_v)
+        c_log_surprise = get_best_interval(log_surprise_sums, c_v)
         c_rank24 = get_best_interval(rank24_sums, c_v)
         c_totaldiff = get_best_interval(total_diff_vals, c_v)
         c_u = get_best_interval(u_wins, c_v)
@@ -888,6 +980,7 @@ if st.session_state.get('har_kort_analys') and input_text:
             if cb_totaldiff: st.write(f"**Total Diff:** {c_totaldiff[0]} - {c_totaldiff[1]}")
             if cb_rank24: st.write(f"**Rank Summa:** {c_rank24[0]:.1f} - {c_rank24[1]:.1f}")
             if cb_100minus: st.write(f"**100-minus Summa:** {c_minus[0]} - {c_minus[1]}")
+            if cb_log_surprise: st.write(f"**Skrälltryck Log Summa:** {c_log_surprise[0]} - {c_log_surprise[1]}")
             if cb_sft: st.write(f"**SFT Summa:** {c_sft[0]} - {c_sft[1]}")
             if cb_points: st.write(f"**Poängfilter:** {c_points[0]} - {c_points[1]}")
             if cb_fat: st.write(f"**FAT (Standard):** F:{c_fatf[0]}-{c_fatf[1]} | A:{c_fata[0]}-{c_fata[1]} | T:{c_fatt[0]}-{c_fatt[1]} (Summa: {c_fatsum[0]}-{c_fatsum[1]})")
@@ -992,6 +1085,7 @@ if st.session_state.get('har_kort_analys') and input_text:
             if cb_sft and (c_sft[0] <= sft_sums[i] <= c_sft[1]): pts += 1
             if cb_points and (c_points[0] <= points_vals[i] <= c_points[1]): pts += 1
             if cb_100minus and (c_minus[0] <= minus_sums[i] <= c_minus[1]): pts += 1
+            if cb_log_surprise and in_range(log_surprise_sums[i], c_log_surprise): pts += 1
             if cb_rank24 and (c_rank24[0] <= rank24_sums[i] <= c_rank24[1]): pts += 1
             if cb_totaldiff and (c_totaldiff[0] <= total_diff_vals[i] <= c_totaldiff[1]): pts += 1
             if cb_fav_pressure and (in_range(fav70_wins[i], c_fav70) and in_range(fav60_wins[i], c_fav60) and in_range(fav50_wins[i], c_fav50)): pts += 1
@@ -1044,6 +1138,7 @@ if st.session_state.get('har_kort_analys') and input_text:
             if cb_sft and in_range(get_sft_sum(tr, filter_vec), c_sft): pts += 1
             if cb_points and in_range(get_rank_points(tr, filter_vec), c_points): pts += 1
             if cb_100minus and in_range(get_100_minus_sum(tr, filter_vec), c_minus): pts += 1
+            if cb_log_surprise and in_range(get_log_surprise_sum(tr, filter_vec), c_log_surprise): pts += 1
             if cb_rank24 and in_range(get_rank_sum(tr, filter_vec), c_rank24): pts += 1
             if cb_totaldiff and in_range(calculate_total_diff(match_odds_filter, list(tr)), c_totaldiff): pts += 1
             if cb_fav_pressure:
@@ -1100,6 +1195,10 @@ if st.session_state.get('har_kort_analys') and input_text:
             hist_pct = pct_count(lambda i: in_range(minus_sums[i], c_minus), n_rows)
             keep_pct = keep_pct_rows(lambda tr: in_range(get_100_minus_sum(tr, filter_vec), c_minus))
             rule_rows.append(filter_strength_row("100-minus Summa", fmt_interval(c_minus, 1), hist_pct, keep_pct, "Poängsumma", f"100-minus Summa: {fmt_interval(c_minus, 1)}", "Värde"))
+        if cb_log_surprise:
+            hist_pct = pct_count(lambda i: in_range(log_surprise_sums[i], c_log_surprise), n_rows)
+            keep_pct = keep_pct_rows(lambda tr: in_range(get_log_surprise_sum(tr, filter_vec), c_log_surprise))
+            rule_rows.append(filter_strength_row("Skrälltryck Log Summa", fmt_interval(c_log_surprise), hist_pct, keep_pct, "Poängsumma", f"Skrälltryck Log Summa: {fmt_interval(c_log_surprise)}", "Värde"))
         if cb_sft:
             hist_pct = pct_count(lambda i: in_range(sft_sums[i], c_sft), n_rows)
             keep_pct = keep_pct_rows(lambda tr: in_range(get_sft_sum(tr, filter_vec), c_sft))
@@ -1195,9 +1294,167 @@ if st.session_state.get('har_kort_analys') and input_text:
             rule_rows.append(filter_strength_row("Super-Makro", f"Minst {slider_super_groups} av 8 grupper", hist_pct, keep_pct, "Gruppmodul", f"Super-Makro: minst {slider_super_groups} av 8 grupper, minst 2 av 3 interna villkor", "Super-Makro"))
 
         filter_rules_df = pd.DataFrame(rule_rows)
+
+        # --- PRO-GRUPPER: samma tänk som Helgarderings gruppfilter, men byggt dynamiskt ---
+        pro_group_rows = []
+        pro_group_detail_tables = {}
+
+        def add_group_analysis(group_name, hist_bool_columns, cand_predicates, rule_names):
+            if not rule_names:
+                return
+            hist_scores_g = score_bool_columns(hist_bool_columns, n_rows)
+            cand_scores_g = score_candidate_group(candidate_rows, cand_predicates)
+            best_g, detail_g = recommend_group_requirement(
+                group_name,
+                hist_scores_g,
+                cand_scores_g,
+                rule_names,
+                target_hist_pct=slider_group_target
+            )
+            if best_g:
+                pro_group_rows.append(best_g)
+                pro_group_detail_tables[group_name] = detail_g
+
+        if cb_pro_groups:
+            # Riskgrupp: värde-/riskmått. Här ska inte allt köras hårt; gruppen skyddar mot dubbelräkning.
+            if cb_group_risk:
+                risk_names = []
+                risk_hist = []
+                risk_cand = []
+                if cb_sft:
+                    risk_names.append("SFT Summa")
+                    risk_hist.append([in_range(x, c_sft) for x in sft_sums])
+                    risk_cand.append(("SFT Summa", lambda tr: in_range(get_sft_sum(tr, filter_vec), c_sft)))
+                if cb_log_surprise:
+                    risk_names.append("Skrälltryck Log")
+                    risk_hist.append([in_range(x, c_log_surprise) for x in log_surprise_sums])
+                    risk_cand.append(("Skrälltryck Log", lambda tr: in_range(get_log_surprise_sum(tr, filter_vec), c_log_surprise)))
+                if cb_100minus:
+                    risk_names.append("100-minus")
+                    risk_hist.append([in_range(x, c_minus) for x in minus_sums])
+                    risk_cand.append(("100-minus", lambda tr: in_range(get_100_minus_sum(tr, filter_vec), c_minus)))
+                if cb_rank24:
+                    risk_names.append("Rank Summa")
+                    risk_hist.append([in_range(x, c_rank24) for x in rank24_sums])
+                    risk_cand.append(("Rank Summa", lambda tr: in_range(get_rank_sum(tr, filter_vec), c_rank24)))
+                if cb_totaldiff:
+                    risk_names.append("Total Diff")
+                    risk_hist.append([in_range(x, c_totaldiff) for x in total_diff_vals])
+                    risk_cand.append(("Total Diff", lambda tr: in_range(calculate_total_diff(match_odds_filter, list(tr)), c_totaldiff)))
+                if cb_aimatrix and cand_ai_matrix is not None:
+                    risk_names.append("AI-Rank")
+                    risk_hist.append([active_ai_min <= x <= active_ai_max for x in ai_ranks])
+                    risk_cand.append(("AI-Rank", lambda tr: active_ai_min <= get_exact_rank(tr, cand_ai_matrix, cand_ai_scores_asc, cand_ai_tot)[0] <= active_ai_max))
+                add_group_analysis("Riskgrupp", risk_hist, risk_cand, risk_names)
+
+            # Skrällgrupp: lågprocentare och skrällnivå. Bra som grupp, farligt som många hårda krav.
+            if cb_group_shock:
+                shock_names = []
+                shock_hist = []
+                shock_cand = []
+                if cb_shock_strength:
+                    shock_names.extend(["<10%", "<15%", "<20%", "Lägsta vinnande %"])
+                    shock_hist.append([in_range(x, c_shock10) for x in shock_u10])
+                    shock_hist.append([in_range(x, c_shock15) for x in shock_u15])
+                    shock_hist.append([in_range(x, c_shock20) for x in shock_u20])
+                    shock_hist.append([in_range(x, c_shock_lowest) for x in shock_lowest])
+                    shock_cand.append(("<10%", lambda tr: in_range(get_shock_strength(tr, filter_vec)['U10_Wins'], c_shock10)))
+                    shock_cand.append(("<15%", lambda tr: in_range(get_shock_strength(tr, filter_vec)['U15_Wins'], c_shock15)))
+                    shock_cand.append(("<20%", lambda tr: in_range(get_shock_strength(tr, filter_vec)['U20_Wins'], c_shock20)))
+                    shock_cand.append(("Lägsta vinnande %", lambda tr: in_range(get_shock_strength(tr, filter_vec)['Lowest_Win_Pct'], c_shock_lowest)))
+                if cb_log_surprise:
+                    shock_names.append("Skrälltryck Log")
+                    shock_hist.append([in_range(x, c_log_surprise) for x in log_surprise_sums])
+                    shock_cand.append(("Skrälltryck Log", lambda tr: in_range(get_log_surprise_sum(tr, filter_vec), c_log_surprise)))
+                if cb_100minus:
+                    shock_names.append("100-minus")
+                    shock_hist.append([in_range(x, c_minus) for x in minus_sums])
+                    shock_cand.append(("100-minus", lambda tr: in_range(get_100_minus_sum(tr, filter_vec), c_minus)))
+                add_group_analysis("Skrällgrupp", shock_hist, shock_cand, shock_names)
+
+            # FAT-profilgrupp: favorit/andrahands/skräll-profilen, men som mjuk grupp.
+            if cb_group_fat:
+                fat_names = []
+                fat_hist = []
+                fat_cand = []
+                if cb_fat:
+                    fat_names.extend(["FAT F", "FAT A", "FAT T", "FAT Summa"])
+                    fat_hist.append([in_range(x, c_fatf) for x in fat_f])
+                    fat_hist.append([in_range(x, c_fata) for x in fat_a])
+                    fat_hist.append([in_range(x, c_fatt) for x in fat_t])
+                    fat_hist.append([in_range(x, c_fatsum) for x in fat_sums])
+                    fat_cand.append(("FAT F", lambda tr: in_range(get_fat(tr, filter_vec)[0], c_fatf)))
+                    fat_cand.append(("FAT A", lambda tr: in_range(get_fat(tr, filter_vec)[1], c_fata)))
+                    fat_cand.append(("FAT T", lambda tr: in_range(get_fat(tr, filter_vec)[2], c_fatt)))
+                    fat_cand.append(("FAT Summa", lambda tr: in_range(get_fat(tr, filter_vec)[3], c_fatsum)))
+                if cb_u_favs:
+                    fat_names.append(f"Topp {slider_u_count} favoriter")
+                    fat_hist.append([in_range(x, c_u) for x in u_wins])
+                    fat_cand.append((f"Topp {slider_u_count} favoriter", lambda tr: in_range(get_top_n_favs_wins(tr, filter_vec, slider_u_count), c_u)))
+                if cb_fav_pressure:
+                    fat_names.append("Favorittryck")
+                    fat_hist.append([in_range(fav70_wins[i], c_fav70) and in_range(fav60_wins[i], c_fav60) and in_range(fav50_wins[i], c_fav50) for i in range(n_rows)])
+                    fat_cand.append(("Favorittryck", lambda tr: (lambda fp: in_range(fp['F70_Wins'], c_fav70) and in_range(fp['F60_Wins'], c_fav60) and in_range(fp['F50_Wins'], c_fav50))(get_favorite_pressure(tr, filter_vec))))
+                add_group_analysis("FAT-profilgrupp", fat_hist, fat_cand, fat_names)
+
+            # Strukturgrupp: klassiska grundramsfilter. Ofta bättre som grupp än som 7 hårda filter.
+            if cb_group_structure:
+                str_names = []
+                str_hist = []
+                str_cand = []
+                if cb_base:
+                    str_names.append("Tecken 1X2")
+                    str_hist.append([in_range(ones[i], c_ones) and in_range(draws[i], c_draws) and in_range(twos[i], c_twos) for i in range(n_rows)])
+                    str_cand.append(("Tecken 1X2", lambda tr: in_range(tr.count('1'), c_ones) and in_range(tr.count('X'), c_draws) and in_range(tr.count('2'), c_twos)))
+                if cb_streak:
+                    str_names.append("Sviter")
+                    str_hist.append([in_range(s1[i], c_s1) and in_range(sx[i], c_sx) and in_range(s2[i], c_s2) for i in range(n_rows)])
+                    str_cand.append(("Sviter", lambda tr: (lambda a: in_range(a[0], c_s1) and in_range(a[1], c_sx) and in_range(a[2], c_s2))(get_streaks(tr))))
+                if cb_gap:
+                    str_names.append("Luckor")
+                    str_hist.append([in_range(g1[i], c_g1) and in_range(gx[i], c_gx) and in_range(g2[i], c_g2) for i in range(n_rows)])
+                    str_cand.append(("Luckor", lambda tr: (lambda a: in_range(a[0], c_g1) and in_range(a[1], c_gx) and in_range(a[2], c_g2))(get_gaps(tr))))
+                if cb_single:
+                    str_names.append("Singlar")
+                    str_hist.append([in_range(sing1[i], c_sing1) and in_range(singx[i], c_singx) and in_range(sing2[i], c_sing2) and in_range(sing_tot[i], c_singtot) for i in range(n_rows)])
+                    str_cand.append(("Singlar", lambda tr: (lambda a: in_range(a[0], c_sing1) and in_range(a[1], c_singx) and in_range(a[2], c_sing2) and in_range(a[3], c_singtot))(get_singles(tr))))
+                if cb_doublet:
+                    str_names.append("Dubbletter")
+                    str_hist.append([in_range(dub1[i], c_dub1) and in_range(dubx[i], c_dubx) and in_range(dub2[i], c_dub2) and in_range(dub_tot[i], c_dubtot) for i in range(n_rows)])
+                    str_cand.append(("Dubbletter", lambda tr: (lambda a: in_range(a[0], c_dub1) and in_range(a[1], c_dubx) and in_range(a[2], c_dub2) and in_range(a[3], c_dubtot))(get_doublets(tr))))
+                if cb_triplet:
+                    str_names.append("Tripplar")
+                    str_hist.append([in_range(trip1[i], c_trip1) and in_range(tripx[i], c_tripx) and in_range(trip2[i], c_trip2) and in_range(trip_tot[i], c_triptot) for i in range(n_rows)])
+                    str_cand.append(("Tripplar", lambda tr: (lambda a: in_range(a[0], c_trip1) and in_range(a[1], c_tripx) and in_range(a[2], c_trip2) and in_range(a[3], c_triptot))(get_triplets(tr))))
+                if cb_occur:
+                    str_names.append("Uppkomster")
+                    str_hist.append([in_range(occ1[i], c_occ1) and in_range(occx[i], c_occx) and in_range(occ2[i], c_occ2) and in_range(occ_tot[i], c_occtot) for i in range(n_rows)])
+                    str_cand.append(("Uppkomster", lambda tr: (lambda a: in_range(a[0], c_occ1) and in_range(a[1], c_occx) and in_range(a[2], c_occ2) and in_range(a[3], c_occtot))(get_occurrences(tr))))
+                add_group_analysis("Strukturgrupp", str_hist, str_cand, str_names)
+
+        pro_groups_df = pd.DataFrame(pro_group_rows)
+
         st.markdown("---")
         st.subheader("🧪 Filterdiagnos")
         st.caption("Här visas bara värderingen av filtren. Själva inmatningsmallen ligger ovanför i VECKANS MALL.")
+
+        if cb_pro_groups and not pro_groups_df.empty:
+            st.markdown("### 🧩 Pro-grupper")
+            st.caption(
+                "Pro-grupperna testar samma filter som gruppkrav, t.ex. minst 3 av 6. "
+                "Det är tänkt för Helgarderings gruppfilter och minskar risken att flera liknande filter dödar vinnarraden."
+            )
+            show_group_cols = [
+                "Grupp", "Krav", "Historisk träff %", "Kvar rad %", "Reducerar %",
+                "Rationell faktor", "Klass", "Ingående filter"
+            ]
+            show_group_cols = [c for c in show_group_cols if c in pro_groups_df.columns]
+            st.dataframe(pro_groups_df[show_group_cols], use_container_width=True, hide_index=True)
+            with st.expander("Visa testade gruppkrav"):
+                for gname, gdf in pro_group_detail_tables.items():
+                    st.markdown(f"**{gname}**")
+                    st.dataframe(gdf[["Krav", "Historisk träff %", "Kvar rad %", "Reducerar %", "Rationell faktor", "Klass"]], use_container_width=True, hide_index=True)
+
         if not filter_rules_df.empty:
             diag_df = filter_rules_df.copy()
             if 'Rationell faktor' in diag_df.columns:
@@ -1309,6 +1566,11 @@ if st.session_state.get('har_kort_analys') and input_text:
                 helg_lines.append(f"  Grp 6 Tripplar: 1 {fmt_interval(b['t1'])}, X {fmt_interval(b['tx'])}, 2 {fmt_interval(b['t2'])}")
                 helg_lines.append(f"  Grp 7 Uppkomster: 1 {fmt_interval(b['o1'])}, X {fmt_interval(b['ox'])}, 2 {fmt_interval(b['o2'])}")
                 helg_lines.append(f"  Grp 8 FAT: F {fmt_interval(b['f'])}, A {fmt_interval(b['a'])}, T {fmt_interval(b['t'])}")
+            if cb_pro_groups and not pro_groups_df.empty:
+                helg_lines += ["", "PRO-GRUPPER / REKOMMENDERADE GRUPPKRAV"]
+                for _, gr in pro_groups_df.iterrows():
+                    helg_lines.append(f"- {gr['Helgardering-rad']}  [{gr['Klass']}, hist {gr['Historisk träff %']:.1f}%, kvar {gr['Kvar rad %']:.1f}%]")
+                    helg_lines.append(f"  Ingående filter: {gr['Ingående filter']}")
             helg_text = "\n".join(helg_lines)
 
             col_dl1, col_dl2, col_dl3 = st.columns(3)
@@ -1526,6 +1788,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                 if cb_sft and (c_sft[0] <= get_sft_sum(tr, filter_vec) <= c_sft[1]): pts += 1
                 if cb_points and (c_points[0] <= get_rank_points(tr, filter_vec) <= c_points[1]): pts += 1
                 if cb_100minus and (c_minus[0] <= get_100_minus_sum(tr, filter_vec) <= c_minus[1]): pts += 1
+                if cb_log_surprise and in_range(get_log_surprise_sum(tr, filter_vec), c_log_surprise): pts += 1
                 if cb_rank24 and (c_rank24[0] <= get_rank_sum(tr, filter_vec) <= c_rank24[1]): pts += 1
                 if cb_totaldiff:
                     td_c = calculate_total_diff(match_odds_input, list(tr))
