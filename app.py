@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v10.0 – AI-Ram & U-filter"
+APP_VERSION = "v10.1 – AI-Ram med radbudget"
 
 # ==========================================
 # 1. FUNKTIONER (FÖR 8 & 13 MATCHER)
@@ -515,6 +515,79 @@ def optimize_frame_greedy(hist_rows, match_stats, antal_matcher, target_pct=95.0
             break
         frame = best[5]
         current_eval = best[6]
+
+    return frame, current_eval
+
+
+def optimize_frame_budgeted(hist_rows, match_stats, antal_matcher, max_rows=25000, max_full=4, max_halves=None):
+    """
+    Radbudget-ram: börjar med AI-top1 i alla matcher och lägger till tecken så länge
+    de ger förbättrad historisk täckning utan att spränga radbudget eller max antal helgarderingar.
+
+    Detta undviker att rammotorn jagar 12+-målet genom att fylla ramen med för många helgarderingar.
+    Målet är i stället: bästa täckning inom en spelbar ram.
+    """
+    orders = [list(ms['Ordning']) for ms in match_stats]
+    frame = [set([orders[i][0]]) for i in range(antal_matcher)]
+    current_eval = evaluate_frame(frame, hist_rows, antal_matcher)
+
+    if max_halves is None:
+        max_halves = antal_matcher
+
+    def avg_inside(fr):
+        if not hist_rows:
+            return 0.0
+        vals = [sum(1 for i, c in enumerate(r[:antal_matcher]) if c in fr[i]) for r in hist_rows]
+        return sum(vals) / len(vals)
+
+    current_avg = avg_inside(frame)
+    guard = 0
+    while guard < antal_matcher * 2:
+        guard += 1
+        current_rows = max(1, frame_row_count(frame))
+        best = None
+
+        for m in range(antal_matcher):
+            if len(frame[m]) >= 3:
+                continue
+
+            next_sign = orders[m][len(frame[m])]
+            test_frame = [set(x) for x in frame]
+            test_frame[m].add(next_sign)
+            new_rows = frame_row_count(test_frame)
+            if new_rows > max_rows:
+                continue
+            if sum(1 for s in test_frame if len(s) == 3) > max_full:
+                continue
+            if sum(1 for s in test_frame if len(s) == 2) > max_halves:
+                continue
+
+            ev = evaluate_frame(test_frame, hist_rows, antal_matcher)
+            new_avg = avg_inside(test_frame)
+            cost_mult = max(1.0001, new_rows / current_rows)
+
+            gain_13 = ev.get('13', 0.0) - current_eval.get('13', 0.0)
+            gain_12 = ev.get('12+', 0.0) - current_eval.get('12+', 0.0)
+            gain_11 = ev.get('11+', 0.0) - current_eval.get('11+', 0.0)
+            gain_10 = ev.get('10+', 0.0) - current_eval.get('10+', 0.0)
+            gain_avg = new_avg - current_avg
+
+            # Täckningsförbättring per radkostnad. Snitt-rätt ger algoritmen signal även
+            # när 12+-nivån inte ökar direkt av ett enskilt teckentillägg.
+            raw_gain = gain_13 * 3.0 + gain_12 * 2.0 + gain_11 * 0.8 + gain_10 * 0.15 + gain_avg * 18.0
+            if raw_gain <= 0:
+                continue
+            score = raw_gain / np.log2(cost_mult + 1.0)
+            candidate = (score, gain_12, gain_13, -new_rows, m, test_frame, ev, new_avg)
+            if best is None or candidate > best:
+                best = candidate
+
+        if best is None:
+            break
+
+        frame = best[5]
+        current_eval = best[6]
+        current_avg = best[7]
 
     return frame, current_eval
 
@@ -1053,7 +1126,9 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("🎯 AI-Ram & U-filter")
     cb_ai_frame = st.checkbox("Visa AI-Ram & U-filter", value=True)
-    slider_frame_target = st.slider("Ram-mål: minst 12 rätt inom ram %", 70, 100, 95, step=5)
+    frame_budget_options = [864, 1728, 3456, 6912, 10368, 15552, 20736, 25000, 31104, 50000, 75000]
+    slider_frame_budget = st.select_slider("Balansram: max radantal", options=frame_budget_options, value=25000)
+    slider_frame_max_full = st.slider("Balansram: max antal helgarderingar", 0, antal_matcher, min(4, antal_matcher), step=1)
     slider_u_target = st.slider("U-rad mål historisk träff %", 70, 100, 90, step=5)
 
     st.markdown("---")
@@ -1921,31 +1996,32 @@ if st.session_state.get('har_kort_analys') and input_text:
             st.subheader("🎯 AI-Ram & U-filter")
             st.caption(
                 "Rammotorn använder de liknande historiska omgångarna för att föreslå spikar/halvor/hela. "
-                "Den backtestar ramen mot historiken och visar hur många av vinnarraderna som ryms inom ramen."
+                "Den backtestar ramen mot historiken och optimerar bästa täckning inom en radbudget, så ramen inte fylls med för många helgarderingar."
             )
 
             hist_rows_for_frame = [str(r).strip().upper() for r in v_m['Correct_Row'].astype(str) if len(str(r).strip()) == antal_matcher]
             match_ai_stats = build_match_ai_stats(v_m, filter_vec, antal_matcher)
 
-            frame_targets = [
-                ("Aggressiv", max(70, slider_frame_target - 10)),
-                ("Balans", slider_frame_target),
-                ("Trygg", min(100, slider_frame_target + 5)),
+            frame_profiles = [
+                ("Aggressiv", max(200, int(slider_frame_budget * 0.35)), max(0, slider_frame_max_full - 2)),
+                ("Balans", int(slider_frame_budget), int(slider_frame_max_full)),
+                ("Trygg", int(slider_frame_budget * 2), min(antal_matcher, int(slider_frame_max_full + 1))),
             ]
             frame_results = []
             frame_detail_texts = []
-            for label, target in frame_targets:
-                frame, ev = optimize_frame_greedy(
+            for label, max_rows, max_full in frame_profiles:
+                frame, ev = optimize_frame_budgeted(
                     hist_rows_for_frame,
                     match_ai_stats,
                     antal_matcher,
-                    target_pct=target,
-                    metric='12+'
+                    max_rows=max_rows,
+                    max_full=max_full
                 )
                 frame_txt = frame_to_string(frame)
                 frame_results.append({
                     "Ram": label,
-                    "Mål 12+ %": target,
+                    "Max rader": max_rows,
+                    "Max hela": max_full,
                     "Radantal": ev['Radantal'],
                     "Spikar": ev['Spikar'],
                     "Halvor": ev['Halvor'],
@@ -1958,7 +2034,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                 })
                 frame_detail_texts.append(
                     f"{label}: {frame_txt}\n"
-                    f"Radantal: {ev['Radantal']} | Spikar {ev['Spikar']} | Halvor {ev['Halvor']} | Hela {ev['Hela']}\n"
+                    f"Radantal: {ev['Radantal']} av max {max_rows} | Spikar {ev['Spikar']} | Halvor {ev['Halvor']} | Hela {ev['Hela']} av max {max_full}\n"
                     f"Historisk täckning: 13 {ev['13']}%, 12+ {ev['12+']}%, 11+ {ev['11+']}%, 10+ {ev['10+']}%"
                 )
 
