@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v7.0 – pro-grupper"
+APP_VERSION = "v8.0 – pro-grupper med intervaller"
 
 # ==========================================
 # 1. FUNKTIONER (FÖR 8 & 13 MATCHER)
@@ -463,7 +463,7 @@ def filter_strength_row(name, interval_text, hist_pct, keep_pct, module, hg_text
     }
 
 
-def recommend_group_requirement(group_name, hist_scores, cand_scores, rule_names, target_hist_pct=90.0):
+def recommend_group_requirement(group_name, hist_scores, cand_scores, rule_names, rule_details=None, target_hist_pct=90.0):
     """
     Testar alla möjliga gruppkrav, t.ex. 1 av 4, 2 av 4, 3 av 4.
     Väljer hårdaste krav som fortfarande klarar önskad historisk träff.
@@ -472,6 +472,10 @@ def recommend_group_requirement(group_name, hist_scores, cand_scores, rule_names
     n_rules = len(rule_names)
     if n_rules == 0:
         return None, pd.DataFrame()
+    if rule_details is None:
+        rule_details = [f"{name}: -" for name in rule_names]
+    detail_text = "\n".join([f"- {d}" for d in rule_details])
+    detail_one_line = " | ".join(rule_details)
 
     hist_total = len(hist_scores)
     cand_total = len(cand_scores)
@@ -493,6 +497,8 @@ def recommend_group_requirement(group_name, hist_scores, cand_scores, rule_names
             "Rationell faktor": round(lift, 1) if lift is not None else None,
             "Klass": cls,
             "Ingående filter": ", ".join(rule_names),
+            "Filterintervall": detail_one_line,
+            "Helgardering-detaljer": detail_text,
             "Helgardering-rad": f"{group_name}: minst {req} av {n_rules} filter ska vara sanna"
         })
 
@@ -1299,7 +1305,7 @@ if st.session_state.get('har_kort_analys') and input_text:
         pro_group_rows = []
         pro_group_detail_tables = {}
 
-        def add_group_analysis(group_name, hist_bool_columns, cand_predicates, rule_names):
+        def add_group_analysis(group_name, hist_bool_columns, cand_predicates, rule_names, rule_details=None):
             if not rule_names:
                 return
             hist_scores_g = score_bool_columns(hist_bool_columns, n_rows)
@@ -1309,6 +1315,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                 hist_scores_g,
                 cand_scores_g,
                 rule_names,
+                rule_details=rule_details,
                 target_hist_pct=slider_group_target
             )
             if best_g:
@@ -1321,39 +1328,53 @@ if st.session_state.get('har_kort_analys') and input_text:
                 risk_names = []
                 risk_hist = []
                 risk_cand = []
+                risk_details = []
                 if cb_sft:
                     risk_names.append("SFT Summa")
+                    risk_details.append(f"SFT Summa: {fmt_interval(c_sft)}")
                     risk_hist.append([in_range(x, c_sft) for x in sft_sums])
                     risk_cand.append(("SFT Summa", lambda tr: in_range(get_sft_sum(tr, filter_vec), c_sft)))
                 if cb_log_surprise:
                     risk_names.append("Skrälltryck Log")
+                    risk_details.append(f"Skrälltryck Log: {fmt_interval(c_log_surprise)}")
                     risk_hist.append([in_range(x, c_log_surprise) for x in log_surprise_sums])
                     risk_cand.append(("Skrälltryck Log", lambda tr: in_range(get_log_surprise_sum(tr, filter_vec), c_log_surprise)))
                 if cb_100minus:
                     risk_names.append("100-minus")
+                    risk_details.append(f"100-minus: {fmt_interval(c_minus)}")
                     risk_hist.append([in_range(x, c_minus) for x in minus_sums])
                     risk_cand.append(("100-minus", lambda tr: in_range(get_100_minus_sum(tr, filter_vec), c_minus)))
                 if cb_rank24:
                     risk_names.append("Rank Summa")
+                    risk_details.append(f"Rank Summa: {fmt_interval(c_rank24, 1)}")
                     risk_hist.append([in_range(x, c_rank24) for x in rank24_sums])
                     risk_cand.append(("Rank Summa", lambda tr: in_range(get_rank_sum(tr, filter_vec), c_rank24)))
                 if cb_totaldiff:
                     risk_names.append("Total Diff")
+                    risk_details.append(f"Total Diff: {fmt_interval(c_totaldiff)}")
                     risk_hist.append([in_range(x, c_totaldiff) for x in total_diff_vals])
                     risk_cand.append(("Total Diff", lambda tr: in_range(calculate_total_diff(match_odds_filter, list(tr)), c_totaldiff)))
                 if cb_aimatrix and cand_ai_matrix is not None:
                     risk_names.append("AI-Rank")
+                    risk_details.append(f"AI-Rank: {active_ai_min:.0f}-{active_ai_max:.0f}")
                     risk_hist.append([active_ai_min <= x <= active_ai_max for x in ai_ranks])
                     risk_cand.append(("AI-Rank", lambda tr: active_ai_min <= get_exact_rank(tr, cand_ai_matrix, cand_ai_scores_asc, cand_ai_tot)[0] <= active_ai_max))
-                add_group_analysis("Riskgrupp", risk_hist, risk_cand, risk_names)
+                add_group_analysis("Riskgrupp", risk_hist, risk_cand, risk_names, risk_details)
 
             # Skrällgrupp: lågprocentare och skrällnivå. Bra som grupp, farligt som många hårda krav.
             if cb_group_shock:
                 shock_names = []
                 shock_hist = []
                 shock_cand = []
+                shock_details = []
                 if cb_shock_strength:
                     shock_names.extend(["<10%", "<15%", "<20%", "Lägsta vinnande %"])
+                    shock_details.extend([
+                        f"Vinnande tecken <10%: {fmt_interval(c_shock10)}",
+                        f"Vinnande tecken <15%: {fmt_interval(c_shock15)}",
+                        f"Vinnande tecken <20%: {fmt_interval(c_shock20)}",
+                        f"Lägsta vinnande procent: {fmt_interval(c_shock_lowest, 1)}"
+                    ])
                     shock_hist.append([in_range(x, c_shock10) for x in shock_u10])
                     shock_hist.append([in_range(x, c_shock15) for x in shock_u15])
                     shock_hist.append([in_range(x, c_shock20) for x in shock_u20])
@@ -1364,21 +1385,30 @@ if st.session_state.get('har_kort_analys') and input_text:
                     shock_cand.append(("Lägsta vinnande %", lambda tr: in_range(get_shock_strength(tr, filter_vec)['Lowest_Win_Pct'], c_shock_lowest)))
                 if cb_log_surprise:
                     shock_names.append("Skrälltryck Log")
+                    shock_details.append(f"Skrälltryck Log: {fmt_interval(c_log_surprise)}")
                     shock_hist.append([in_range(x, c_log_surprise) for x in log_surprise_sums])
                     shock_cand.append(("Skrälltryck Log", lambda tr: in_range(get_log_surprise_sum(tr, filter_vec), c_log_surprise)))
                 if cb_100minus:
                     shock_names.append("100-minus")
+                    shock_details.append(f"100-minus: {fmt_interval(c_minus)}")
                     shock_hist.append([in_range(x, c_minus) for x in minus_sums])
                     shock_cand.append(("100-minus", lambda tr: in_range(get_100_minus_sum(tr, filter_vec), c_minus)))
-                add_group_analysis("Skrällgrupp", shock_hist, shock_cand, shock_names)
+                add_group_analysis("Skrällgrupp", shock_hist, shock_cand, shock_names, shock_details)
 
             # FAT-profilgrupp: favorit/andrahands/skräll-profilen, men som mjuk grupp.
             if cb_group_fat:
                 fat_names = []
                 fat_hist = []
                 fat_cand = []
+                fat_details = []
                 if cb_fat:
                     fat_names.extend(["FAT F", "FAT A", "FAT T", "FAT Summa"])
+                    fat_details.extend([
+                        f"FAT F: {fmt_interval(c_fatf)}",
+                        f"FAT A: {fmt_interval(c_fata)}",
+                        f"FAT T: {fmt_interval(c_fatt)}",
+                        f"FAT Summa: {fmt_interval(c_fatsum)}"
+                    ])
                     fat_hist.append([in_range(x, c_fatf) for x in fat_f])
                     fat_hist.append([in_range(x, c_fata) for x in fat_a])
                     fat_hist.append([in_range(x, c_fatt) for x in fat_t])
@@ -1389,48 +1419,58 @@ if st.session_state.get('har_kort_analys') and input_text:
                     fat_cand.append(("FAT Summa", lambda tr: in_range(get_fat(tr, filter_vec)[3], c_fatsum)))
                 if cb_u_favs:
                     fat_names.append(f"Topp {slider_u_count} favoriter")
+                    fat_details.append(f"Topp {slider_u_count} favoriter: {fmt_interval(c_u)}")
                     fat_hist.append([in_range(x, c_u) for x in u_wins])
                     fat_cand.append((f"Topp {slider_u_count} favoriter", lambda tr: in_range(get_top_n_favs_wins(tr, filter_vec, slider_u_count), c_u)))
                 if cb_fav_pressure:
                     fat_names.append("Favorittryck")
+                    fat_details.append(f"Favorittryck: ≥70% {fmt_interval(c_fav70)} av {input_fav_pressure['F70_Count']} | ≥60% {fmt_interval(c_fav60)} av {input_fav_pressure['F60_Count']} | ≥50% {fmt_interval(c_fav50)} av {input_fav_pressure['F50_Count']}")
                     fat_hist.append([in_range(fav70_wins[i], c_fav70) and in_range(fav60_wins[i], c_fav60) and in_range(fav50_wins[i], c_fav50) for i in range(n_rows)])
                     fat_cand.append(("Favorittryck", lambda tr: (lambda fp: in_range(fp['F70_Wins'], c_fav70) and in_range(fp['F60_Wins'], c_fav60) and in_range(fp['F50_Wins'], c_fav50))(get_favorite_pressure(tr, filter_vec))))
-                add_group_analysis("FAT-profilgrupp", fat_hist, fat_cand, fat_names)
+                add_group_analysis("FAT-profilgrupp", fat_hist, fat_cand, fat_names, fat_details)
 
             # Strukturgrupp: klassiska grundramsfilter. Ofta bättre som grupp än som 7 hårda filter.
             if cb_group_structure:
                 str_names = []
                 str_hist = []
                 str_cand = []
+                str_details = []
                 if cb_base:
                     str_names.append("Tecken 1X2")
+                    str_details.append(f"Tecken 1X2: 1 {fmt_interval(c_ones)}, X {fmt_interval(c_draws)}, 2 {fmt_interval(c_twos)}")
                     str_hist.append([in_range(ones[i], c_ones) and in_range(draws[i], c_draws) and in_range(twos[i], c_twos) for i in range(n_rows)])
                     str_cand.append(("Tecken 1X2", lambda tr: in_range(tr.count('1'), c_ones) and in_range(tr.count('X'), c_draws) and in_range(tr.count('2'), c_twos)))
                 if cb_streak:
                     str_names.append("Sviter")
+                    str_details.append(f"Sviter: 1 {fmt_interval(c_s1)}, X {fmt_interval(c_sx)}, 2 {fmt_interval(c_s2)}")
                     str_hist.append([in_range(s1[i], c_s1) and in_range(sx[i], c_sx) and in_range(s2[i], c_s2) for i in range(n_rows)])
                     str_cand.append(("Sviter", lambda tr: (lambda a: in_range(a[0], c_s1) and in_range(a[1], c_sx) and in_range(a[2], c_s2))(get_streaks(tr))))
                 if cb_gap:
                     str_names.append("Luckor")
+                    str_details.append(f"Luckor: 1 {fmt_interval(c_g1)}, X {fmt_interval(c_gx)}, 2 {fmt_interval(c_g2)}")
                     str_hist.append([in_range(g1[i], c_g1) and in_range(gx[i], c_gx) and in_range(g2[i], c_g2) for i in range(n_rows)])
                     str_cand.append(("Luckor", lambda tr: (lambda a: in_range(a[0], c_g1) and in_range(a[1], c_gx) and in_range(a[2], c_g2))(get_gaps(tr))))
                 if cb_single:
                     str_names.append("Singlar")
+                    str_details.append(f"Singlar: 1 {fmt_interval(c_sing1)}, X {fmt_interval(c_singx)}, 2 {fmt_interval(c_sing2)}, Tot {fmt_interval(c_singtot)}")
                     str_hist.append([in_range(sing1[i], c_sing1) and in_range(singx[i], c_singx) and in_range(sing2[i], c_sing2) and in_range(sing_tot[i], c_singtot) for i in range(n_rows)])
                     str_cand.append(("Singlar", lambda tr: (lambda a: in_range(a[0], c_sing1) and in_range(a[1], c_singx) and in_range(a[2], c_sing2) and in_range(a[3], c_singtot))(get_singles(tr))))
                 if cb_doublet:
                     str_names.append("Dubbletter")
+                    str_details.append(f"Dubbletter: 1 {fmt_interval(c_dub1)}, X {fmt_interval(c_dubx)}, 2 {fmt_interval(c_dub2)}, Tot {fmt_interval(c_dubtot)}")
                     str_hist.append([in_range(dub1[i], c_dub1) and in_range(dubx[i], c_dubx) and in_range(dub2[i], c_dub2) and in_range(dub_tot[i], c_dubtot) for i in range(n_rows)])
                     str_cand.append(("Dubbletter", lambda tr: (lambda a: in_range(a[0], c_dub1) and in_range(a[1], c_dubx) and in_range(a[2], c_dub2) and in_range(a[3], c_dubtot))(get_doublets(tr))))
                 if cb_triplet:
                     str_names.append("Tripplar")
+                    str_details.append(f"Tripplar: 1 {fmt_interval(c_trip1)}, X {fmt_interval(c_tripx)}, 2 {fmt_interval(c_trip2)}, Tot {fmt_interval(c_triptot)}")
                     str_hist.append([in_range(trip1[i], c_trip1) and in_range(tripx[i], c_tripx) and in_range(trip2[i], c_trip2) and in_range(trip_tot[i], c_triptot) for i in range(n_rows)])
                     str_cand.append(("Tripplar", lambda tr: (lambda a: in_range(a[0], c_trip1) and in_range(a[1], c_tripx) and in_range(a[2], c_trip2) and in_range(a[3], c_triptot))(get_triplets(tr))))
                 if cb_occur:
                     str_names.append("Uppkomster")
+                    str_details.append(f"Uppkomster: 1 {fmt_interval(c_occ1)}, X {fmt_interval(c_occx)}, 2 {fmt_interval(c_occ2)}, Tot {fmt_interval(c_occtot)}")
                     str_hist.append([in_range(occ1[i], c_occ1) and in_range(occx[i], c_occx) and in_range(occ2[i], c_occ2) and in_range(occ_tot[i], c_occtot) for i in range(n_rows)])
                     str_cand.append(("Uppkomster", lambda tr: (lambda a: in_range(a[0], c_occ1) and in_range(a[1], c_occx) and in_range(a[2], c_occ2) and in_range(a[3], c_occtot))(get_occurrences(tr))))
-                add_group_analysis("Strukturgrupp", str_hist, str_cand, str_names)
+                add_group_analysis("Strukturgrupp", str_hist, str_cand, str_names, str_details)
 
         pro_groups_df = pd.DataFrame(pro_group_rows)
 
@@ -1446,10 +1486,16 @@ if st.session_state.get('har_kort_analys') and input_text:
             )
             show_group_cols = [
                 "Grupp", "Krav", "Historisk träff %", "Kvar rad %", "Reducerar %",
-                "Rationell faktor", "Klass", "Ingående filter"
+                "Rationell faktor", "Klass", "Filterintervall"
             ]
             show_group_cols = [c for c in show_group_cols if c in pro_groups_df.columns]
             st.dataframe(pro_groups_df[show_group_cols], use_container_width=True, hide_index=True)
+
+            with st.expander("Visa pro-grupper med exakta filterintervall"):
+                for _, gr in pro_groups_df.iterrows():
+                    st.markdown(f"**{gr['Grupp']} – krav {gr['Krav']}**")
+                    st.text(gr.get('Helgardering-detaljer', ''))
+
             with st.expander("Visa testade gruppkrav"):
                 for gname, gdf in pro_group_detail_tables.items():
                     st.markdown(f"**{gname}**")
@@ -1570,7 +1616,9 @@ if st.session_state.get('har_kort_analys') and input_text:
                 helg_lines += ["", "PRO-GRUPPER / REKOMMENDERADE GRUPPKRAV"]
                 for _, gr in pro_groups_df.iterrows():
                     helg_lines.append(f"- {gr['Helgardering-rad']}  [{gr['Klass']}, hist {gr['Historisk träff %']:.1f}%, kvar {gr['Kvar rad %']:.1f}%]")
-                    helg_lines.append(f"  Ingående filter: {gr['Ingående filter']}")
+                    helg_lines.append("  Intervall/filter som ska ingå i gruppen:")
+                    for line in str(gr.get('Helgardering-detaljer', '')).splitlines():
+                        helg_lines.append(f"  {line}")
             helg_text = "\n".join(helg_lines)
 
             col_dl1, col_dl2, col_dl3 = st.columns(3)
