@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v8.0 – pro-grupper med intervaller"
+APP_VERSION = "v8.1 – fix favorittryck i pro-grupper"
 
 # ==========================================
 # 1. FUNKTIONER (FÖR 8 & 13 MATCHER)
@@ -1424,7 +1424,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                     fat_cand.append((f"Topp {slider_u_count} favoriter", lambda tr: in_range(get_top_n_favs_wins(tr, filter_vec, slider_u_count), c_u)))
                 if cb_fav_pressure:
                     fat_names.append("Favorittryck")
-                    fat_details.append(f"Favorittryck: ≥70% {fmt_interval(c_fav70)} av {input_fav_pressure['F70_Count']} | ≥60% {fmt_interval(c_fav60)} av {input_fav_pressure['F60_Count']} | ≥50% {fmt_interval(c_fav50)} av {input_fav_pressure['F50_Count']}")
+                    fat_details.append(f"Favorittryck: ≥70% {fmt_interval(c_fav70)} av {todays_fav_counts.get(70,0)} | ≥60% {fmt_interval(c_fav60)} av {todays_fav_counts.get(60,0)} | ≥50% {fmt_interval(c_fav50)} av {todays_fav_counts.get(50,0)}")
                     fat_hist.append([in_range(fav70_wins[i], c_fav70) and in_range(fav60_wins[i], c_fav60) and in_range(fav50_wins[i], c_fav50) for i in range(n_rows)])
                     fat_cand.append(("Favorittryck", lambda tr: (lambda fp: in_range(fp['F70_Wins'], c_fav70) and in_range(fp['F60_Wins'], c_fav60) and in_range(fp['F50_Wins'], c_fav50))(get_favorite_pressure(tr, filter_vec))))
                 add_group_analysis("FAT-profilgrupp", fat_hist, fat_cand, fat_names, fat_details)
