@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v9.0 – optimerade pro-grupper"
+APP_VERSION = "v10.0 – AI-Ram & U-filter"
 
 # ==========================================
 # 1. FUNKTIONER (FÖR 8 & 13 MATCHER)
@@ -409,6 +409,145 @@ def make_candidate_rows(antal_matcher, sample_size=25000):
     rng = np.random.default_rng(42)
     arr = rng.choice(['1', 'X', '2'], size=(sample_size, antal_matcher))
     return [''.join(row) for row in arr], False
+
+
+# --- AI-RAM / U-FILTER ---
+def _sort_signs_display(signs):
+    order = {'1': 0, 'X': 1, '2': 2}
+    return ''.join(sorted(list(signs), key=lambda s: order.get(s, 9)))
+
+def build_match_ai_stats(v_m, filter_vec, antal_matcher):
+    """Bygger matchvis historisk träffbild från de liknande omgångarna."""
+    rows = []
+    total = len(v_m)
+    for m in range(antal_matcher):
+        outcomes = [str(r).strip().upper()[m] for r in v_m['Correct_Row'].astype(str) if len(str(r).strip()) == antal_matcher]
+        tot = len(outcomes) if outcomes else total
+        counts = {s: outcomes.count(s) for s in ['1', 'X', '2']}
+        hist_pct = {s: (counts[s] / tot) * 100 if tot else 0.0 for s in ['1', 'X', '2']}
+        input_pct = {
+            '1': float(filter_vec[m*3]),
+            'X': float(filter_vec[m*3+1]),
+            '2': float(filter_vec[m*3+2]),
+        }
+        # Sortering: historisk träff först, dagens procent som tie-breaker.
+        order = sorted(['1', 'X', '2'], key=lambda s: (hist_pct[s], input_pct[s]), reverse=True)
+        top1 = order[0]
+        top2 = _sort_signs_display(order[:2])
+        top3 = '1X2'
+        rows.append({
+            'Match': m + 1,
+            'Ordning': ''.join(order),
+            'Top1': top1,
+            'Top2': top2,
+            'Top3': top3,
+            '1 hist %': round(hist_pct['1'], 1),
+            'X hist %': round(hist_pct['X'], 1),
+            '2 hist %': round(hist_pct['2'], 1),
+            '1 idag %': round(input_pct['1'], 1),
+            'X idag %': round(input_pct['X'], 1),
+            '2 idag %': round(input_pct['2'], 1),
+        })
+    return rows
+
+def frame_row_count(frame):
+    n = 1
+    for signs in frame:
+        n *= max(1, len(signs))
+    return int(n)
+
+def evaluate_frame(frame, hist_rows, antal_matcher):
+    """Returnerar täckning: hur många rätt som ryms i ramen mot historiska vinnarrader."""
+    if not hist_rows:
+        return {'13': 0.0, '12+': 0.0, '11+': 0.0, '10+': 0.0, 'Radantal': frame_row_count(frame)}
+    hit_counts = []
+    for r in hist_rows:
+        inside = sum(1 for i, c in enumerate(r[:antal_matcher]) if c in frame[i])
+        hit_counts.append(inside)
+    total = len(hit_counts)
+    return {
+        '13': round((sum(1 for h in hit_counts if h >= antal_matcher) / total) * 100, 1),
+        '12+': round((sum(1 for h in hit_counts if h >= antal_matcher - 1) / total) * 100, 1),
+        '11+': round((sum(1 for h in hit_counts if h >= antal_matcher - 2) / total) * 100, 1),
+        '10+': round((sum(1 for h in hit_counts if h >= antal_matcher - 3) / total) * 100, 1),
+        'Min rätt i ram': min(hit_counts) if hit_counts else 0,
+        'Max rätt i ram': max(hit_counts) if hit_counts else 0,
+        'Radantal': frame_row_count(frame),
+        'Spikar': sum(1 for s in frame if len(s) == 1),
+        'Halvor': sum(1 for s in frame if len(s) == 2),
+        'Hela': sum(1 for s in frame if len(s) == 3),
+    }
+
+def optimize_frame_greedy(hist_rows, match_stats, antal_matcher, target_pct=95.0, metric='12+'):
+    """
+    Greedy-ram: börjar med AI-top1 i alla matcher och lägger till nästa historiskt bästa tecken
+    där det ger mest täckning per radkostnad. Målet är hög täckning med låg ramkostnad.
+    """
+    orders = [list(ms['Ordning']) for ms in match_stats]
+    frame = [set([orders[i][0]]) for i in range(antal_matcher)]
+    current_eval = evaluate_frame(frame, hist_rows, antal_matcher)
+
+    guard = 0
+    while current_eval.get(metric, 0.0) < target_pct and guard < antal_matcher * 2:
+        guard += 1
+        current_rows = max(1, frame_row_count(frame))
+        best = None
+        for m in range(antal_matcher):
+            if len(frame[m]) >= 3:
+                continue
+            # Lägg bara till nästa tecken i historisk ordning, så ramen förblir logisk.
+            next_sign = orders[m][len(frame[m])]
+            test_frame = [set(x) for x in frame]
+            test_frame[m].add(next_sign)
+            ev = evaluate_frame(test_frame, hist_rows, antal_matcher)
+            new_rows = max(1, ev['Radantal'])
+            gain_main = ev.get(metric, 0.0) - current_eval.get(metric, 0.0)
+            gain_13 = ev.get('13', 0.0) - current_eval.get('13', 0.0)
+            gain_11 = ev.get('11+', 0.0) - current_eval.get('11+', 0.0)
+            cost_mult = new_rows / current_rows
+            # Balanserar förbättring mot radkostnad. En liten bonus gör att algoritmen inte fastnar
+            # om en förbättring kräver flera tillägg innan den syns på huvudmåttet.
+            score = (gain_main * 4.0 + gain_13 * 1.25 + gain_11 * 0.25 + ev.get(metric, 0.0) * 0.015) / np.log2(cost_mult + 1.0)
+            candidate = (score, gain_main, gain_13, -new_rows, m, test_frame, ev)
+            if best is None or candidate > best:
+                best = candidate
+        if best is None:
+            break
+        frame = best[5]
+        current_eval = best[6]
+
+    return frame, current_eval
+
+def frame_to_string(frame):
+    return ' '.join(_sort_signs_display(s) for s in frame)
+
+def frame_compact_string(frame):
+    return '-'.join(_sort_signs_display(s) for s in frame)
+
+def build_ai_u_row(match_stats):
+    return ''.join(ms['Top1'] for ms in match_stats)
+
+def evaluate_u_row(u_row, hist_rows, antal_matcher, target_pct=90.0):
+    hits = []
+    for r in hist_rows:
+        hits.append(sum(1 for i, c in enumerate(r[:antal_matcher]) if c == u_row[i]))
+    total = len(hits) if hits else 0
+    if not total:
+        return {'hits': [], 'recommended_min': 0, 'coverage': 0.0, 'dist': pd.DataFrame()}
+    recommended = 0
+    coverage = 100.0
+    for k in range(antal_matcher, -1, -1):
+        pct = (sum(1 for h in hits if h >= k) / total) * 100
+        if pct >= target_pct:
+            recommended = k
+            coverage = pct
+            break
+    dist = pd.DataFrame([
+        {'U-träffar': k, 'Antal': sum(1 for h in hits if h == k), 'Andel %': round((sum(1 for h in hits if h == k) / total) * 100, 1)}
+        for k in range(antal_matcher, -1, -1)
+        if sum(1 for h in hits if h == k) > 0
+    ])
+    return {'hits': hits, 'recommended_min': recommended, 'coverage': round(coverage, 1), 'dist': dist}
 
 def pass_super_macro_row(row_str, prob_vector, bounds, req_groups):
     c1, cx, c2 = row_str.count('1'), row_str.count('X'), row_str.count('2')
@@ -910,6 +1049,12 @@ with st.sidebar:
     cb_group_shock = st.checkbox("Skrällgrupp", value=True)
     cb_group_fat = st.checkbox("FAT-profilgrupp", value=True)
     cb_group_structure = st.checkbox("Strukturgrupp", value=True)
+
+    st.markdown("---")
+    st.subheader("🎯 AI-Ram & U-filter")
+    cb_ai_frame = st.checkbox("Visa AI-Ram & U-filter", value=True)
+    slider_frame_target = st.slider("Ram-mål: minst 12 rätt inom ram %", 70, 100, 95, step=5)
+    slider_u_target = st.slider("U-rad mål historisk träff %", 70, 100, 90, step=5)
 
     st.markdown("---")
     st.subheader("🎯 Soft Filtering")
@@ -1769,6 +1914,113 @@ if st.session_state.get('har_kort_analys') and input_text:
                     filter_rules_df.to_csv(outdir / f"filterregler_{spelform}_{stamp}.csv", index=False, sep=';', encoding='utf-8-sig')
                     (outdir / f"helgardering_export_{spelform}_{stamp}.txt").write_text(helg_text, encoding='utf-8')
                     st.success(f"Sparat i {outdir.resolve()}")
+
+        # --- AI-RAM & U-FILTER ---
+        if cb_ai_frame:
+            st.markdown("---")
+            st.subheader("🎯 AI-Ram & U-filter")
+            st.caption(
+                "Rammotorn använder de liknande historiska omgångarna för att föreslå spikar/halvor/hela. "
+                "Den backtestar ramen mot historiken och visar hur många av vinnarraderna som ryms inom ramen."
+            )
+
+            hist_rows_for_frame = [str(r).strip().upper() for r in v_m['Correct_Row'].astype(str) if len(str(r).strip()) == antal_matcher]
+            match_ai_stats = build_match_ai_stats(v_m, filter_vec, antal_matcher)
+
+            frame_targets = [
+                ("Aggressiv", max(70, slider_frame_target - 10)),
+                ("Balans", slider_frame_target),
+                ("Trygg", min(100, slider_frame_target + 5)),
+            ]
+            frame_results = []
+            frame_detail_texts = []
+            for label, target in frame_targets:
+                frame, ev = optimize_frame_greedy(
+                    hist_rows_for_frame,
+                    match_ai_stats,
+                    antal_matcher,
+                    target_pct=target,
+                    metric='12+'
+                )
+                frame_txt = frame_to_string(frame)
+                frame_results.append({
+                    "Ram": label,
+                    "Mål 12+ %": target,
+                    "Radantal": ev['Radantal'],
+                    "Spikar": ev['Spikar'],
+                    "Halvor": ev['Halvor'],
+                    "Hela": ev['Hela'],
+                    "13 inom ram %": ev['13'],
+                    "12+ inom ram %": ev['12+'],
+                    "11+ inom ram %": ev['11+'],
+                    "10+ inom ram %": ev['10+'],
+                    "Ramtecken": frame_txt,
+                })
+                frame_detail_texts.append(
+                    f"{label}: {frame_txt}\n"
+                    f"Radantal: {ev['Radantal']} | Spikar {ev['Spikar']} | Halvor {ev['Halvor']} | Hela {ev['Hela']}\n"
+                    f"Historisk täckning: 13 {ev['13']}%, 12+ {ev['12+']}%, 11+ {ev['11+']}%, 10+ {ev['10+']}%"
+                )
+
+            frame_df = pd.DataFrame(frame_results)
+            st.dataframe(frame_df, use_container_width=True, hide_index=True)
+
+            # AI-U-rad: bästa historiska tecken per match bland de liknande omgångarna.
+            ai_u_row = build_ai_u_row(match_ai_stats)
+            u_eval = evaluate_u_row(ai_u_row, hist_rows_for_frame, antal_matcher, target_pct=slider_u_target)
+
+            c_ai1, c_ai2, c_ai3 = st.columns(3)
+            with c_ai1:
+                st.metric("AI-U-rad", ai_u_row)
+            with c_ai2:
+                st.metric("Rekommenderat U-filter", f"{u_eval['recommended_min']}-{antal_matcher}")
+            with c_ai3:
+                st.metric("Historisk täckning", f"{u_eval['coverage']:.1f}%", f"mål {slider_u_target}%")
+
+            st.info(
+                "Praktiskt: använd AI-ramen som grundram om du vill att appen ska välja spik/halv/hel. "
+                "Eller använd AI-U-raden som utgångsfilter, t.ex. "
+                f"{u_eval['recommended_min']}-{antal_matcher} rätt, om du vill styra systemet utan att låsa ramen för hårt."
+            )
+
+            with st.expander("Visa matchvis AI-bedömning för ramval"):
+                match_df = pd.DataFrame(match_ai_stats)
+                cols = ['Match', 'Top1', 'Top2', '1 hist %', 'X hist %', '2 hist %', '1 idag %', 'X idag %', '2 idag %']
+                st.dataframe(match_df[cols], use_container_width=True, hide_index=True)
+
+            with st.expander("Visa U-radens historiska träfffördelning"):
+                st.dataframe(u_eval['dist'], use_container_width=True, hide_index=True)
+
+            ai_frame_export_lines = [
+                f"AI-RAM & U-FILTER - {spelform}",
+                f"Skapad: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                f"Liknande historiska omgångar: {len(hist_rows_for_frame)}",
+                "",
+                "RAMFÖRSLAG"
+            ]
+            for txt in frame_detail_texts:
+                ai_frame_export_lines += [txt, ""]
+            ai_frame_export_lines += [
+                "AI-U-RAD",
+                f"U-rad: {ai_u_row}",
+                f"Rekommenderat U-filter: {u_eval['recommended_min']}-{antal_matcher} rätt",
+                f"Historisk täckning: {u_eval['coverage']:.1f}% vid mål {slider_u_target}%",
+                "",
+                "MATCHVIS HISTORIK"
+            ]
+            for ms in match_ai_stats:
+                ai_frame_export_lines.append(
+                    f"M{ms['Match']}: Top1 {ms['Top1']} | Top2 {ms['Top2']} | "
+                    f"Hist 1 {ms['1 hist %']}%, X {ms['X hist %']}%, 2 {ms['2 hist %']}% | "
+                    f"Idag 1 {ms['1 idag %']}%, X {ms['X idag %']}%, 2 {ms['2 idag %']}%"
+                )
+            ai_frame_export = "\n".join(ai_frame_export_lines)
+            st.download_button(
+                "⬇️ Ladda ner AI-Ram & U-filter TXT",
+                ai_frame_export.encode('utf-8'),
+                file_name=f"ai_ram_u_filter_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                mime="text/plain"
+            )
 
         st.markdown("---")
         st.subheader("🧬 Dagens Bästa FAT-Sekvenser (Byggklossar)")
