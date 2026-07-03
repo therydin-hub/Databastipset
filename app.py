@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v10.1 – AI-Ram med radbudget"
+APP_VERSION = "v11.0 – Filterrevision"
 
 # ==========================================
 # 1. FUNKTIONER (FÖR 8 & 13 MATCHER)
@@ -675,6 +675,156 @@ def filter_strength_row(name, interval_text, hist_pct, keep_pct, module, hg_text
     }
 
 
+
+def get_filter_family(filter_name, group_name=""):
+    """Grov filterfamilj för revision/rensning."""
+    name = str(filter_name).lower()
+    grp = str(group_name).lower()
+    if any(k in name for k in ["ai-matrix", "sft", "100-minus", "skrälltryck", "rank summa", "total diff", "poängfilter"]):
+        return "Risk/sannolikhet"
+    if any(k in name for k in ["fat", "favorittryck", "topp", "favorit-delta"]):
+        return "FAT/favorit"
+    if any(k in name for k in ["skrällstyrka"]):
+        return "Skrällnivå"
+    if grp == "struktur" or any(k in name for k in ["tecken 1x2", "sviter", "teckenföljd", "teckenlucka", "singlar", "dubbletter", "tripplar", "uppkomster"]):
+        return "Struktur"
+    if "super" in name or "grupp" in str(group_name).lower():
+        return "Grupp/soft"
+    return "Övrigt"
+
+
+def get_filter_overlap_note(filter_name, family):
+    name = str(filter_name).lower()
+    if "favorit-delta" in name:
+        return "Överlappar FAT/favoritbild. Använd helst som diagnos, inte som extra hårt filter."
+    if family == "Risk/sannolikhet":
+        return "Riskfilter mäter delvis samma sak. Kör helst som pro-grupp/softkrav i stället för många hårda AND-filter."
+    if family == "FAT/favorit":
+        return "Överlappar favorit-/andrahandsprofil. Välj bästa FAT/pro-grupp före flera separata hårda krav."
+    if family == "Struktur":
+        return "Strukturfilter är främst stöd. Bra i mjuk grupp, sällan som ensam huvudmotor."
+    if family == "Skrällnivå":
+        return "Ska balanseras mot SFT/Skrälltryck Log så att inte skrällkravet dubbelräknas."
+    return ""
+
+
+def build_filter_revision_df(diag_df):
+    """Skapar beslutsvy: Använd / Reserv / Diagnos / Pausa."""
+    if diag_df is None or diag_df.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, r in diag_df.iterrows():
+        name = r.get("Filter", "")
+        family = get_filter_family(name, r.get("Grupp", ""))
+        klass = str(r.get("Klass", ""))
+        hist = pd.to_numeric(r.get("Historisk träff %", None), errors="coerce")
+        keep = pd.to_numeric(r.get("Kvar rad %", None), errors="coerce")
+        rf = pd.to_numeric(r.get("Rationell faktor", None), errors="coerce")
+        red = pd.to_numeric(r.get("Reducerar %", None), errors="coerce")
+
+        lname = str(name).lower()
+        if "favorit-delta" in lname:
+            decision = "Diagnos"
+            reason = "Dubblerar i praktiken favorit-/FAT-bilden. Behåll bara om den slår övriga tydligt."
+        elif klass in ["Mycket stark", "Stark"]:
+            decision = "Använd"
+            reason = "Hög historisk träff i förhållande till kvarvarande radmassa."
+        elif klass == "OK":
+            decision = "Reserv"
+            reason = "Kan användas som stödfilter eller i grupp, men inte förstaval."
+        elif klass == "Svag":
+            decision = "Diagnos"
+            reason = "Reducerar för lite i förhållande till träff. Kör inte hårt utan stöd."
+        elif klass == "Irrationell":
+            decision = "Pausa"
+            reason = "Sämre än radmassan. Filtret sparar för många/fel rader i denna körning."
+        else:
+            decision = "Info"
+            reason = "Informationsfilter eller saknar radmasseberäkning."
+
+        if pd.isna(rf):
+            score = -999
+        else:
+            score = float(rf)
+            if not pd.isna(hist):
+                score += max(-10, min(10, float(hist) - 90)) * 0.35
+            if not pd.isna(keep):
+                score += max(-10, min(10, 60 - float(keep))) * 0.15
+            if decision == "Pausa":
+                score -= 50
+            elif decision == "Diagnos":
+                score -= 10
+            elif decision == "Använd":
+                score += 5
+
+        rows.append({
+            "Prioritetspoäng": round(score, 1) if score != -999 else None,
+            "Beslut": decision,
+            "Filterfamilj": family,
+            "Filter": name,
+            "Klass": klass,
+            "Historisk träff %": None if pd.isna(hist) else round(float(hist), 1),
+            "Kvar rad %": None if pd.isna(keep) else round(float(keep), 1),
+            "Reducerar %": None if pd.isna(red) else round(float(red), 1),
+            "Rationell faktor": None if pd.isna(rf) else round(float(rf), 1),
+            "Dubblett-/risknotis": get_filter_overlap_note(name, family),
+            "Kommentar": reason,
+            "Helgardering-rad": r.get("Helgardering-rad", ""),
+        })
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out = out.sort_values(["Beslut", "Prioritetspoäng"], ascending=[True, False], na_position="last")
+    return out
+
+
+def build_family_summary(revision_df):
+    if revision_df is None or revision_df.empty:
+        return pd.DataFrame()
+    rows = []
+    for fam, g in revision_df.groupby("Filterfamilj"):
+        g2 = g.copy()
+        g2["Rationell faktor"] = pd.to_numeric(g2["Rationell faktor"], errors="coerce")
+        best = g2.sort_values("Rationell faktor", ascending=False, na_position="last").iloc[0]
+        use_count = int((g2["Beslut"] == "Använd").sum())
+        pause_count = int((g2["Beslut"] == "Pausa").sum())
+        if use_count >= 2:
+            action = "Bygg grupp / välj 1-2"
+        elif use_count == 1:
+            action = "Använd bästa"
+        elif pause_count == len(g2):
+            action = "Pausa familjen"
+        else:
+            action = "Diagnos/reserv"
+        rows.append({
+            "Filterfamilj": fam,
+            "Antal filter": len(g2),
+            "Använd": use_count,
+            "Bäst filter": best.get("Filter", ""),
+            "Bäst RF": best.get("Rationell faktor", None),
+            "Rekommendation": action,
+        })
+    return pd.DataFrame(rows).sort_values("Bäst RF", ascending=False, na_position="last")
+
+
+def build_starter_package(revision_df, max_filters=6):
+    """Plockar ett litet startpaket: först bästa risk/FAT, därefter kompletterande stöd."""
+    if revision_df is None or revision_df.empty:
+        return pd.DataFrame()
+    df = revision_df.copy()
+    df["Rationell faktor"] = pd.to_numeric(df["Rationell faktor"], errors="coerce")
+    usable = df[df["Beslut"].isin(["Använd", "Reserv"])].copy()
+    if usable.empty:
+        return pd.DataFrame()
+    picks = []
+    # Max 2 riskfilter, max 2 FAT/favorit, max 1 skräll, max 1 struktur/grupp.
+    caps = {"Risk/sannolikhet": 2, "FAT/favorit": 2, "Skrällnivå": 1, "Struktur": 1, "Grupp/soft": 1, "Övrigt": 1}
+    for fam, cap in caps.items():
+        sub = usable[usable["Filterfamilj"] == fam].sort_values("Rationell faktor", ascending=False, na_position="last").head(cap)
+        for _, r in sub.iterrows():
+            picks.append(r)
+    out = pd.DataFrame(picks).sort_values("Rationell faktor", ascending=False, na_position="last").head(max_filters)
+    return out
+
 def recommend_group_requirement(group_name, hist_scores, cand_scores, rule_names, rule_details=None, target_hist_pct=90.0):
     """
     Bakåtkompatibel grupprekommendation. Behålls för äldre delar av koden.
@@ -1117,6 +1267,7 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("🧩 Pro-grupper")
     cb_pro_groups = st.checkbox("Visa pro-grupper", value=True)
+    cb_filter_revision = st.checkbox("Visa filterrevision", value=True)
     slider_group_target = st.slider("Gruppmål historisk träff %", 70, 100, 90, step=5)
     cb_group_risk = st.checkbox("Riskgrupp", value=True)
     cb_group_shock = st.checkbox("Skrällgrupp", value=True)
@@ -1864,6 +2015,63 @@ if st.session_state.get('har_kort_analys') and input_text:
             numeric_lift = pd.to_numeric(diag_df['Rationell faktor'], errors='coerce')
             numeric_keep = pd.to_numeric(diag_df['Kvar rad %'], errors='coerce')
             numeric_red = pd.to_numeric(diag_df['Reducerar %'], errors='coerce')
+
+            if cb_filter_revision:
+                st.markdown("### 🧪 Filterrevision")
+                st.caption(
+                    "Målet här är att rensa: hitta vilka filter som ska användas, vilka som bara ska vara diagnos, "
+                    "och vilka som dubblerar varandra. Rangordningen bygger på historisk träff jämfört med kvarvarande radmassa."
+                )
+                revision_df = build_filter_revision_df(diag_df)
+                family_df = build_family_summary(revision_df)
+                starter_df = build_starter_package(revision_df, max_filters=6)
+
+                if not revision_df.empty:
+                    rev_cols = [
+                        "Beslut", "Filterfamilj", "Filter", "Klass", "Historisk träff %",
+                        "Kvar rad %", "Reducerar %", "Rationell faktor", "Dubblett-/risknotis"
+                    ]
+                    rev_cols = [c for c in rev_cols if c in revision_df.columns]
+
+                    cfr1, cfr2, cfr3, cfr4 = st.columns(4)
+                    with cfr1:
+                        st.metric("Använd", int((revision_df["Beslut"] == "Använd").sum()))
+                    with cfr2:
+                        st.metric("Reserv", int((revision_df["Beslut"] == "Reserv").sum()))
+                    with cfr3:
+                        st.metric("Diagnos", int((revision_df["Beslut"] == "Diagnos").sum()))
+                    with cfr4:
+                        st.metric("Pausa", int((revision_df["Beslut"] == "Pausa").sum()))
+
+                    st.markdown("**Filter att prioritera / rensa**")
+                    decision_order = ["Använd", "Reserv", "Diagnos", "Pausa", "Info"]
+                    for decision in decision_order:
+                        sub = revision_df[revision_df["Beslut"] == decision]
+                        if len(sub) == 0:
+                            continue
+                        with st.expander(f"{decision} ({len(sub)} filter)", expanded=(decision in ["Använd", "Pausa"])):
+                            st.dataframe(sub[rev_cols], use_container_width=True, hide_index=True)
+
+                    if not family_df.empty:
+                        st.markdown("**Filterfamiljer – vad ska vi göra med varje grupp?**")
+                        st.dataframe(family_df, use_container_width=True, hide_index=True)
+
+                    if not starter_df.empty:
+                        st.markdown("**Föreslaget startpaket denna körning**")
+                        st.caption(
+                            "Detta är inte en slutlig systemmall. Det är en rensad startlista: få filter, hög RF, mindre dubblering. "
+                            "Pro-grupperna bör fortfarande vara huvudvägen när de är starkare än enskilda filter."
+                        )
+                        pkg_cols = ["Filterfamilj", "Filter", "Klass", "Historisk träff %", "Kvar rad %", "Rationell faktor", "Helgardering-rad"]
+                        pkg_cols = [c for c in pkg_cols if c in starter_df.columns]
+                        st.dataframe(starter_df[pkg_cols], use_container_width=True, hide_index=True)
+
+                    st.download_button(
+                        "⬇️ Ladda ner filterrevision CSV",
+                        revision_df.to_csv(index=False, sep=';').encode('utf-8-sig'),
+                        file_name=f"filterrevision_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                        mime="text/csv"
+                    )
 
             st.markdown("**Sammanlagd mallträff**")
             csum1, csum2, csum3, csum4 = st.columns(4)
