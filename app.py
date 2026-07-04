@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v11.1i – AutoHard tvåsteg & TipsetMatrix garanti"
+APP_VERSION = "v11.1j – Speedfix AutoHard tvåsteg"
 
 
 st.markdown("""
@@ -681,6 +681,36 @@ def generate_rows_from_frame(frame, max_rows=50000):
         return [], n_rows, False, f"Grundramen är {n_rows:,} rader och överskrider spärren {int(max_rows):,}. Smalna av ramen eller höj spärren."
     rows = [''.join(tup) for tup in itertools.product(*frame)]
     return rows, n_rows, True, ""
+
+
+
+@st.cache_data(show_spinner=False)
+def cached_generate_rows_from_frame(frame_tuple, max_rows):
+    """Cachead radgenerering så manuell grundram inte byggs om vid varje Streamlit-rerun."""
+    frame = [list(x) for x in frame_tuple]
+    return generate_rows_from_frame(frame, int(max_rows))
+
+
+@st.cache_data(show_spinner=False)
+def cached_tipsetmatrix_reduce_and_guarantee(filtered_rows_tuple, scores_tuple, antal_matcher, prob_vector_tuple, mode, output_limit, guarantee_mode, seed):
+    """Cachead TipsetMatrix + garantitabell för identisk filtermassa och samma motorinställningar."""
+    rows = list(filtered_rows_tuple)
+    scores = list(scores_tuple) if scores_tuple is not None else None
+    prob_vector = list(prob_vector_tuple) if prob_vector_tuple is not None else None
+    reduced_rows, meta = tipsetmatrix12_reduce(
+        rows,
+        row_scores=scores,
+        mode=mode,
+        max_output_rows=(None if guarantee_mode else int(output_limit)),
+        seed=int(seed)
+    )
+    gtable, gsum = build_tipsetmatrix_guarantee_table(
+        rows,
+        reduced_rows,
+        int(antal_matcher),
+        prob_vector=prob_vector
+    )
+    return reduced_rows, meta, gtable, gsum
 
 
 def row_log_probability(row_str, prob_vector):
@@ -1767,7 +1797,7 @@ if st.session_state['aktuell_spelform'] != spelform:
 # --- SIDEBAR (REN KONTROLLPANEL) ---
 with st.sidebar:
     st.header("🎛️ Kontrollpanel")
-    st.caption("Normal-läget använder två hårda filtersteg: breda huvudfilter först och smalare spetsfilter efteråt. Expertläge används bara vid felsökning.")
+    st.caption("Normal-läget använder två hårda filtersteg. Speedfix: tunga beräkningar körs bara när du trycker Kör, inte vid varje klick i grundramen.")
 
     if st.button("🧹 Töm minne / rensa cache", use_container_width=True):
         st.cache_data.clear()
@@ -1829,7 +1859,7 @@ with st.sidebar:
     tm_mode = st.selectbox("Motorläge", ["Snabb", "Balans", "Max"], index=1)
     tm_weighting = st.selectbox("Viktning", ["Filterpoäng + sannolikhet", "Filterpoäng", "Neutral"], index=0)
     tm_seed = st.number_input("Seed", min_value=1, max_value=999999, value=42, step=1)
-    cb_tm_backtest = st.toggle("Visa rättning/facitpanel", value=True)
+    cb_tm_backtest = st.toggle("Visa rättning/facitpanel", value=False)
 
     st.markdown("---")
     expert_mode = st.toggle("🔧 Expertläge: visa filterreglage", value=(filter_profile == "Expert"))
@@ -2023,6 +2053,42 @@ if 'cb_tipsetmatrix' in globals() and cb_tipsetmatrix:
         else:
             st.info("AI-Balansram använder de liknande historiska omgångarna och din valda radbudget/max antal helgarderingar.")
 
+
+# --- SPEEDFIX: tunga beräkningar körs bara när aktuell inmatning matchar senaste körning ---
+def _frame_signature(frame):
+    if not frame:
+        return tuple()
+    return tuple(''.join(_sort_signs_display(s)) for s in frame)
+
+_current_run_signature = (
+    str(spelform),
+    int(antal_matcher),
+    str(input_text or '').strip(),
+    str(tm_frame_source),
+    _frame_signature(tm_click_frame) if tm_frame_source == 'Klickbar grundram' else str(tm_text_frame_input or '').strip(),
+    int(slider_top_n),
+    int(slider_combined_min_hist_pct),
+    int(slider_core_val),
+    int(slider_core_str),
+    bool(cb_autotrim),
+    int(slider_autotrim_min_hist),
+    tuple(slider_payout),
+    int(slider_macro_target),
+    int(slider_super_groups),
+    int(slider_group_target),
+    int(slider_u_count),
+    int(tm_base_limit),
+    int(tm_filter_limit),
+    int(tm_output_limit),
+    bool(tm_guarantee_mode),
+    str(tm_mode),
+    str(tm_weighting),
+    int(tm_seed),
+    bool(expert_mode),
+    # Expertfilter kan ändra resultatet; normalfallet har alla True.
+    tuple(bool(x) for x in active_filters_list),
+)
+
 if 'har_kort_analys' not in st.session_state:
     st.session_state['har_kort_analys'] = False
 
@@ -2043,11 +2109,17 @@ if st.button("🚀 Kör AutoFilter + TipsetMatrix", use_container_width=True):
         st.error(f"⚠️ Fel antal värden: {_input_count} av {krav_odds}. Klistra in komplett kupongdata.")
     else:
         st.session_state['har_kort_analys'] = True
+        st.session_state['senaste_körning_signatur'] = _current_run_signature
 
 # ==========================================
 # RESULTAT-VISNING (Laddas från Cache-Motorn)
 # ==========================================
-if st.session_state.get('har_kort_analys') and input_text:
+_last_sig = st.session_state.get('senaste_körning_signatur')
+_is_dirty = st.session_state.get('har_kort_analys') and (_last_sig is not None) and (_last_sig != _current_run_signature)
+if _is_dirty:
+    st.info('Ändringar upptäckta i kupongdata, grundram eller inställningar. Tryck **Kör AutoFilter + TipsetMatrix** igen för att räkna om. Tunga beräkningar stoppas tills du kör på nytt.')
+
+if st.session_state.get('har_kort_analys') and input_text and not _is_dirty:
     
     pay_min, pay_max = slider_payout
     v_m, input_vec, filnamn, err = run_core_analysis(
@@ -3453,7 +3525,8 @@ if st.session_state.get('har_kort_analys') and input_text:
                 tm_frame_note = "AI-Balansram"
 
             if tm_frame:
-                tm_rows, tm_base_count, tm_ok, tm_msg = generate_rows_from_frame(tm_frame, max_rows=int(tm_base_limit))
+                tm_frame_tuple = tuple(tuple(normalize_signs(x)) for x in tm_frame)
+                tm_rows, tm_base_count, tm_ok, tm_msg = cached_generate_rows_from_frame(tm_frame_tuple, int(tm_base_limit))
                 ctm1, ctm2, ctm3, ctm4 = st.columns(4)
                 with ctm1:
                     st.metric("Grundram", f"{tm_base_count:,}".replace(',', ' '), tm_frame_note)
@@ -3529,18 +3602,15 @@ if st.session_state.get('har_kort_analys') and input_text:
                             else:
                                 tm_scores = []
 
-                        tm_reduced_rows, tm_meta = tipsetmatrix12_reduce(
-                            tm_filtered_rows,
-                            row_scores=tm_scores,
-                            mode=tm_mode,
-                            max_output_rows=(None if tm_guarantee_mode else int(tm_output_limit)),
-                            seed=int(tm_seed)
-                        )
-                        tm_gtable, tm_gsum = build_tipsetmatrix_guarantee_table(
-                            tm_filtered_rows,
-                            tm_reduced_rows,
-                            antal_matcher,
-                            prob_vector=filter_vec
+                        tm_reduced_rows, tm_meta, tm_gtable, tm_gsum = cached_tipsetmatrix_reduce_and_guarantee(
+                            tuple(tm_filtered_rows),
+                            tuple(float(x) for x in tm_scores),
+                            int(antal_matcher),
+                            tuple(float(x) for x in filter_vec),
+                            str(tm_mode),
+                            int(tm_output_limit),
+                            bool(tm_guarantee_mode),
+                            int(tm_seed)
                         )
 
                     if truncated:
