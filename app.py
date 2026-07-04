@@ -10,7 +10,20 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v11.1c-alpha – TipsetMatrix Facitkontroll"
+APP_VERSION = "v11.1f – Proffsflöde, AutoFilter & FAT-sekvenser"
+
+
+st.markdown("""
+<style>
+    .main .block-container {padding-top: 1.4rem; padding-bottom: 3rem;}
+    div[data-testid="stMetric"] {background: rgba(255,255,255,0.04); border: 1px solid rgba(128,128,128,0.22); padding: 0.75rem; border-radius: 0.9rem;}
+    .tm-hero {border: 1px solid rgba(128,128,128,0.25); border-radius: 1rem; padding: 1rem 1.1rem; background: linear-gradient(135deg, rgba(60,120,255,0.10), rgba(20,20,20,0.02)); margin-bottom: 1rem;}
+    .tm-step {font-size: 0.82rem; letter-spacing: .06em; text-transform: uppercase; opacity: .72; font-weight: 700; margin-bottom: .15rem;}
+    .tm-title {font-size: 1.25rem; font-weight: 800; margin-bottom: .2rem;}
+    .tm-muted {opacity: .72; font-size: .92rem;}
+    .tm-pill {display:inline-block; padding: .16rem .50rem; border:1px solid rgba(128,128,128,.35); border-radius:999px; font-size:.82rem; margin-right:.25rem; margin-top:.2rem;}
+</style>
+""", unsafe_allow_html=True)
 
 # ==========================================
 # 1. FUNKTIONER (FÖR 8 & 13 MATCHER)
@@ -148,6 +161,134 @@ def get_best_interval(values, target_coverage_percent):
             best_diff = values[j] - values[i]
             best_int = (values[i], values[j])
     return best_int
+
+def interval_width(interval):
+    if interval is None:
+        return 0
+    try:
+        return float(interval[1]) - float(interval[0])
+    except Exception:
+        return 0
+
+def pct_values_in_interval(values, interval):
+    clean = [v for v in values if not pd.isna(v)]
+    if not clean:
+        return 0.0, 0, 0
+    hits = sum(1 for v in clean if in_range(v, interval))
+    misses = len(clean) - hits
+    return (hits / len(clean)) * 100, hits, misses
+
+def candidate_keep_pct(candidate_rows, cand_getter, interval):
+    if not candidate_rows or cand_getter is None:
+        return None
+    hits = 0
+    total = 0
+    for tr in candidate_rows:
+        try:
+            val = cand_getter(tr)
+            if pd.isna(val):
+                continue
+            total += 1
+            if in_range(val, interval):
+                hits += 1
+        except Exception:
+            continue
+    if total == 0:
+        return None
+    return (hits / total) * 100
+
+def choose_rational_interval(hist_values, candidate_rows, cand_getter, target_coverage_percent=95, min_hist_pct=85, coverage_steps=None):
+    """
+    AutoTrim: testar flera intervallnivåer och väljer intervallet som ger bäst rationell effekt.
+    Säkerhetsintervallet är fortfarande intervallet för användarens valda kärnprocent.
+    """
+    clean = [v for v in hist_values if not pd.isna(v)]
+    if not clean:
+        return (0, 0), {
+            'AutoTrim': False, 'Säkerhetsintervall': (0, 0), 'Historisk träff %': 0.0,
+            'Kvar rad %': None, 'Rationell faktor': None, 'Kapade outliers': 0, 'Testade intervall': 0
+        }
+
+    safety_interval = get_best_interval(clean, target_coverage_percent)
+    safety_hist_pct, _, safety_misses = pct_values_in_interval(clean, safety_interval)
+    safety_keep = candidate_keep_pct(candidate_rows, cand_getter, safety_interval)
+    safety_lift = None if safety_keep is None else safety_hist_pct - safety_keep
+
+    if coverage_steps is None:
+        low = int(max(50, np.floor(float(min_hist_pct) / 5.0) * 5))
+        high = int(max(low, np.ceil(float(target_coverage_percent) / 5.0) * 5))
+        coverage_steps = list(range(low, min(100, high) + 1, 5))
+        coverage_steps.append(float(target_coverage_percent))
+        coverage_steps = sorted(set([float(x) for x in coverage_steps if 0 <= float(x) <= 100]))
+
+    candidates = []
+    for cov in coverage_steps:
+        interval = get_best_interval(clean, cov)
+        hist_pct, hist_hits, hist_misses = pct_values_in_interval(clean, interval)
+        if hist_pct + 1e-9 < float(min_hist_pct):
+            continue
+        keep = candidate_keep_pct(candidate_rows, cand_getter, interval)
+        if keep is None:
+            keep = 100.0
+        lift = hist_pct - keep
+        reduction = 100.0 - keep
+        width = interval_width(interval)
+        candidates.append({
+            'coverage': cov,
+            'interval': interval,
+            'hist_pct': hist_pct,
+            'hist_hits': hist_hits,
+            'hist_misses': hist_misses,
+            'keep_pct': keep,
+            'lift': lift,
+            'reduction': reduction,
+            'width': width,
+        })
+
+    if not candidates:
+        chosen = {
+            'coverage': float(target_coverage_percent),
+            'interval': safety_interval,
+            'hist_pct': safety_hist_pct,
+            'hist_hits': len(clean) - safety_misses,
+            'hist_misses': safety_misses,
+            'keep_pct': 100.0 if safety_keep is None else safety_keep,
+            'lift': None if safety_lift is None else safety_lift,
+            'reduction': None if safety_keep is None else 100.0 - safety_keep,
+            'width': interval_width(safety_interval),
+        }
+    else:
+        # Rationell effekt först. Vid jämnt läge: välj mer reducering, därefter högre historisk träff.
+        chosen = max(candidates, key=lambda r: (r['lift'], r['reduction'], r['hist_pct'], -r['width']))
+
+    meta = {
+        'AutoTrim': True,
+        'Vald tighthet %': round(float(chosen['coverage']), 1),
+        'Säkerhetsintervall': safety_interval,
+        'Historisk träff %': round(float(chosen['hist_pct']), 1),
+        'Kvar rad %': round(float(chosen['keep_pct']), 1) if chosen.get('keep_pct') is not None else None,
+        'Reducerar %': round(float(chosen['reduction']), 1) if chosen.get('reduction') is not None else None,
+        'Rationell faktor': round(float(chosen['lift']), 1) if chosen.get('lift') is not None else None,
+        'Kapade outliers': int(chosen['hist_misses']),
+        'Säkerhet historisk träff %': round(float(safety_hist_pct), 1),
+        'Säkerhet kvar rad %': round(float(safety_keep), 1) if safety_keep is not None else None,
+        'Säkerhet RF': round(float(safety_lift), 1) if safety_lift is not None else None,
+        'Testade intervall': len(candidates),
+    }
+    return chosen['interval'], meta
+
+def autotrim_caption(meta, decimals=0):
+    if not meta or not meta.get('AutoTrim'):
+        return ""
+    safe = meta.get('Säkerhetsintervall')
+    safe_txt = fmt_interval(safe, decimals) if safe is not None else '-'
+    keep = meta.get('Kvar rad %')
+    rf = meta.get('Rationell faktor')
+    outliers = meta.get('Kapade outliers', 0)
+    tight = meta.get('Vald tighthet %', '-')
+    keep_txt = '-' if keep is None else f"{keep:.1f}%"
+    rf_txt = '-' if rf is None else f"{rf:+.1f}"
+    return f"AutoTrim {tight}% | säkerhet {safe_txt} | hist {meta.get('Historisk träff %', 0):.1f}% | kvar {keep_txt} | RF {rf_txt} | kapar {outliers}"
 
 def parse_input_string(text, max_vals):
     # Tillåt svensk decimal-komma och klistra in från tabeller med %, kr, semikolon osv.
@@ -392,6 +533,91 @@ def get_fat_string(row_str, prob_vector):
         elif char == ranked[1][0]: fat_str += '2'
         else: fat_str += '3'
     return fat_str
+
+def count_fat_sequence_hits(fat_str, sequences):
+    """Antal valda FAT-sekvenser som förekommer minst en gång i FAT-strängen."""
+    if not fat_str or not sequences:
+        return 0
+    return sum(1 for seq in sequences if seq in fat_str)
+
+
+def count_fat_pair_hits(fat_str, pairs):
+    """Antal sekvenspar där minst en av de två sekvenserna förekommer."""
+    if not fat_str or not pairs:
+        return 0
+    return sum(1 for s1, s2 in pairs if s1 in fat_str or s2 in fat_str)
+
+
+def choose_fat_sequences(fat_strings, base_fat_strings, length=2, top_n=5, min_lift=0.0):
+    """
+    Väljer FAT-sekvenser med rationell inriktning: hög träff i liknande omgångar,
+    positiv lift mot hela databasen och fallback till ren träff om för få finns.
+    """
+    fat_strings = [str(x) for x in fat_strings if isinstance(x, str) and x]
+    base_fat_strings = [str(x) for x in base_fat_strings if isinstance(x, str) and x]
+    if not fat_strings:
+        return []
+    seqs = [''.join(p) for p in itertools.product('123', repeat=length)]
+    rows = []
+    total = len(fat_strings)
+    base_total = len(base_fat_strings)
+    for seq in seqs:
+        count = sum(1 for r in fat_strings if seq in r)
+        hist_pct = (count / total) * 100 if total else 0.0
+        base_pct = (sum(1 for r in base_fat_strings if seq in r) / base_total) * 100 if base_total else 0.0
+        lift = hist_pct - base_pct
+        # Score: träff krävs, men positiv lift premieras kraftigt.
+        score = hist_pct + max(lift, 0) * 1.75
+        rows.append({
+            'Sekvens': seq,
+            'Antal': count,
+            'Träff %': round(hist_pct, 1),
+            'Bas %': round(base_pct, 1),
+            'Lift': round(lift, 1),
+            'Score': round(score, 3),
+        })
+    positive = [r for r in rows if r['Lift'] >= min_lift and r['Antal'] > 0]
+    selected = sorted(positive, key=lambda r: (r['Score'], r['Träff %'], r['Lift']), reverse=True)[:top_n]
+    if len(selected) < top_n:
+        used = {r['Sekvens'] for r in selected}
+        fallback = [r for r in sorted(rows, key=lambda r: (r['Träff %'], r['Lift']), reverse=True) if r['Sekvens'] not in used]
+        selected += fallback[:top_n - len(selected)]
+    return selected
+
+
+def choose_fat_sequence_pairs(fat_strings, base_fat_strings, top_n=5, min_lift=0.0):
+    """Väljer par av FAT-3-sekvenser där minst en av två ska finnas."""
+    fat_strings = [str(x) for x in fat_strings if isinstance(x, str) and x]
+    base_fat_strings = [str(x) for x in base_fat_strings if isinstance(x, str) and x]
+    if not fat_strings:
+        return []
+    seqs3 = [''.join(p) for p in itertools.product('123', repeat=3)]
+    total = len(fat_strings)
+    base_total = len(base_fat_strings)
+    rows = []
+    for s1, s2 in itertools.combinations(seqs3, 2):
+        count = sum(1 for r in fat_strings if s1 in r or s2 in r)
+        hist_pct = (count / total) * 100 if total else 0.0
+        base_pct = (sum(1 for r in base_fat_strings if s1 in r or s2 in r) / base_total) * 100 if base_total else 0.0
+        lift = hist_pct - base_pct
+        score = hist_pct + max(lift, 0) * 1.75
+        rows.append({
+            'Par': (s1, s2),
+            'Visning': f"{s1}/{s2}",
+            'Antal': count,
+            'Träff %': round(hist_pct, 1),
+            'Bas %': round(base_pct, 1),
+            'Lift': round(lift, 1),
+            'Score': round(score, 3),
+        })
+    positive = [r for r in rows if r['Lift'] >= min_lift and r['Antal'] > 0]
+    selected = sorted(positive, key=lambda r: (r['Score'], r['Träff %'], r['Lift']), reverse=True)[:top_n]
+    if len(selected) < top_n:
+        used = {r['Par'] for r in selected}
+        fallback = [r for r in sorted(rows, key=lambda r: (r['Träff %'], r['Lift']), reverse=True) if r['Par'] not in used]
+        selected += fallback[:top_n - len(selected)]
+    return selected
+
 
 def fmt_interval(interval, decimals=0):
     if interval is None: return "-"
@@ -1538,108 +1764,195 @@ if st.session_state['aktuell_spelform'] != spelform:
     st.session_state['har_kort_analys'] = False
     st.session_state['aktuell_spelform'] = spelform
 
-# --- SIDEBAR (INSTÄLLNINGAR) ---
+# --- SIDEBAR (REN KONTROLLPANEL) ---
 with st.sidebar:
-    st.header("⚙️ Inställningar")
-    
-    if st.button("🧹 Töm Minne / Rensa Cache"):
+    st.header("🎛️ Kontrollpanel")
+    st.caption("Normal-läget kör alla filter automatiskt. Använd expertläge bara vid felsökning.")
+
+    if st.button("🧹 Töm minne / rensa cache", use_container_width=True):
         st.cache_data.clear()
-        st.success("Cachen tömd! Tryck F5 för att ladda om.")
+        st.success("Cachen tömd. Ladda om sidan vid behov.")
 
-    st.subheader("Matchning & Kärna")
-    slider_top_n = st.slider("Antal historiska matcher att hämta", 5, 100, 30, step=5)
-    slider_core_val = st.slider("Kärna % (Värde & Svårighet)", 40, 100, 90, step=5)
-    slider_core_str = st.slider("Kärna % (Struktur & Tecken)", 40, 100, 100, step=5)
-    
-    st.subheader("Makro & Super-Makro")
-    slider_macro_target = st.slider("Målsättning Procent %", 40, 100, 90, step=5)
-    slider_super_groups = st.slider("Super-Makro: Minst antal grupper (av 8)", 1, 8, 4, step=1)
-    
-    st.subheader("Avancerade Filter")
-    slider_u_count = st.slider("Antal Topp-Favoriter (U-tecken)", 1, antal_matcher, min(3, antal_matcher), step=1)
+    st.markdown("---")
+    st.subheader("1) AutoFilter")
+    filter_profile = st.selectbox(
+        "Filterläge",
+        ["Rekommenderad", "Försiktig", "Hård", "Expert"],
+        index=0,
+        help="Rekommenderad passar normalspel. Försiktig räddar fler historiska rader. Hård reducerar mer. Expert visar alla gamla reglage."
+    )
+
+    profile_defaults = {
+        "Försiktig": {"top_n": 40, "core_val": 95, "core_str": 100, "automin": 90, "group": 90, "pass_ratio": 0.80, "super": 3},
+        "Rekommenderad": {"top_n": 30, "core_val": 90, "core_str": 100, "automin": 85, "group": 90, "pass_ratio": 0.88, "super": 4},
+        "Hård": {"top_n": 30, "core_val": 85, "core_str": 95, "automin": 80, "group": 85, "pass_ratio": 0.97, "super": 5},
+        "Expert": {"top_n": 30, "core_val": 90, "core_str": 100, "automin": 85, "group": 90, "pass_ratio": 0.90, "super": 4},
+    }
+    defaults = profile_defaults[filter_profile]
+
+    slider_top_n = st.slider("Liknande historiska omgångar", 5, 100, int(defaults["top_n"]), step=5)
+    slider_core_val = st.slider("Värdeintervall / kärna %", 40, 100, int(defaults["core_val"]), step=5)
+    slider_core_str = st.slider("Strukturintervall / kärna %", 40, 100, int(defaults["core_str"]), step=5)
+
+    cb_autotrim = st.toggle("AutoTrim: välj rationella intervall", value=True)
+    slider_autotrim_min_hist = st.slider("AutoTrim: min historisk träff %", 70, 100, int(defaults["automin"]), step=5)
+
     p_opts = [0, 500, 1000, 2500, 5000, 10000, 25000, 50000, 75000, 100000, 250000, 500000, 750000, 1000000, 2500000, 5000000, 10000000]
-    slider_payout = st.select_slider("Utdelnings-krav (kr)", options=p_opts, value=(0, p_opts[-1]))
-    
-    st.subheader("Mallen - Aktiva Filter")
-    cb_payout = st.checkbox("Utdelning", value=True)
-    cb_u_favs = st.checkbox("Topp-Favoriter (U-tecken)", value=True)
-    cb_sft = st.checkbox("SFT Summa", value=True)
-    cb_fat = st.checkbox("FAT-Tabell & Summa (Standard)", value=True)
-    cb_points = st.checkbox("POÄNGFILTER (Eget)", value=True)
-    cb_100minus = st.checkbox("100-minus Summa", value=True)
-    cb_log_surprise = st.checkbox("Skrälltryck Log Summa", value=True)
-    cb_rank24 = st.checkbox(f"Rank 1-{krav_odds} Summa", value=True)
-    cb_totaldiff = st.checkbox("Total Diff (T1 - T2)", value=True)
-    cb_fav_pressure = st.checkbox("Favorittryck (70/60/50%)", value=True)
-    cb_shock_strength = st.checkbox("Skrällstyrka (<10/<15/<20%)", value=True)
-    cb_fav_delta = st.checkbox("Favorit-delta", value=True)
-    
-    st.markdown("**Struktur (Standard):**")
-    cb_base = st.checkbox("Grundfilter (1, X, 2)", value=True)
-    cb_streak = st.checkbox("Sviter", value=True)
-    cb_gap = st.checkbox("Luckor", value=True)
-    cb_single = st.checkbox("Singlar", value=True)
-    cb_doublet = st.checkbox("Dubbletter", value=True)
-    cb_triplet = st.checkbox("Tripplar", value=True)
-    cb_occur = st.checkbox("Uppkomster", value=True)
-    
-    st.markdown("**Super-Makro:**")
-    cb_super_macro = st.checkbox(f"Super-Makro (Minst {slider_super_groups} av 8 Grupper)", value=True)
-    
-    cb_aimatrix = st.checkbox("AI-Matrix Rank", value=True)
-    cb_manual_ai_rank = st.checkbox("Styr AI-Rank manuellt", value=False)
-    max_rank = 3**antal_matcher
-    if cb_manual_ai_rank:
-        slider_ai_rank = st.slider("AI-Rank Slider", 1, max_rank, (1, max_rank))
-    
-    cb_structure = st.checkbox("Matcha Struktur (Viktad)", value=True)
+    slider_payout = st.select_slider("Utdelningsspann i historik", options=p_opts, value=(0, p_opts[-1]))
 
     st.markdown("---")
-    st.subheader("🧩 Pro-grupper")
-    cb_pro_groups = st.checkbox("Visa pro-grupper", value=True)
-    cb_filter_revision = st.checkbox("Visa filterrevision", value=True)
-    slider_group_target = st.slider("Gruppmål historisk träff %", 70, 100, 90, step=5)
-    cb_group_risk = st.checkbox("Riskgrupp", value=True)
-    cb_group_shock = st.checkbox("Skrällgrupp", value=True)
-    cb_group_fat = st.checkbox("FAT-profilgrupp", value=True)
-    cb_group_structure = st.checkbox("Strukturgrupp", value=True)
+    st.subheader("2) Reducering")
+    slider_macro_target = st.slider("Super-Makro historisk träff %", 40, 100, 90, step=5)
+    slider_super_groups = st.slider("Super-Makro krav", 1, 8, int(defaults["super"]), step=1, help="Kravet är minst X av 8 struktur-/FAT-grupper.")
+    slider_group_target = st.slider("Pro-gruppmål historisk träff %", 70, 100, int(defaults["group"]), step=5)
 
-    st.markdown("---")
-    st.subheader("🎯 AI-Ram & U-filter")
-    cb_ai_frame = st.checkbox("Visa AI-Ram & U-filter", value=True)
+    slider_u_count = st.slider("Toppfavoriter / U-tecken", 1, antal_matcher, min(3, antal_matcher), step=1)
+
     frame_budget_options = [864, 1728, 3456, 6912, 10368, 15552, 20736, 25000, 31104, 50000, 75000]
-    slider_frame_budget = st.select_slider("Balansram: max radantal", options=frame_budget_options, value=25000)
-    slider_frame_max_full = st.slider("Balansram: max antal helgarderingar", 0, antal_matcher, min(4, antal_matcher), step=1)
+    slider_frame_budget = st.select_slider("AI-Balansram max radantal", options=frame_budget_options, value=25000)
+    slider_frame_max_full = st.slider("AI-Balansram max helgarderingar", 0, antal_matcher, min(4, antal_matcher), step=1)
     slider_u_target = st.slider("U-rad mål historisk träff %", 70, 100, 90, step=5)
 
     st.markdown("---")
-    st.subheader("🎯 Soft Filtering")
-    # Uppdaterad lista för poängberäkningen
+    st.subheader("3) TipsetMatrix 12")
+    cb_tipsetmatrix = True
+    tm_frame_source = st.selectbox("Grundram", ["Klickbar grundram", "AI-Balansram", "Textgrundram"], index=0)
+    tm_base_limit = st.select_slider("Max rader i grundram", options=[1000, 2500, 5000, 10000, 15000, 25000, 50000, 75000], value=25000)
+    tm_filter_limit = st.select_slider("Max rader efter filter", options=[500, 1000, 1500, 2500, 5000, 10000, 20000], value=5000)
+    tm_output_limit = st.select_slider("Max reducerade rader", options=[50, 100, 150, 200, 300, 500, 750, 1000], value=300)
+    tm_mode = st.selectbox("Motorläge", ["Snabb", "Balans", "Max"], index=1)
+    tm_weighting = st.selectbox("Viktning", ["Filterpoäng + sannolikhet", "Filterpoäng", "Neutral"], index=0)
+    tm_seed = st.number_input("Seed", min_value=1, max_value=999999, value=42, step=1)
+    cb_tm_backtest = st.toggle("Visa rättning/facitpanel", value=True)
+
+    st.markdown("---")
+    expert_mode = st.toggle("🔧 Expertläge: visa filterreglage", value=(filter_profile == "Expert"))
+
+    # Standard: allt på. Expertläget kan användas för felsökning.
+    cb_payout = True
+    cb_u_favs = True
+    cb_sft = True
+    cb_fat = True
+    cb_fat_sequences = True
+    cb_points = True
+    cb_100minus = True
+    cb_log_surprise = True
+    cb_rank24 = True
+    cb_totaldiff = True
+    cb_fav_pressure = True
+    cb_shock_strength = True
+    cb_fav_delta = True
+    cb_base = True
+    cb_streak = True
+    cb_gap = True
+    cb_single = True
+    cb_doublet = True
+    cb_triplet = True
+    cb_occur = True
+    cb_super_macro = True
+    cb_aimatrix = True
+    cb_manual_ai_rank = False
+    cb_structure = True
+    cb_pro_groups = True
+    cb_filter_revision = True
+    cb_group_risk = True
+    cb_group_shock = True
+    cb_group_fat = True
+    cb_group_structure = True
+    cb_ai_frame = True
+
+    max_rank = 3**antal_matcher
+    if expert_mode:
+        with st.expander("Aktiva filter", expanded=True):
+            cb_payout = st.checkbox("Utdelning", value=cb_payout)
+            cb_u_favs = st.checkbox("Topp-Favoriter", value=cb_u_favs)
+            cb_sft = st.checkbox("SFT Summa", value=cb_sft)
+            cb_fat = st.checkbox("FAT-tabell", value=cb_fat)
+            cb_fat_sequences = st.checkbox("FAT-sekvenser", value=cb_fat_sequences)
+            cb_points = st.checkbox("Poängfilter", value=cb_points)
+            cb_100minus = st.checkbox("100-minus", value=cb_100minus)
+            cb_log_surprise = st.checkbox("Skrälltryck Log", value=cb_log_surprise)
+            cb_rank24 = st.checkbox(f"Rank 1-{krav_odds} Summa", value=cb_rank24)
+            cb_totaldiff = st.checkbox("Total Diff", value=cb_totaldiff)
+            cb_fav_pressure = st.checkbox("Favorittryck", value=cb_fav_pressure)
+            cb_shock_strength = st.checkbox("Skrällstyrka", value=cb_shock_strength)
+            cb_fav_delta = st.checkbox("Favorit-delta", value=cb_fav_delta)
+            cb_aimatrix = st.checkbox("AI-Matrix Rank", value=cb_aimatrix)
+            cb_manual_ai_rank = st.checkbox("Styr AI-Rank manuellt", value=False)
+            if cb_manual_ai_rank:
+                slider_ai_rank = st.slider("AI-Rank Slider", 1, max_rank, (1, max_rank))
+            cb_structure = st.checkbox("Matcha struktur viktat", value=cb_structure)
+        with st.expander("Strukturfilter", expanded=False):
+            cb_base = st.checkbox("Tecken 1X2", value=cb_base)
+            cb_streak = st.checkbox("Sviter", value=cb_streak)
+            cb_gap = st.checkbox("Luckor", value=cb_gap)
+            cb_single = st.checkbox("Singlar", value=cb_single)
+            cb_doublet = st.checkbox("Dubbletter", value=cb_doublet)
+            cb_triplet = st.checkbox("Tripplar", value=cb_triplet)
+            cb_occur = st.checkbox("Uppkomster", value=cb_occur)
+            cb_super_macro = st.checkbox("Super-Makro", value=cb_super_macro)
+        with st.expander("Visning", expanded=False):
+            cb_pro_groups = st.checkbox("Visa pro-grupper", value=cb_pro_groups)
+            cb_filter_revision = st.checkbox("Visa filterrevision", value=cb_filter_revision)
+            cb_ai_frame = st.checkbox("Visa AI-Ram & U-filter", value=cb_ai_frame)
+            cb_group_risk = st.checkbox("Riskgrupp", value=cb_group_risk)
+            cb_group_shock = st.checkbox("Skrällgrupp", value=cb_group_shock)
+            cb_group_fat = st.checkbox("FAT-profilgrupp", value=cb_group_fat)
+            cb_group_structure = st.checkbox("Strukturgrupp", value=cb_group_structure)
+    else:
+        st.info("Alla filter är aktiva. Appen väljer styrka via AutoTrim, pro-grupper och softkrav.")
+
     active_filters_list = [
-        cb_u_favs, cb_sft, cb_fat, cb_points, cb_100minus, cb_log_surprise, cb_rank24, cb_totaldiff,
+        cb_u_favs, cb_sft, cb_fat, cb_fat_sequences, cb_points, cb_100minus, cb_log_surprise, cb_rank24, cb_totaldiff,
         cb_fav_pressure, cb_shock_strength, cb_fav_delta,
         cb_base, cb_streak, cb_gap, cb_single, cb_doublet, cb_triplet, cb_occur,
         cb_super_macro, cb_aimatrix
     ]
     total_active = sum(active_filters_list)
-    slider_pass_req = st.slider("Minsta antal uppfyllda krav", 1, total_active, total_active) if total_active > 0 else 0
-
-
-    st.markdown("---")
-    st.subheader("🧮 TipsetMatrix 12")
-    cb_tipsetmatrix = st.checkbox("Visa TipsetMatrix 12", value=True)
-    tm_frame_source = st.selectbox("Grundram för TipsetMatrix", ["Klickbar grundram", "AI-Balansram", "Textgrundram"], index=0)
-    tm_base_limit = st.select_slider("Max rader i grundram", options=[1000, 2500, 5000, 10000, 15000, 25000, 50000, 75000], value=25000)
-    tm_filter_limit = st.select_slider("Max rader efter filter", options=[500, 1000, 1500, 2500, 5000, 10000, 20000], value=5000)
-    tm_output_limit = st.select_slider("Max reducerade rader", options=[50, 100, 150, 200, 300, 500, 750, 1000], value=300)
-    tm_mode = st.selectbox("Reduceringsläge", ["Snabb", "Balans", "Max"], index=1)
-    tm_weighting = st.selectbox("Viktning vid lika täckning", ["Filterpoäng + sannolikhet", "Filterpoäng", "Neutral"], index=0)
-    tm_seed = st.number_input("Seed", min_value=1, max_value=999999, value=42, step=1)
-    cb_tm_backtest = st.checkbox("Visa facit-/backtestpanel", value=True)
-
+    if total_active > 0:
+        auto_pass_req = max(1, min(total_active, int(np.ceil(total_active * float(defaults["pass_ratio"])))))
+    else:
+        auto_pass_req = 0
+    if expert_mode and total_active > 0:
+        slider_pass_req = st.slider("Softkrav: minsta antal uppfyllda krav", 1, total_active, auto_pass_req)
+    else:
+        slider_pass_req = auto_pass_req
+        st.metric("Auto valt softkrav", f"{slider_pass_req} av {total_active}")
 
 # --- MAIN AREA FÖR INMATNING ---
-input_text = st.text_area(f"Klistra in VÄRDEN ({krav_odds} st oddsprocent):", height=120)
+st.markdown(
+    f"""
+    <div class="tm-hero">
+        <div class="tm-step">Steg 1 · Kupongdata</div>
+        <div class="tm-title">{spelform} · {antal_matcher} matcher</div>
+        <div class="tm-muted">Klistra in startoddsprocent/streckprocent i matchordning: M1 1-X-2, M2 1-X-2 osv. Appen kräver {krav_odds} värden.</div>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+input_text = st.text_area(
+    f"Klistra in procentvärden ({krav_odds} värden)",
+    height=120,
+    placeholder="Exempel: 52 25 23 48 28 24 ...",
+    help="Du kan klistra in från tabell. Appen plockar ut siffror automatiskt och accepterar svensk decimal-komma."
+)
+_input_count = len(parse_input_string(input_text, krav_odds)) if input_text else 0
+if input_text:
+    if _input_count == krav_odds:
+        st.success(f"✅ {_input_count} av {krav_odds} värden hittades. Kupongdata är komplett.")
+    else:
+        st.warning(f"⚠️ {_input_count} av {krav_odds} värden hittades. Analysen kräver exakt {krav_odds} värden.")
+
+st.markdown(
+    """
+    <div class="tm-hero">
+        <div class="tm-step">Steg 2 · Manuell grundram</div>
+        <div class="tm-title">Klicka i tecknen du själv vill spela</div>
+        <div class="tm-muted">Grundramen är din kupong. AutoFilter och TipsetMatrix arbetar sedan bara på rader som ryms i din ram.</div>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 
 
 tm_click_frame = None
@@ -1697,11 +2010,23 @@ if 'cb_tipsetmatrix' in globals() and cb_tipsetmatrix:
 if 'har_kort_analys' not in st.session_state:
     st.session_state['har_kort_analys'] = False
 
-if st.button("🚀 KÖR ANALYS", use_container_width=True):
-    if input_text:
-        st.session_state['har_kort_analys'] = True
+st.markdown(
+    """
+    <div class="tm-hero">
+        <div class="tm-step">Steg 3 · Kör</div>
+        <div class="tm-title">Bygg mall, filtrera och reducera</div>
+        <div class="tm-muted">När kupongdata och grundram är klara kör appen hela kedjan: liknande historik → AutoTrim → filterrevision → TipsetMatrix.</div>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+if st.button("🚀 Kör AutoFilter + TipsetMatrix", use_container_width=True):
+    if not input_text:
+        st.error("⚠️ Klistra in procentvärden först.")
+    elif _input_count != krav_odds:
+        st.error(f"⚠️ Fel antal värden: {_input_count} av {krav_odds}. Klistra in komplett kupongdata.")
     else:
-        st.error("⚠️ Klistra in oddsen först!")
+        st.session_state['har_kort_analys'] = True
 
 # ==========================================
 # RESULTAT-VISNING (Laddas från Cache-Motorn)
@@ -1743,8 +2068,8 @@ if st.session_state.get('har_kort_analys') and input_text:
             
         st.success(f"✅ Auto-laddade: **{filnamn}**. Exakt {len(v_m)} liknande omgångar hittades.")
         
-        st.subheader(f"📋 Historiska Omgångar ({len(v_m)} st)")
-        st.dataframe(v_m[visnings_kolumner].rename(columns={'Payout':f'Utdelning ({antal_matcher}r)', 'Sim':'Likhet'}).style.format({f'Utdelning ({antal_matcher}r)': '{:.0f} kr', 'Likhet': '{:.2f}', 'Delta': '{:.1f}'}), use_container_width=True)
+        with st.expander(f"📋 Liknande historiska omgångar ({len(v_m)} st)", expanded=False):
+            st.dataframe(v_m[visnings_kolumner].rename(columns={'Payout':f'Utdelning ({antal_matcher}r)', 'Sim':'Likhet'}).style.format({f'Utdelning ({antal_matcher}r)': '{:.0f} kr', 'Likhet': '{:.2f}', 'Delta': '{:.1f}'}), use_container_width=True)
 
         ones, draws, twos = [], [], []
         s1, sx, s2, g1, gx, g2 = [], [], [], [], [], []
@@ -1804,15 +2129,53 @@ if st.session_state.get('har_kort_analys') and input_text:
         c_trip1 = get_best_interval(trip1, c_s); c_tripx = get_best_interval(tripx, c_s); c_trip2 = get_best_interval(trip2, c_s); c_triptot = get_best_interval(trip_tot, c_s)
         c_occ1 = get_best_interval(occ1, c_s); c_occx = get_best_interval(occx, c_s); c_occ2 = get_best_interval(occ2, c_s); c_occtot = get_best_interval(occ_tot, c_s)
         
-        c_sft = get_best_interval(sft_sums, c_v)
+        # --- AUTOTRIM: rationella värdeintervall ---
+        # Kandidatrader används för att se vad varje intervall faktiskt kostar i radmassa.
+        candidate_rows, exact_universe = make_candidate_rows(antal_matcher)
+        total_candidates = len(candidate_rows)
+        match_odds_filter = [filter_vec[j:j+3] for j in range(0, len(filter_vec), 3)]
+        autotrim_meta = {}
+
+        def _auto_interval(key, hist_values, cand_getter, decimals=0):
+            safety = get_best_interval(hist_values, c_v)
+            if cb_autotrim:
+                interval, meta = choose_rational_interval(
+                    hist_values,
+                    candidate_rows,
+                    cand_getter,
+                    target_coverage_percent=c_v,
+                    min_hist_pct=slider_autotrim_min_hist
+                )
+            else:
+                hist_pct, _, misses = pct_values_in_interval(hist_values, safety)
+                keep = candidate_keep_pct(candidate_rows, cand_getter, safety)
+                meta = {
+                    'AutoTrim': False,
+                    'Vald tighthet %': c_v,
+                    'Säkerhetsintervall': safety,
+                    'Historisk träff %': round(hist_pct, 1),
+                    'Kvar rad %': round(keep, 1) if keep is not None else None,
+                    'Reducerar %': round(100 - keep, 1) if keep is not None else None,
+                    'Rationell faktor': round(hist_pct - keep, 1) if keep is not None else None,
+                    'Kapade outliers': misses,
+                    'Testade intervall': 1,
+                }
+                interval = safety
+            meta['Visning'] = fmt_interval(interval, decimals)
+            meta['Rekommenderat intervall'] = interval
+            meta['Säkerhet visning'] = fmt_interval(meta.get('Säkerhetsintervall'), decimals)
+            autotrim_meta[key] = meta
+            return interval
+
+        c_sft = _auto_interval('SFT Summa', sft_sums, lambda tr: get_sft_sum(tr, filter_vec), 1)
         c_fatf = get_best_interval(fat_f, c_v); c_fata = get_best_interval(fat_a, c_v); c_fatt = get_best_interval(fat_t, c_v); c_fatsum = get_best_interval(fat_sums, c_v)
-        c_points = get_best_interval(points_vals, c_v)
-        c_minus = get_best_interval(minus_sums, c_v)
-        c_log_surprise = get_best_interval(log_surprise_sums, c_v)
-        c_rank24 = get_best_interval(rank24_sums, c_v)
-        c_totaldiff = get_best_interval(total_diff_vals, c_v)
-        c_u = get_best_interval(u_wins, c_v)
-        c_delta = get_best_interval(list(v_m['Delta']), c_v)
+        c_points = _auto_interval('Poängfilter', points_vals, lambda tr: get_rank_points(tr, filter_vec), 0)
+        c_minus = _auto_interval('100-minus Summa', minus_sums, lambda tr: get_100_minus_sum(tr, filter_vec), 1)
+        c_log_surprise = _auto_interval('Skrälltryck Log Summa', log_surprise_sums, lambda tr: get_log_surprise_sum(tr, filter_vec), 0)
+        c_rank24 = _auto_interval('Rank Summa', rank24_sums, lambda tr: get_rank_sum(tr, filter_vec), 1)
+        c_totaldiff = _auto_interval('Total Diff', total_diff_vals, lambda tr: calculate_total_diff(match_odds_filter, list(tr)), 0)
+        c_u = _auto_interval(f'Topp {slider_u_count} favoriter', u_wins, lambda tr: get_top_n_favs_wins(tr, filter_vec, slider_u_count), 0)
+        c_delta = _auto_interval('Delta', list(v_m['Delta']), lambda tr: calculate_delta(tr, filter_vec), 1)
 
         c_fav70_raw = get_best_interval(fav70_wins, c_v)
         c_fav60_raw = get_best_interval(fav60_wins, c_v)
@@ -1830,7 +2193,51 @@ if st.session_state.get('har_kort_analys') and input_text:
         c_shock15 = clamp_interval(c_shock15_raw, 0, todays_shock_capacity.get(15, 0))
         c_shock20 = clamp_interval(c_shock20_raw, 0, todays_shock_capacity.get(20, 0))
         c_shock_lowest = get_best_interval(shock_lowest, c_v)
-        c_fav_delta = get_best_interval(fav_delta_vals, c_v)
+        c_fav_delta = _auto_interval('Favorit-delta', fav_delta_vals, lambda tr: get_favorite_delta(tr, filter_vec), 2)
+        # --- FAT-SEKVENSER: aktiva reduceringsbyggklossar ---
+        fat_strings_hist = [get_fat_string(row['Correct_Row'], row['Prob_Vector']) for _, row in v_m.iterrows() if len(str(row['Correct_Row'])) == antal_matcher]
+        base_fat_strings = [get_fat_string(row['Correct_Row'], row['Prob_Vector']) for _, row in db_full.iterrows() if len(str(row['Correct_Row'])) == antal_matcher]
+        fat_seq2_rows = choose_fat_sequences(fat_strings_hist, base_fat_strings, length=2, top_n=5, min_lift=0.0)
+        fat_seq3_rows = choose_fat_sequences(fat_strings_hist, base_fat_strings, length=3, top_n=5, min_lift=0.0)
+        fat_pair_rows = choose_fat_sequence_pairs(fat_strings_hist, base_fat_strings, top_n=5, min_lift=0.0)
+        fat_seq2_list = [r['Sekvens'] for r in fat_seq2_rows]
+        fat_seq3_list = [r['Sekvens'] for r in fat_seq3_rows]
+        fat_pair_list = [r['Par'] for r in fat_pair_rows]
+        fat_seq2_hits = [count_fat_sequence_hits(f, fat_seq2_list) for f in fat_strings_hist]
+        fat_seq3_hits = [count_fat_sequence_hits(f, fat_seq3_list) for f in fat_strings_hist]
+        fat_pair_hits = [count_fat_pair_hits(f, fat_pair_list) for f in fat_strings_hist]
+
+        if fat_seq2_list:
+            c_fat_seq2 = _auto_interval('FAT 2-sekvenser', fat_seq2_hits, lambda tr: count_fat_sequence_hits(get_fat_string(tr, filter_vec), fat_seq2_list), 0)
+        else:
+            c_fat_seq2 = (0, 0)
+        if fat_seq3_list:
+            c_fat_seq3 = _auto_interval('FAT 3-sekvenser', fat_seq3_hits, lambda tr: count_fat_sequence_hits(get_fat_string(tr, filter_vec), fat_seq3_list), 0)
+        else:
+            c_fat_seq3 = (0, 0)
+        if fat_pair_list:
+            c_fat_pairs = _auto_interval('FAT dubbelchans', fat_pair_hits, lambda tr: count_fat_pair_hits(get_fat_string(tr, filter_vec), fat_pair_list), 0)
+        else:
+            c_fat_pairs = (0, 0)
+
+        fat_sequence_active_parts = sum([bool(fat_seq2_list), bool(fat_seq3_list), bool(fat_pair_list)])
+        fat_sequence_group_req = 2 if fat_sequence_active_parts >= 2 else 1
+
+        def fat_sequence_subscore_from_fat_string(fstr):
+            pts = 0
+            if fat_seq2_list and in_range(count_fat_sequence_hits(fstr, fat_seq2_list), c_fat_seq2): pts += 1
+            if fat_seq3_list and in_range(count_fat_sequence_hits(fstr, fat_seq3_list), c_fat_seq3): pts += 1
+            if fat_pair_list and in_range(count_fat_pair_hits(fstr, fat_pair_list), c_fat_pairs): pts += 1
+            return pts
+
+        def fat_sequence_group_ok_from_fat_string(fstr):
+            if fat_sequence_active_parts == 0:
+                return False
+            return fat_sequence_subscore_from_fat_string(fstr) >= fat_sequence_group_req
+
+        def fat_sequence_group_ok_row(row_str):
+            return fat_sequence_group_ok_from_fat_string(get_fat_string(row_str, filter_vec))
+
         
         c_ai_rank = get_best_interval(ai_ranks, c_v) if len(ai_ranks) > 0 else (1, max_rank)
         active_ai_min, active_ai_max = slider_ai_rank if cb_manual_ai_rank else c_ai_rank
@@ -1888,23 +2295,33 @@ if st.session_state.get('har_kort_analys') and input_text:
         st.markdown("---")
         st.header(f"📋 VECKANS MALL ({spelform}) – snabb inmatning")
         
+        def _show_value_interval(label, key, interval, decimals=0, suffix=""):
+            st.write(f"**{label}:** {fmt_interval(interval, decimals)}{suffix}")
+            meta = autotrim_meta.get(key)
+            note = autotrim_caption(meta, decimals)
+            if note and (cb_autotrim or key in autotrim_meta):
+                st.caption(note)
+
         col_v, col_s = st.columns(2)
         with col_v:
             st.subheader(f"💰 VÄRDE & SVÅRIGHET ({c_v}%)")
             if cb_payout: st.write(f"**Utdelning:** {v_m['Payout'].min():.0f} - {v_m['Payout'].max():.0f} kr")
-            st.write(f"**Delta (Avvikelse):** {c_delta[0]:.1f} - {c_delta[1]:.1f}")
+            _show_value_interval("Delta (Avvikelse)", "Delta", c_delta, 1)
             if cb_aimatrix: st.write(f"**{ai_txt}:** {active_ai_min:.0f} - {active_ai_max:.0f}")
-            if cb_totaldiff: st.write(f"**Total Diff:** {c_totaldiff[0]} - {c_totaldiff[1]}")
-            if cb_rank24: st.write(f"**Rank Summa:** {c_rank24[0]:.1f} - {c_rank24[1]:.1f}")
-            if cb_100minus: st.write(f"**100-minus Summa:** {c_minus[0]} - {c_minus[1]}")
-            if cb_log_surprise: st.write(f"**Skrälltryck Log Summa:** {c_log_surprise[0]} - {c_log_surprise[1]}")
-            if cb_sft: st.write(f"**SFT Summa:** {c_sft[0]} - {c_sft[1]}")
-            if cb_points: st.write(f"**Poängfilter:** {c_points[0]} - {c_points[1]}")
+            if cb_totaldiff: _show_value_interval("Total Diff", "Total Diff", c_totaldiff, 0)
+            if cb_rank24: _show_value_interval("Rank Summa", "Rank Summa", c_rank24, 1)
+            if cb_100minus: _show_value_interval("100-minus Summa", "100-minus Summa", c_minus, 1)
+            if cb_log_surprise: _show_value_interval("Skrälltryck Log Summa", "Skrälltryck Log Summa", c_log_surprise, 0)
+            if cb_sft: _show_value_interval("SFT Summa", "SFT Summa", c_sft, 1)
+            if cb_points: _show_value_interval("Poängfilter", "Poängfilter", c_points, 0)
             if cb_fat: st.write(f"**FAT (Standard):** F:{c_fatf[0]}-{c_fatf[1]} | A:{c_fata[0]}-{c_fata[1]} | T:{c_fatt[0]}-{c_fatt[1]} (Summa: {c_fatsum[0]}-{c_fatsum[1]})")
-            if cb_u_favs: st.write(f"**Topp {slider_u_count} Favoriter:** {c_u[0]} - {c_u[1]} st vinner")
+            if cb_fat_sequences:
+                st.markdown("**FAT-sekvenser (aktivt reduceringsfilter):**")
+                st.caption(f"2-seq {', '.join(fat_seq2_list) if fat_seq2_list else '-'} · krav {fmt_interval(c_fat_seq2)} av 5 | 3-seq {', '.join(fat_seq3_list) if fat_seq3_list else '-'} · krav {fmt_interval(c_fat_seq3)} av 5 | dubbelchans {fmt_interval(c_fat_pairs)} av 5 | gruppkrav {fat_sequence_group_req} av {fat_sequence_active_parts}")
+            if cb_u_favs: _show_value_interval(f"Topp {slider_u_count} Favoriter", f"Topp {slider_u_count} favoriter", c_u, 0, " st vinner")
             if cb_fav_pressure: st.write(f"**Favorittryck:** ≥70% {fmt_interval(c_fav70)} av {todays_fav_counts.get(70,0)} | ≥60% {fmt_interval(c_fav60)} av {todays_fav_counts.get(60,0)} | ≥50% {fmt_interval(c_fav50)} av {todays_fav_counts.get(50,0)}")
             if cb_shock_strength: st.write(f"**Skrällstyrka:** <10% {fmt_interval(c_shock10)} | <15% {fmt_interval(c_shock15)} | <20% {fmt_interval(c_shock20)} | Lägsta vinnande % {fmt_interval(c_shock_lowest, 1)}")
-            if cb_fav_delta: st.write(f"**Favorit-delta:** {fmt_interval(c_fav_delta, 2)}")
+            if cb_fav_delta: _show_value_interval("Favorit-delta", "Favorit-delta", c_fav_delta, 2)
 
         with col_s:
             st.subheader(f"⚽ STRUKTUR ({c_s}%)")
@@ -1918,7 +2335,7 @@ if st.session_state.get('har_kort_analys') and input_text:
             
             st.markdown("---")
             st.subheader(f"🧩 SUPER-MAKRO (Krav: Minst {slider_super_groups} av 8 grupper)")
-            st.markdown(f"*Minst 2 av 3 interna tecken i en grupp måste sitta för att gruppen ska räknas som 'träffad'. Överlever historiskt **{sm_prob:.1f}%**.*")
+            st.markdown(f"*Minst 2 av 3 interna tecken i en grupp måste sitta för att gruppen ska räknas som 'träffad'. Överlever historiskt **{sm_prob:.1f}%**. Super-Makro används som stödfilter och bedöms i Filterrevisionen.*")
             if cb_super_macro:
                 b = sm_bounds
                 st.write(f"⚽ **Grp 1 (1X2):** 1: {b['1'][0]}-{b['1'][1]} | X: {b['X'][0]}-{b['X'][1]} | 2: {b['2'][0]}-{b['2'][1]}")
@@ -1998,6 +2415,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                 if g_pass >= slider_super_groups: pts += 1
             
             if cb_fat and (c_fatf[0] <= fat_f[i] <= c_fatf[1] and c_fata[0] <= fat_a[i] <= c_fata[1] and c_fatt[0] <= fat_t[i] <= c_fatt[1] and c_fatsum[0] <= fat_sums[i] <= c_fatsum[1]): pts += 1
+            if cb_fat_sequences and i < len(fat_strings_hist) and fat_sequence_group_ok_from_fat_string(fat_strings_hist[i]): pts += 1
             if cb_u_favs and (c_u[0] <= u_wins[i] <= c_u[1]): pts += 1
             if cb_sft and (c_sft[0] <= sft_sums[i] <= c_sft[1]): pts += 1
             if cb_points and (c_points[0] <= points_vals[i] <= c_points[1]): pts += 1
@@ -2021,9 +2439,7 @@ if st.session_state.get('har_kort_analys') and input_text:
             st.caption(f"Om samma filter hade körts som helt hårda AND-filter hade {hard_all_hits} av {len(v_m)} historiska rader klarat alla {total_active} filter ({hard_all_pct:.1f}%).")
 
         # --- FILTERSTYRKA, FILTERREGLER OCH HELGARDERING-EXPORT ---
-        candidate_rows, exact_universe = make_candidate_rows(antal_matcher)
-        total_candidates = len(candidate_rows)
-        match_odds_filter = [filter_vec[j:j+3] for j in range(0, len(filter_vec), 3)]
+        # candidate_rows / total_candidates / match_odds_filter skapades redan ovan för AutoTrim.
 
         # Sammanlagd reducering: räkna hela mallen tillsammans, inte filter för filter.
         # För Topptips är detta exakt. För 13 matcher används ett stabilt Monte Carlo-estimat.
@@ -2051,6 +2467,7 @@ if st.session_state.get('har_kort_analys') and input_text:
             if cb_occur and (in_range(o1_c, c_occ1) and in_range(ox_c, c_occx) and in_range(o2_c, c_occ2) and in_range(occtot_c, c_occtot)): pts += 1
             if cb_super_macro and pass_super_macro_row(tr, filter_vec, sm_bounds, slider_super_groups): pts += 1
             if cb_fat and (in_range(f_c, c_fatf) and in_range(a_c, c_fata) and in_range(t_c, c_fatt) and in_range(fsum_c, c_fatsum)): pts += 1
+            if cb_fat_sequences and fat_sequence_group_ok_row(tr): pts += 1
             if cb_u_favs and in_range(get_top_n_favs_wins(tr, filter_vec, slider_u_count), c_u): pts += 1
             if cb_sft and in_range(get_sft_sum(tr, filter_vec), c_sft): pts += 1
             if cb_points and in_range(get_rank_points(tr, filter_vec), c_points): pts += 1
@@ -2131,6 +2548,23 @@ if st.session_state.get('har_kort_analys') and input_text:
                 return in_range(f0, c_fatf) and in_range(a0, c_fata) and in_range(t0, c_fatt) and in_range(fs0, c_fatsum)
             keep_pct = keep_pct_rows(_fat_ok)
             rule_rows.append(filter_strength_row("FAT", f"F {fmt_interval(c_fatf)} | A {fmt_interval(c_fata)} | T {fmt_interval(c_fatt)} | Summa {fmt_interval(c_fatsum)}", hist_pct, keep_pct, "FAT", f"FAT: F {fmt_interval(c_fatf)}, A {fmt_interval(c_fata)}, T {fmt_interval(c_fatt)}, Summa {fmt_interval(c_fatsum)}", "Värde"))
+        if cb_fat_sequences and fat_sequence_active_parts > 0:
+            if fat_seq2_list:
+                hist_pct = pct_count(lambda i: i < len(fat_seq2_hits) and in_range(fat_seq2_hits[i], c_fat_seq2), n_rows)
+                keep_pct = keep_pct_rows(lambda tr: in_range(count_fat_sequence_hits(get_fat_string(tr, filter_vec), fat_seq2_list), c_fat_seq2))
+                rule_rows.append(filter_strength_row("FAT 2-sekvenser", fmt_interval(c_fat_seq2), hist_pct, keep_pct, "Sekvenser", f"FAT 2-sekvenser: {', '.join(fat_seq2_list)} | krav {fmt_interval(c_fat_seq2)} av 5", "FAT-sekvens"))
+            if fat_seq3_list:
+                hist_pct = pct_count(lambda i: i < len(fat_seq3_hits) and in_range(fat_seq3_hits[i], c_fat_seq3), n_rows)
+                keep_pct = keep_pct_rows(lambda tr: in_range(count_fat_sequence_hits(get_fat_string(tr, filter_vec), fat_seq3_list), c_fat_seq3))
+                rule_rows.append(filter_strength_row("FAT 3-sekvenser", fmt_interval(c_fat_seq3), hist_pct, keep_pct, "Sekvenser", f"FAT 3-sekvenser: {', '.join(fat_seq3_list)} | krav {fmt_interval(c_fat_seq3)} av 5", "FAT-sekvens"))
+            if fat_pair_list:
+                pair_text = ', '.join([f"{a}/{b}" for a, b in fat_pair_list])
+                hist_pct = pct_count(lambda i: i < len(fat_pair_hits) and in_range(fat_pair_hits[i], c_fat_pairs), n_rows)
+                keep_pct = keep_pct_rows(lambda tr: in_range(count_fat_pair_hits(get_fat_string(tr, filter_vec), fat_pair_list), c_fat_pairs))
+                rule_rows.append(filter_strength_row("FAT dubbelchans", fmt_interval(c_fat_pairs), hist_pct, keep_pct, "Sekvenser", f"FAT dubbelchans: {pair_text} | krav {fmt_interval(c_fat_pairs)} av 5", "FAT-sekvens"))
+            hist_pct = pct_count(lambda i: i < len(fat_strings_hist) and fat_sequence_group_ok_from_fat_string(fat_strings_hist[i]), n_rows)
+            keep_pct = keep_pct_rows(lambda tr: fat_sequence_group_ok_row(tr))
+            rule_rows.append(filter_strength_row("FAT-sekvensgrupp", f"Minst {fat_sequence_group_req} av {fat_sequence_active_parts}", hist_pct, keep_pct, "Gruppmodul/Sekvenser", f"FAT-sekvensgrupp: minst {fat_sequence_group_req} av {fat_sequence_active_parts} delgrupper", "FAT-sekvens"))
         if cb_u_favs:
             hist_pct = pct_count(lambda i: in_range(u_wins[i], c_u), n_rows)
             keep_pct = keep_pct_rows(lambda tr: in_range(get_top_n_favs_wins(tr, filter_vec, slider_u_count), c_u))
@@ -2998,6 +3432,7 @@ if st.session_state.get('har_kort_analys') and input_text:
         st.markdown("---")
         st.subheader("🧬 Dagens Bästa FAT-Sekvenser (Byggklossar)")
         st.markdown("Här analyserar AI:n vilka specifika mönster (1=Fav, 2=Andrahand, 3=Skräll) som bäst täcker in **exakt denna typ av omgång**. Statistiken visar hur många av de 5 sekvenserna som brukar dyka upp i en och samma vinnarrad.")
+        st.success("FAT-sekvenser används nu som aktivt mjukt reduceringsfilter och syns i Filterrevisionen. Urvalet prioriterar positiv lift och rationell effekt.")
 
         fat_strings = [get_fat_string(row['Correct_Row'], row['Prob_Vector']) for _, row in v_m.iterrows() if len(row['Correct_Row']) == antal_matcher]
         base_fat_strings = [get_fat_string(row['Correct_Row'], row['Prob_Vector']) for _, row in db_full.iterrows() if len(str(row['Correct_Row'])) == antal_matcher]
@@ -3239,7 +3674,7 @@ if st.session_state.get('har_kort_analys') and input_text:
         st.markdown("---")
         st.subheader("📊 Datadistribution")
         fig = plt.figure(figsize=(18, 16)) 
-        def smart_plot(data_list, col_idx, color, title, xlabel, is_active, val_min, val_max):
+        def smart_plot(data_list, col_idx, color, title, xlabel, is_active, val_min, val_max, meta_key=None):
             plt.subplot(3, 3, col_idx) 
             valid_data = [d for d in data_list if not pd.isna(d)]
             if not valid_data: plt.text(0.5, 0.5, 'Ingen data', ha='center', va='center'); plt.title(title); return
@@ -3258,18 +3693,23 @@ if st.session_state.get('har_kort_analys') and input_text:
             
             plt.xticks(ticks, rotation=45); plt.grid(axis='y', linestyle='--', alpha=0.5)
             if is_active:
-                plt.axvline(val_min, color='red', linestyle='dashed', linewidth=2, label='Mallen Min')
-                plt.axvline(val_max, color='darkred', linestyle='dashed', linewidth=2, label='Mallen Max')
+                if meta_key and meta_key in autotrim_meta:
+                    safe = autotrim_meta[meta_key].get('Säkerhetsintervall')
+                    if safe is not None and tuple(safe) != (val_min, val_max):
+                        plt.axvline(safe[0], color='orange', linestyle='dotted', linewidth=1.5, label='Säkerhet Min')
+                        plt.axvline(safe[1], color='orange', linestyle='dotted', linewidth=1.5, label='Säkerhet Max')
+                plt.axvline(val_min, color='red', linestyle='dashed', linewidth=2, label='Rek Min')
+                plt.axvline(val_max, color='darkred', linestyle='dashed', linewidth=2, label='Rek Max')
                 plt.legend()
 
         smart_plot([r for r in ai_ranks if r > 0], 1, 'skyblue', 'AI-Rank', 'AI-Rank', cb_aimatrix, active_ai_min, active_ai_max)
-        smart_plot(sft_sums, 2, 'coral', 'SFT Summa', 'SFT Summa', cb_sft, c_sft[0], c_sft[1])
+        smart_plot(sft_sums, 2, 'coral', 'SFT Summa', 'SFT Summa', cb_sft, c_sft[0], c_sft[1], 'SFT Summa')
         smart_plot(fat_sums, 3, 'gold', 'FAT Summa', 'FAT Summa', cb_fat, c_fatsum[0], c_fatsum[1]) 
-        smart_plot(points_vals, 4, 'mediumpurple', 'Poängfilter', 'Poäng', cb_points, c_points[0], c_points[1])
-        smart_plot(minus_sums, 5, 'tan', '100-minus Summa', '100-minus', cb_100minus, c_minus[0], c_minus[1])
-        smart_plot(rank24_sums, 6, 'lightpink', 'Rank Summa', 'Rank Summa', cb_rank24, c_rank24[0], c_rank24[1])
-        smart_plot(total_diff_vals, 7, 'lightgreen', 'Total Diff (T1-T2)', 'Differens', cb_totaldiff, c_totaldiff[0], c_totaldiff[1])
-        smart_plot(list(v_m['Delta']), 8, 'lightblue', 'Delta (Avvikelse)', 'Delta Poäng', False, c_delta[0], c_delta[1])
+        smart_plot(points_vals, 4, 'mediumpurple', 'Poängfilter', 'Poäng', cb_points, c_points[0], c_points[1], 'Poängfilter')
+        smart_plot(minus_sums, 5, 'tan', '100-minus Summa', '100-minus', cb_100minus, c_minus[0], c_minus[1], '100-minus Summa')
+        smart_plot(rank24_sums, 6, 'lightpink', 'Rank Summa', 'Rank Summa', cb_rank24, c_rank24[0], c_rank24[1], 'Rank Summa')
+        smart_plot(total_diff_vals, 7, 'lightgreen', 'Total Diff (T1-T2)', 'Differens', cb_totaldiff, c_totaldiff[0], c_totaldiff[1], 'Total Diff')
+        smart_plot(list(v_m['Delta']), 8, 'lightblue', 'Delta (Avvikelse)', 'Delta Poäng', True, c_delta[0], c_delta[1], 'Delta')
         
         plt.tight_layout(pad=2.0, h_pad=2.0)
         
