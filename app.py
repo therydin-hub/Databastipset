@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v11.0 – Filterrevision"
+APP_VERSION = "v11.1-alpha – TipsetMatrix 12"
 
 # ==========================================
 # 1. FUNKTIONER (FÖR 8 & 13 MATCHER)
@@ -409,6 +409,268 @@ def make_candidate_rows(antal_matcher, sample_size=25000):
     rng = np.random.default_rng(42)
     arr = rng.choice(['1', 'X', '2'], size=(sample_size, antal_matcher))
     return [''.join(row) for row in arr], False
+
+
+# --- TIPSETMATRIX 12: EXAKT GRUNDRAM, 12-GARANTI OCH GARANTITABELL ---
+def normalize_signs(signs):
+    """Normaliserar valda tecken till Helgardering-ordning: 1, X, 2."""
+    if signs is None:
+        return ['1', 'X', '2']
+    if isinstance(signs, str):
+        raw = list(signs.upper().replace(' ', '').replace(',', '').replace('|', '').replace('/', '').replace('-', ''))
+    else:
+        raw = [str(s).strip().upper() for s in signs]
+    order = ['1', 'X', '2']
+    out = [s for s in order if s in raw]
+    return out if out else ['1', 'X', '2']
+
+
+def parse_frame_text(text, antal_matcher):
+    """
+    Läser en manuell grundram från text.
+    Exempel: 1X2 / 1X / 12 / 1 / X2 ... eller en rad med 13 grupper.
+    """
+    if text is None or str(text).strip() == "":
+        return None, "Ingen textgrundram angiven."
+    tokens = re.findall(r'[1Xx2]{1,3}', str(text))
+    if len(tokens) != antal_matcher:
+        return None, f"Textgrundramen måste innehålla exakt {antal_matcher} teckengrupper. Hittade {len(tokens)}."
+    frame = [normalize_signs(tok) for tok in tokens]
+    return frame, ""
+
+
+def generate_rows_from_frame(frame, max_rows=50000):
+    """Genererar alla enkelrader från en egen grundram, med säkerhetsspärr."""
+    if not frame:
+        return [], 0, False, "Ingen grundram finns."
+    frame = [normalize_signs(s) for s in frame]
+    n_rows = frame_row_count(frame)
+    if n_rows > int(max_rows):
+        return [], n_rows, False, f"Grundramen är {n_rows:,} rader och överskrider spärren {int(max_rows):,}. Smalna av ramen eller höj spärren."
+    rows = [''.join(tup) for tup in itertools.product(*frame)]
+    return rows, n_rows, True, ""
+
+
+def row_log_probability(row_str, prob_vector):
+    """Log-sannolikhet enligt dagens procent. Används bara som vikt, inte som facit."""
+    total = 0.0
+    for i, c in enumerate(row_str):
+        idx = i * 3
+        if c == '1': p = prob_vector[idx]
+        elif c == 'X': p = prob_vector[idx + 1]
+        else: p = prob_vector[idx + 2]
+        total += np.log(max(float(p), 0.05) / 100.0)
+    return float(total)
+
+
+def weighted_13_share(all_rows, selected_rows, prob_vector):
+    """Viktad 13-chans inom filtrerad radmassa, baserad på dagens procentvektor."""
+    if not all_rows or not selected_rows:
+        return 0.0
+    selected_set = set(selected_rows)
+    logs = np.array([row_log_probability(r, prob_vector) for r in all_rows], dtype=float)
+    mx = float(np.max(logs)) if len(logs) else 0.0
+    weights = np.exp(logs - mx)
+    total = float(np.sum(weights))
+    if total <= 0:
+        return 0.0
+    sel_weight = float(sum(w for r, w in zip(all_rows, weights) if r in selected_set))
+    return round((sel_weight / total) * 100, 2)
+
+
+def build_12_cover_sets(rows):
+    """
+    Täckningsyta för 12-rättsgaranti inom given radmassa.
+    En vald rad täcker sig själv + rader som skiljer sig i max en match.
+    """
+    row_to_idx = {r: i for i, r in enumerate(rows)}
+    signs = ['1', 'X', '2']
+    cover_sets = []
+    for i, r in enumerate(rows):
+        cov = {i}
+        chars = list(r)
+        for pos, old in enumerate(chars):
+            for s in signs:
+                if s == old:
+                    continue
+                chars[pos] = s
+                j = row_to_idx.get(''.join(chars))
+                if j is not None:
+                    cov.add(j)
+            chars[pos] = old
+        cover_sets.append(cov)
+    return cover_sets
+
+
+def prune_tipsetmatrix_selection(selected, cover_sets, row_scores, n_targets):
+    """Tar bort överflödiga rader utan att bryta 12-garantitäckningen."""
+    if not selected:
+        return []
+    selected = list(selected)
+    cover_count = np.zeros(n_targets, dtype=np.int32)
+    for idx in selected:
+        for j in cover_sets[idx]:
+            cover_count[j] += 1
+    # Försök ta bort lägst viktade / minst täckande rader först.
+    removal_order = sorted(selected, key=lambda idx: (float(row_scores[idx]), len(cover_sets[idx])))
+    selected_set = set(selected)
+    for idx in removal_order:
+        if idx not in selected_set:
+            continue
+        cov = cover_sets[idx]
+        if all(cover_count[j] > 1 for j in cov):
+            selected_set.remove(idx)
+            for j in cov:
+                cover_count[j] -= 1
+    return [idx for idx in selected if idx in selected_set]
+
+
+def tipsetmatrix12_reduce(rows, row_scores=None, mode="Balans", max_output_rows=None, seed=42):
+    """
+    IntelliMatrix-liknande greedy set-cover för 12-rättsgaranti inom filtrerad radmassa.
+    Garantin gäller under förutsättning att rätt rad finns kvar i rows.
+    """
+    rows = list(dict.fromkeys([str(r).strip().upper() for r in rows if str(r).strip()]))
+    n = len(rows)
+    if n == 0:
+        return [], {"covered_pct": 0.0, "covered_rows": 0, "target_rows": 0, "complete": False, "selected_count": 0}
+    if row_scores is None:
+        row_scores = np.zeros(n, dtype=float)
+    else:
+        row_scores = np.array(row_scores, dtype=float)
+        if len(row_scores) != n:
+            row_scores = np.zeros(n, dtype=float)
+
+    mode_key = str(mode).lower()
+    restarts = 1 if "snabb" in mode_key else 4 if "balans" in mode_key else 9
+    jitter_scale = 0.001 if "snabb" in mode_key else 0.02 if "balans" in mode_key else 0.06
+    rng = np.random.default_rng(int(seed))
+    cover_sets = build_12_cover_sets(rows)
+
+    best_selected = None
+    best_meta = None
+    candidate_indices = np.arange(n)
+
+    for restart in range(restarts):
+        jitter = rng.normal(0, jitter_scale, size=n)
+        selected = []
+        selected_set = set()
+        uncovered = set(range(n))
+
+        while uncovered:
+            if max_output_rows is not None and len(selected) >= int(max_output_rows):
+                break
+            best_idx = None
+            best_key = None
+            # Greedy: max ny täckning, sedan radkvalitet som tie-breaker.
+            for idx in candidate_indices:
+                if int(idx) in selected_set:
+                    continue
+                gain = len(cover_sets[int(idx)] & uncovered)
+                if gain <= 0:
+                    continue
+                key = (gain, float(row_scores[int(idx)]) + float(jitter[int(idx)]), len(cover_sets[int(idx)]))
+                if best_key is None or key > best_key:
+                    best_key = key
+                    best_idx = int(idx)
+            if best_idx is None:
+                break
+            selected.append(best_idx)
+            selected_set.add(best_idx)
+            uncovered -= cover_sets[best_idx]
+
+        covered_rows = n - len(uncovered)
+        complete = (len(uncovered) == 0)
+        if complete and mode_key != "snabb":
+            selected = prune_tipsetmatrix_selection(selected, cover_sets, row_scores, n)
+            # Säkerställ metadata efter pruning.
+            covered = set()
+            for idx in selected:
+                covered |= cover_sets[idx]
+            covered_rows = len(covered)
+            complete = (covered_rows == n)
+
+        meta = {
+            "covered_pct": round((covered_rows / n) * 100, 2),
+            "covered_rows": int(covered_rows),
+            "target_rows": int(n),
+            "complete": bool(complete),
+            "selected_count": int(len(selected)),
+            "mode": mode,
+            "restarts": restarts,
+        }
+        score_sum = float(sum(row_scores[idx] for idx in selected))
+        rank_key = (1 if complete else 0, covered_rows, -len(selected), score_sum)
+        if best_selected is None:
+            best_selected, best_meta, best_rank = selected, meta, rank_key
+        elif rank_key > best_rank:
+            best_selected, best_meta, best_rank = selected, meta, rank_key
+
+    reduced_rows = [rows[idx] for idx in best_selected]
+    best_meta["selected_count"] = len(reduced_rows)
+    return reduced_rows, best_meta
+
+
+def build_tipsetmatrix_guarantee_table(filtered_rows, reduced_rows, antal_matcher, prob_vector=None):
+    """Bygger garantitabell: varje filtrerad rad testas som möjlig facitrad."""
+    filtered_rows = list(dict.fromkeys(filtered_rows))
+    reduced_rows = list(dict.fromkeys(reduced_rows))
+    n = len(filtered_rows)
+    if n == 0 or not reduced_rows:
+        table = pd.DataFrame([
+            {"Rättnivå": "13 rätt", "Antal möjliga facitrader": 0, "Andel %": 0.0},
+            {"Rättnivå": "12 rätt", "Antal möjliga facitrader": 0, "Andel %": 0.0},
+            {"Rättnivå": "11 rätt", "Antal möjliga facitrader": 0, "Andel %": 0.0},
+            {"Rättnivå": "10 rätt", "Antal möjliga facitrader": 0, "Andel %": 0.0},
+            {"Rättnivå": "Under 10", "Antal möjliga facitrader": 0, "Andel %": 0.0},
+        ])
+        return table, {"13_oviktad": 0.0, "13_viktad": 0.0, "12plus": 0.0, "min_garanti": 0, "reduceringsgrad": 0.0}
+
+    counts = {k: 0 for k in range(antal_matcher + 1)}
+    red = reduced_rows
+    for target in filtered_rows:
+        best = 0
+        for rr in red:
+            hit = sum(1 for a, b in zip(target, rr) if a == b)
+            if hit > best:
+                best = hit
+                if best == antal_matcher:
+                    break
+        counts[best] += 1
+
+    rows_out = []
+    for level in [antal_matcher, antal_matcher - 1, antal_matcher - 2, antal_matcher - 3]:
+        if level < 0:
+            continue
+        rows_out.append({
+            "Rättnivå": f"{level} rätt",
+            "Antal möjliga facitrader": int(counts.get(level, 0)),
+            "Andel %": round((counts.get(level, 0) / n) * 100, 2)
+        })
+    under10 = sum(v for k, v in counts.items() if k <= antal_matcher - 4)
+    rows_out.append({"Rättnivå": f"Under {antal_matcher - 3}", "Antal möjliga facitrader": int(under10), "Andel %": round((under10 / n) * 100, 2)})
+    table = pd.DataFrame(rows_out)
+
+    selected_set = set(reduced_rows)
+    exact_13 = sum(1 for r in filtered_rows if r in selected_set)
+    twelve_plus = sum(v for k, v in counts.items() if k >= antal_matcher - 1)
+    weighted = weighted_13_share(filtered_rows, reduced_rows, prob_vector) if prob_vector is not None else 0.0
+    summary = {
+        "13_oviktad": round((exact_13 / n) * 100, 2),
+        "13_viktad": weighted,
+        "12plus": round((twelve_plus / n) * 100, 2),
+        "min_garanti": int(min(k for k, v in counts.items() if v > 0)),
+        "reduceringsgrad": round((1 - (len(reduced_rows) / n)) * 100, 2) if n else 0.0,
+        "filtered_rows": int(n),
+        "reduced_rows": int(len(reduced_rows)),
+    }
+    return table, summary
+
+
+def frame_export_text(frame):
+    if not frame:
+        return ""
+    return " / ".join(_sort_signs_display(set(s)) for s in frame)
 
 
 # --- AI-RAM / U-FILTER ---
@@ -1295,8 +1557,50 @@ with st.sidebar:
     slider_pass_req = st.slider("Minsta antal uppfyllda krav", 1, total_active, total_active) if total_active > 0 else 0
 
 
+    st.markdown("---")
+    st.subheader("🧮 TipsetMatrix 12")
+    cb_tipsetmatrix = st.checkbox("Visa TipsetMatrix 12", value=True)
+    tm_frame_source = st.selectbox("Grundram för TipsetMatrix", ["AI-Balansram", "Klickbar grundram", "Textgrundram"], index=0)
+    tm_base_limit = st.select_slider("Max rader i grundram", options=[1000, 2500, 5000, 10000, 15000, 25000, 50000, 75000], value=25000)
+    tm_filter_limit = st.select_slider("Max rader efter filter", options=[500, 1000, 1500, 2500, 5000, 10000, 20000], value=5000)
+    tm_output_limit = st.select_slider("Max reducerade rader", options=[50, 100, 150, 200, 300, 500, 750, 1000], value=300)
+    tm_mode = st.selectbox("Reduceringsläge", ["Snabb", "Balans", "Max"], index=1)
+    tm_weighting = st.selectbox("Viktning vid lika täckning", ["Filterpoäng + sannolikhet", "Filterpoäng", "Neutral"], index=0)
+    tm_seed = st.number_input("Seed", min_value=1, max_value=999999, value=42, step=1)
+    cb_tm_backtest = st.checkbox("Visa backtest-panel", value=False)
+
+
 # --- MAIN AREA FÖR INMATNING ---
 input_text = st.text_area(f"Klistra in VÄRDEN ({krav_odds} st oddsprocent):", height=120)
+
+
+tm_click_frame = None
+tm_text_frame_input = ""
+if 'cb_tipsetmatrix' in globals() and cb_tipsetmatrix:
+    with st.expander("🧮 TipsetMatrix grundram", expanded=(tm_frame_source == "Klickbar grundram")):
+        st.caption("Välj egen ram här om du vill reducera exakt de tecken du själv tänker spela. Full 13-hel spärras normalt av radgränsen.")
+        if tm_frame_source == "Klickbar grundram":
+            tm_click_frame = []
+            grid_cols = st.columns(4)
+            for mi in range(antal_matcher):
+                with grid_cols[mi % 4]:
+                    selected = st.multiselect(
+                        f"M{mi+1}",
+                        options=['1', 'X', '2'],
+                        default=['1', 'X', '2'],
+                        key=f"tm_frame_{spelform}_{mi}"
+                    )
+                    tm_click_frame.append(normalize_signs(selected))
+            st.caption(f"Grundramens radantal just nu: {frame_row_count(tm_click_frame):,} rader")
+        elif tm_frame_source == "Textgrundram":
+            tm_text_frame_input = st.text_area(
+                "Textgrundram, en grupp per match",
+                value=" / ".join(["1X2"] * antal_matcher),
+                height=70,
+                help="Exempel: 1X2 / 1X / 12 / 1 / X2 ..."
+            )
+        else:
+            st.info("AI-Balansram använder de liknande historiska omgångarna och din valda radbudget/max antal helgarderingar.")
 
 if 'har_kort_analys' not in st.session_state:
     st.session_state['har_kort_analys'] = False
@@ -2197,6 +2501,173 @@ if st.session_state.get('har_kort_analys') and input_text:
                     filter_rules_df.to_csv(outdir / f"filterregler_{spelform}_{stamp}.csv", index=False, sep=';', encoding='utf-8-sig')
                     (outdir / f"helgardering_export_{spelform}_{stamp}.txt").write_text(helg_text, encoding='utf-8')
                     st.success(f"Sparat i {outdir.resolve()}")
+
+        # --- TIPSETMATRIX 12 ---
+        if cb_tipsetmatrix:
+            st.markdown("---")
+            st.subheader("🧮 TipsetMatrix 12-rätts reducering")
+            st.caption(
+                "Motorn reducerar en exakt grundram efter softfilter och bygger garantitabell mot den filtrerade radmassan. "
+                "Garantin gäller bara om 13-rättsraden finns kvar efter grundram och filter."
+            )
+
+            tm_frame = None
+            tm_frame_note = ""
+            if tm_frame_source == "Klickbar grundram":
+                tm_frame = tm_click_frame
+                tm_frame_note = "Klickbar grundram"
+            elif tm_frame_source == "Textgrundram":
+                tm_frame, tm_err = parse_frame_text(tm_text_frame_input, antal_matcher)
+                tm_frame_note = "Textgrundram"
+                if tm_err:
+                    st.error(tm_err)
+            else:
+                hist_rows_for_tm = [str(r).strip().upper() for r in v_m['Correct_Row'].astype(str) if len(str(r).strip()) == antal_matcher]
+                match_tm_stats = build_match_ai_stats(v_m, filter_vec, antal_matcher)
+                tm_frame, tm_frame_eval = optimize_frame_budgeted(
+                    hist_rows_for_tm,
+                    match_tm_stats,
+                    antal_matcher,
+                    max_rows=int(tm_base_limit),
+                    max_full=int(slider_frame_max_full)
+                )
+                tm_frame_note = "AI-Balansram"
+
+            if tm_frame:
+                tm_rows, tm_base_count, tm_ok, tm_msg = generate_rows_from_frame(tm_frame, max_rows=int(tm_base_limit))
+                ctm1, ctm2, ctm3, ctm4 = st.columns(4)
+                with ctm1:
+                    st.metric("Grundram", f"{tm_base_count:,}".replace(',', ' '), tm_frame_note)
+                with ctm2:
+                    st.metric("Softkrav", f"{slider_pass_req} av {total_active}")
+                with ctm3:
+                    st.metric("Motor", tm_mode)
+                with ctm4:
+                    st.metric("Max slutrader", f"{int(tm_output_limit):,}".replace(',', ' '))
+
+                with st.expander("Visa grundram som reduceras"):
+                    st.code(frame_export_text(tm_frame), language="text")
+
+                if not tm_ok:
+                    st.warning(tm_msg)
+                else:
+                    with st.spinner("Filtrerar exakt grundram och kör TipsetMatrix 12..."):
+                        # Softfiltrera exakt grundram med samma poängfunktion som filterrevisionen.
+                        tm_scored = []
+                        for rr in tm_rows:
+                            pts = score_candidate_row(rr) if total_active > 0 else 0
+                            tm_scored.append((rr, pts, row_log_probability(rr, filter_vec)))
+                        tm_filtered_scored = [x for x in tm_scored if x[1] >= slider_pass_req]
+
+                        truncated = False
+                        if len(tm_filtered_scored) > int(tm_filter_limit):
+                            truncated = True
+                            # Säkerhet för Streamlit: behåll bästa raderna om filtermassan är för stor.
+                            # Garantitabellen gäller då mot toppurvalet, inte hela filtrerade massan.
+                            tm_filtered_scored = sorted(tm_filtered_scored, key=lambda x: (x[1], x[2]), reverse=True)[:int(tm_filter_limit)]
+
+                        tm_filtered_rows = [x[0] for x in tm_filtered_scored]
+                        if tm_weighting == "Neutral":
+                            tm_scores = [0.0 for _ in tm_filtered_scored]
+                        elif tm_weighting == "Filterpoäng":
+                            tm_scores = [float(x[1]) for x in tm_filtered_scored]
+                        else:
+                            logs = [float(x[2]) for x in tm_filtered_scored]
+                            if logs:
+                                mn, mx = min(logs), max(logs)
+                                span = max(mx - mn, 1e-9)
+                                tm_scores = [float(x[1]) * 10.0 + ((float(x[2]) - mn) / span) * 5.0 for x in tm_filtered_scored]
+                            else:
+                                tm_scores = []
+
+                        tm_reduced_rows, tm_meta = tipsetmatrix12_reduce(
+                            tm_filtered_rows,
+                            row_scores=tm_scores,
+                            mode=tm_mode,
+                            max_output_rows=int(tm_output_limit),
+                            seed=int(tm_seed)
+                        )
+                        tm_gtable, tm_gsum = build_tipsetmatrix_guarantee_table(
+                            tm_filtered_rows,
+                            tm_reduced_rows,
+                            antal_matcher,
+                            prob_vector=filter_vec
+                        )
+
+                    if truncated:
+                        st.warning(
+                            f"Efter softfilter fanns fler än spärren {int(tm_filter_limit):,} rader. "
+                            "TipsetMatrix kördes på de högst rankade raderna. Garantitabellen gäller därför mot detta toppurval. "
+                            "Höj spärren om du vill räkna på hela filtermassan."
+                        )
+
+                    if len(tm_filtered_rows) == 0:
+                        st.error("Inga rader överlevde softfiltret i den valda grundramen. Sänk softkravet eller bredda ramen.")
+                    else:
+                        ctm5, ctm6, ctm7, ctm8 = st.columns(4)
+                        with ctm5:
+                            st.metric("Efter filter", f"{len(tm_filtered_rows):,}".replace(',', ' '))
+                        with ctm6:
+                            st.metric("Efter TipsetMatrix", f"{len(tm_reduced_rows):,}".replace(',', ' '), f"-{tm_gsum['reduceringsgrad']:.1f}%")
+                        with ctm7:
+                            st.metric("12+ garanti", f"{tm_gsum['12plus']:.2f}%", f"min {tm_gsum['min_garanti']} rätt")
+                        with ctm8:
+                            st.metric("13-chans", f"{tm_gsum['13_oviktad']:.2f}%", f"viktad {tm_gsum['13_viktad']:.2f}%")
+
+                        if not tm_meta.get('complete', False):
+                            st.error(
+                                f"Reduceraren täckte {tm_meta.get('covered_pct', 0):.2f}% av filtermassan med max {int(tm_output_limit)} rader. "
+                                "Höj max slutrader eller kör Balans/Max för full 12-garanti."
+                            )
+                        else:
+                            st.success("TipsetMatrix hittade full 12-rättsgaranti inom den filtrerade radmassan.")
+
+                        st.markdown("### 📊 Garantitabell – TipsetMatrix 12")
+                        st.dataframe(tm_gtable, use_container_width=True, hide_index=True)
+
+                        with st.expander("Visa reducerade rader"):
+                            st.code("\n".join(tm_reduced_rows[:1000]), language="text")
+                            if len(tm_reduced_rows) > 1000:
+                                st.caption("Visar första 1000 raderna i appen. Nedladdningen innehåller alla.")
+
+                        tm_export_lines = [
+                            f"TIPSETMATRIX 12 - {spelform}",
+                            f"Skapad: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                            f"Grundram: {frame_export_text(tm_frame)}",
+                            f"Grundram rader: {tm_base_count}",
+                            f"Efter filter: {len(tm_filtered_rows)}",
+                            f"Efter TipsetMatrix: {len(tm_reduced_rows)}",
+                            f"12+ garanti: {tm_gsum['12plus']:.2f}%",
+                            f"13-chans oviktad: {tm_gsum['13_oviktad']:.2f}%",
+                            f"13-chans viktad: {tm_gsum['13_viktad']:.2f}%",
+                            "",
+                            "REDUCERADE RADER",
+                            *tm_reduced_rows,
+                        ]
+                        tm_export_text = "\n".join(tm_export_lines)
+                        dl_tm1, dl_tm2 = st.columns(2)
+                        with dl_tm1:
+                            st.download_button(
+                                "⬇️ Ladda ner reducerade rader TXT",
+                                "\n".join(tm_reduced_rows).encode('utf-8'),
+                                file_name=f"tipsetmatrix12_rader_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                                mime="text/plain"
+                            )
+                        with dl_tm2:
+                            st.download_button(
+                                "⬇️ Ladda ner TipsetMatrix-rapport TXT",
+                                tm_export_text.encode('utf-8'),
+                                file_name=f"tipsetmatrix12_rapport_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                                mime="text/plain"
+                            )
+
+            if cb_tm_backtest:
+                st.markdown("---")
+                st.subheader("📈 Backtest-panel")
+                st.info(
+                    "Första v11.1-alpha innehåller motorn, exakt grundram och garantitabell. "
+                    "Nästa patch bör lägga walk-forward-backtest ovanpå samma funktioner: varje historisk omgång får då bara använda äldre omgångar."
+                )
 
         # --- AI-RAM & U-FILTER ---
         if cb_ai_frame:
