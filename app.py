@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v11.1f – Proffsflöde, AutoFilter & FAT-sekvenser"
+APP_VERSION = "v11.1g – AutoSoft 20/30 & historiskt styrd reducering"
 
 
 st.markdown("""
@@ -1791,6 +1791,11 @@ with st.sidebar:
     defaults = profile_defaults[filter_profile]
 
     slider_top_n = st.slider("Liknande historiska omgångar", 5, 100, int(defaults["top_n"]), step=5)
+    slider_combined_min_hist_pct = st.slider(
+        "Min samlad mallträff %",
+        50, 95, 67, step=1,
+        help="AutoFilter väljer hårdaste softkravet som fortfarande klarar denna historiska träff. 67 % motsvarar ca 20 av 30 omgångar."
+    )
     slider_core_val = st.slider("Värdeintervall / kärna %", 40, 100, int(defaults["core_val"]), step=5)
     slider_core_str = st.slider("Strukturintervall / kärna %", 40, 100, int(defaults["core_str"]), step=5)
 
@@ -1910,14 +1915,24 @@ with st.sidebar:
     ]
     total_active = sum(active_filters_list)
     if total_active > 0:
-        auto_pass_req = max(1, min(total_active, int(np.ceil(total_active * float(defaults["pass_ratio"])))))
+        auto_pass_req = max(1, min(total_active, int(np.ceil(total_active * float(defaults["pass_ratio"])))) )
     else:
         auto_pass_req = 0
+
+    # Detta är bara ett preliminärt krav innan historiska facitrader har poängsatts.
+    # Det slutliga kravet väljs längre ned: hårdaste softkrav som klarar vald samlad mallträff
+    # (standard 67 % = ungefär 20 av 30 historiska omgångar).
+    manual_soft_req = False
     if expert_mode and total_active > 0:
-        slider_pass_req = st.slider("Softkrav: minsta antal uppfyllda krav", 1, total_active, auto_pass_req)
+        manual_soft_req = st.checkbox("Styr softkrav manuellt", value=False)
+        if manual_soft_req:
+            slider_pass_req = st.slider("Softkrav: minsta antal uppfyllda krav", 1, total_active, auto_pass_req)
+        else:
+            slider_pass_req = auto_pass_req
+            st.metric("Preliminärt softkrav", f"{slider_pass_req} av {total_active}")
     else:
         slider_pass_req = auto_pass_req
-        st.metric("Auto valt softkrav", f"{slider_pass_req} av {total_active}")
+        st.metric("Preliminärt softkrav", f"{slider_pass_req} av {total_active}")
 
 # --- MAIN AREA FÖR INMATNING ---
 st.markdown(
@@ -2432,11 +2447,44 @@ if st.session_state.get('har_kort_analys') and input_text:
             if pts == total_active: hard_all_hits += 1
             if pts >= slider_pass_req: mall_hits += 1
 
+        # Historiskt styrt softkrav:
+        # välj hårdaste krav X av N som fortfarande klarar minsta samlade mallträff.
+        # Standard i sidomenyn är 67 %, dvs ungefär 20 av 30 omgångar.
+        hist_total_for_soft = len(history_filter_scores)
+        target_soft_hits = int(np.ceil(hist_total_for_soft * (float(slider_combined_min_hist_pct) / 100.0))) if hist_total_for_soft else 0
+        target_soft_hits = max(1, min(hist_total_for_soft, target_soft_hits)) if hist_total_for_soft else 0
+        soft_req_options = []
+        if total_active > 0 and hist_total_for_soft > 0:
+            for req in range(total_active, 0, -1):
+                hits_req = sum(1 for s in history_filter_scores if s >= req)
+                soft_req_options.append({
+                    "Softkrav": req,
+                    "Historiska träffar": hits_req,
+                    "Historisk träff %": round((hits_req / hist_total_for_soft) * 100, 1),
+                })
+            if not manual_soft_req:
+                valid_reqs = [r for r in soft_req_options if r["Historiska träffar"] >= target_soft_hits]
+                if valid_reqs:
+                    # Listan går från hårdast till mjukast, så första godkända är rätt val.
+                    slider_pass_req = int(valid_reqs[0]["Softkrav"])
+                else:
+                    # Om inget krav klarar målet: använd mjukaste möjliga och visa varning.
+                    slider_pass_req = 1
+
+        mall_hits = sum(1 for s in history_filter_scores if s >= slider_pass_req)
         hard_all_pct = (hard_all_hits / len(v_m) * 100) if len(v_m) else 0.0
         soft_hit_pct = (mall_hits / len(v_m) * 100) if len(v_m) else 0.0
-        st.info(f"📈 **SAMMANLAGD HISTORISK TRÄFF:** Softfilter {mall_hits} av {len(v_m)} rader ({soft_hit_pct:.1f}%) klarade minst {slider_pass_req} av {total_active} aktiva filter.")
+        soft_status = "✅ Godkänd" if mall_hits >= target_soft_hits else "⚠️ Under mål"
+        st.info(
+            f"📈 **SAMMANLAGD HISTORISK TRÄFF:** {soft_status}. "
+            f"Softfilter {mall_hits} av {len(v_m)} rader ({soft_hit_pct:.1f}%) klarade minst {slider_pass_req} av {total_active} aktiva filter. "
+            f"Mål: minst {target_soft_hits} av {len(v_m)} ({float(slider_combined_min_hist_pct):.0f}%)."
+        )
         if total_active > 0:
-            st.caption(f"Om samma filter hade körts som helt hårda AND-filter hade {hard_all_hits} av {len(v_m)} historiska rader klarat alla {total_active} filter ({hard_all_pct:.1f}%).")
+            st.caption(
+                f"AutoSoft väljer hårdaste softkrav som klarar den samlade historiska mallträffen. "
+                f"Om samma filter hade körts som helt hårda AND-filter hade {hard_all_hits} av {len(v_m)} historiska rader klarat alla {total_active} filter ({hard_all_pct:.1f}%)."
+            )
 
         # --- FILTERSTYRKA, FILTERREGLER OCH HELGARDERING-EXPORT ---
         # candidate_rows / total_candidates / match_odds_filter skapades redan ovan för AutoTrim.
@@ -2500,6 +2548,25 @@ if st.session_state.get('har_kort_analys') and input_text:
         combined_hard_keep_pct = (combined_hard_survivors / total_candidates * 100) if total_candidates else 0.0
         combined_soft_keep_pct = (combined_soft_survivors / total_candidates * 100) if total_candidates else 0.0
         combined_est_label = "exakt" if exact_universe else "estimat"
+
+        # Komplett beslutstabell för softkravet: historisk träff + radmassa.
+        soft_req_decision_rows = []
+        if total_active > 0 and hist_total_for_soft > 0:
+            for r in soft_req_options:
+                req = int(r["Softkrav"])
+                keep_rows_req = sum(cnt for score, cnt in combined_score_counts.items() if score >= req)
+                keep_pct_req = (keep_rows_req / total_candidates * 100) if total_candidates else 0.0
+                hist_hits_req = int(r["Historiska träffar"])
+                soft_req_decision_rows.append({
+                    "Vald": "✅" if req == slider_pass_req else "",
+                    "Softkrav": f"{req} av {total_active}",
+                    "Historisk träff": f"{hist_hits_req}/{hist_total_for_soft}",
+                    "Historisk träff %": round((hist_hits_req / hist_total_for_soft) * 100, 1),
+                    "Kvar rader": int(keep_rows_req),
+                    "Kvar rad %": round(keep_pct_req, 1),
+                    "Reducerar %": round(100 - keep_pct_req, 1),
+                    "Godkänd mot mål": "Ja" if hist_hits_req >= target_soft_hits else "Nej",
+                })
 
         def pct_count(predicate, n_items):
             return (sum(1 for i in range(n_items) if predicate(i)) / n_items) * 100 if n_items else 0.0
@@ -2904,20 +2971,36 @@ if st.session_state.get('har_kort_analys') and input_text:
                     )
 
             st.markdown("**Sammanlagd mallträff**")
-            csum1, csum2, csum3, csum4 = st.columns(4)
+            csum1, csum2, csum3, csum4, csum5 = st.columns(5)
             with csum1:
-                st.metric("Historisk soft-träff", f"{soft_hit_pct:.1f}%", f"{mall_hits}/{len(v_m)}")
+                st.metric("Mål", f"{target_soft_hits}/{len(v_m)}", f"{float(slider_combined_min_hist_pct):.0f}%")
             with csum2:
-                st.metric("Historisk hård träff", f"{hard_all_pct:.1f}%", f"{hard_all_hits}/{len(v_m)}")
+                st.metric("Historisk soft-träff", f"{soft_hit_pct:.1f}%", f"{mall_hits}/{len(v_m)}")
             with csum3:
-                st.metric(f"Kvar rader soft ({combined_est_label})", f"{combined_soft_keep_pct:.1f}%", f"{combined_soft_survivors}/{total_candidates}")
+                st.metric("Historisk hård träff", f"{hard_all_pct:.1f}%", f"{hard_all_hits}/{len(v_m)}")
             with csum4:
+                st.metric(f"Kvar rader soft ({combined_est_label})", f"{combined_soft_keep_pct:.1f}%", f"{combined_soft_survivors}/{total_candidates}")
+            with csum5:
                 st.metric(f"Kvar rader hårt ({combined_est_label})", f"{combined_hard_keep_pct:.1f}%", f"{combined_hard_survivors}/{total_candidates}")
 
+            if mall_hits >= target_soft_hits:
+                st.success(
+                    f"AutoSoft valde **{slider_pass_req} av {total_active}** eftersom det är hårdaste krav som klarar minst "
+                    f"{target_soft_hits} av {len(v_m)} historiska omgångar."
+                )
+            else:
+                st.warning(
+                    f"Ingen softnivå klarade målet {target_soft_hits}/{len(v_m)} fullt ut. Appen använder mjukaste nivån och du bör bredda intervall/filter."
+                )
+
             st.caption(
-                "Individuella filter på 90-95 % kan tillsammans få mycket lägre träff om de körs som hårda AND-filter. "
-                "Softfiltret räknar i stället hur många filter raden klarar, och är därför huvudvärdet att styra på."
+                "Individuella filter kan vara starka var för sig men tillsammans bli för hårda. "
+                "AutoSoft testar därför alla softkrav och väljer hårdaste nivå som klarar minsta samlade historiska mallträff."
             )
+
+            if soft_req_decision_rows:
+                with st.expander("Visa hur AutoSoft valde softkrav", expanded=False):
+                    st.dataframe(pd.DataFrame(soft_req_decision_rows), use_container_width=True, hide_index=True)
 
             cdiag1, cdiag2, cdiag3, cdiag4 = st.columns(4)
             with cdiag1:
