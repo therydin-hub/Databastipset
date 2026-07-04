@@ -2650,18 +2650,22 @@ if st.session_state.get('har_kort_analys') and input_text:
                         )
                         cfc1, cfc2 = st.columns([2, 1])
                         with cfc1:
-                            tm_facit_text = st.text_input(
+                            # Streamlit Cloud kan ibland få cache-/frontendfel på st.text_input efter deploy.
+                            # st.text_area använder annan frontend-komponent och är stabilare här.
+                            tm_facit_text = st.text_area(
                                 f"Facitrad ({antal_matcher} tecken, valfritt)",
                                 value="",
                                 placeholder="Exempel: 1X2112X21X...",
-                                key=f"tm_facit_{spelform}_{antal_matcher}"
+                                key=f"tm_facit_{spelform}_{antal_matcher}",
+                                height=68
                             )
                         with cfc2:
-                            tm_test_label = st.text_input(
+                            tm_test_label = st.text_area(
                                 "Testnamn/datum",
                                 value="",
                                 placeholder="t.ex. 2024-10-12",
-                                key=f"tm_testlabel_{spelform}_{antal_matcher}"
+                                key=f"tm_testlabel_{spelform}_{antal_matcher}",
+                                height=68
                             )
 
                 if not tm_ok:
