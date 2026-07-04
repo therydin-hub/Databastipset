@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v11.1g – AutoSoft 20/30 & historiskt styrd reducering"
+APP_VERSION = "v11.1h – HardSoft Mix & TipsetMatrix garanti"
 
 
 st.markdown("""
@@ -1767,7 +1767,7 @@ if st.session_state['aktuell_spelform'] != spelform:
 # --- SIDEBAR (REN KONTROLLPANEL) ---
 with st.sidebar:
     st.header("🎛️ Kontrollpanel")
-    st.caption("Normal-läget kör alla filter automatiskt. Använd expertläge bara vid felsökning.")
+    st.caption("Normal-läget blandar breda hårda filter med smalare softfilter. Expertläge används bara vid felsökning.")
 
     if st.button("🧹 Töm minne / rensa cache", use_container_width=True):
         st.cache_data.clear()
@@ -1794,7 +1794,7 @@ with st.sidebar:
     slider_combined_min_hist_pct = st.slider(
         "Min samlad mallträff %",
         50, 95, 67, step=1,
-        help="AutoFilter väljer hårdaste softkravet som fortfarande klarar denna historiska träff. 67 % motsvarar ca 20 av 30 omgångar."
+        help="AutoHard+AutoSoft väljer hårdaste kombination av breda hårda filter och smalare softfilter som fortfarande klarar denna historiska träff. 67 % motsvarar ca 20 av 30 omgångar."
     )
     slider_core_val = st.slider("Värdeintervall / kärna %", 40, 100, int(defaults["core_val"]), step=5)
     slider_core_str = st.slider("Strukturintervall / kärna %", 40, 100, int(defaults["core_str"]), step=5)
@@ -1824,7 +1824,8 @@ with st.sidebar:
     tm_frame_source = st.selectbox("Grundram", ["Klickbar grundram", "AI-Balansram", "Textgrundram"], index=0)
     tm_base_limit = st.select_slider("Max rader i grundram", options=[1000, 2500, 5000, 10000, 15000, 25000, 50000, 75000], value=25000)
     tm_filter_limit = st.select_slider("Max rader efter filter", options=[500, 1000, 1500, 2500, 5000, 10000, 20000], value=5000)
-    tm_output_limit = st.select_slider("Max reducerade rader", options=[50, 100, 150, 200, 300, 500, 750, 1000], value=300)
+    tm_output_limit = st.select_slider("Max reducerade rader i budgetläge", options=[50, 100, 150, 200, 300, 500, 750, 1000], value=300)
+    tm_guarantee_mode = st.toggle("Kör till full 12-garanti", value=True, help="På = motorn stannar inte vid maxrader, utan kör tills hela filtrerade radmassan är 12-täckt. Av = budgetläge med maxrader.")
     tm_mode = st.selectbox("Motorläge", ["Snabb", "Balans", "Max"], index=1)
     tm_weighting = st.selectbox("Viktning", ["Filterpoäng + sannolikhet", "Filterpoäng", "Neutral"], index=0)
     tm_seed = st.number_input("Seed", min_value=1, max_value=999999, value=42, step=1)
@@ -1905,7 +1906,7 @@ with st.sidebar:
             cb_group_fat = st.checkbox("FAT-profilgrupp", value=cb_group_fat)
             cb_group_structure = st.checkbox("Strukturgrupp", value=cb_group_structure)
     else:
-        st.info("Alla filter är aktiva. Appen väljer styrka via AutoTrim, pro-grupper och softkrav.")
+        st.info("Alla filter är aktiva. Appen väljer automatiskt breda hårda filter först och smalare softfilter efteråt.")
 
     active_filters_list = [
         cb_u_favs, cb_sft, cb_fat, cb_fat_sequences, cb_points, cb_100minus, cb_log_surprise, cb_rank24, cb_totaldiff,
@@ -2403,6 +2404,161 @@ if st.session_state.get('har_kort_analys') and input_text:
                     est_rader = int(1594323 * (sm_survivors / total_test))
                     st.success(f"✂️ **Omedelbar effekt (AI-Estimat):** Bara detta Super-Makro ensamt slaktar bort ca **{red_pct:.1f}%** av de matematiska raderna! (Kvar: ca {est_rader:,} av 1 594 323 rader)".replace(',', ' '))
 
+        # --- AUTOHARD: breda hårda filter före smalare softfilter ---
+        # Hårda filter använder säkerhetsintervall/breda intervall. De ska inte vara knivskarpa,
+        # utan rensa bort uppenbart felaktiga rader innan softfiltret prioriterar hårdare.
+        def _hard_interval(key, fallback):
+            meta = autotrim_meta.get(key, {}) if isinstance(autotrim_meta, dict) else {}
+            safe = meta.get('Säkerhetsintervall')
+            return safe if safe is not None else fallback
+
+        h_sft = _hard_interval('SFT Summa', c_sft)
+        h_points = _hard_interval('Poängfilter', c_points)
+        h_minus = _hard_interval('100-minus Summa', c_minus)
+        h_log_surprise = _hard_interval('Skrälltryck Log Summa', c_log_surprise)
+        h_rank24 = _hard_interval('Rank Summa', c_rank24)
+        h_totaldiff = _hard_interval('Total Diff', c_totaldiff)
+        h_u = _hard_interval(f'Topp {slider_u_count} favoriter', c_u)
+        h_fav_delta = _hard_interval('Favorit-delta', c_fav_delta)
+        h_fat_seq2 = _hard_interval('FAT 2-sekvenser', c_fat_seq2)
+        h_fat_seq3 = _hard_interval('FAT 3-sekvenser', c_fat_seq3)
+        h_fat_pairs = _hard_interval('FAT dubbelchans', c_fat_pairs)
+
+        def _gate_req(n, ratio=0.67):
+            return max(1, int(np.ceil(max(1, n) * ratio)))
+
+        def _super_macro_hist_ok(i):
+            if not cb_super_macro:
+                return False
+            g_pass = 0
+            b = sm_bounds
+            if sum([b['1'][0] <= ones[i] <= b['1'][1], b['X'][0] <= draws[i] <= b['X'][1], b['2'][0] <= twos[i] <= b['2'][1]]) >= 2: g_pass += 1
+            if sum([b['s1'][0] <= s1[i] <= b['s1'][1], b['sx'][0] <= sx[i] <= b['sx'][1], b['s2'][0] <= s2[i] <= b['s2'][1]]) >= 2: g_pass += 1
+            if sum([b['g1'][0] <= g1[i] <= b['g1'][1], b['gx'][0] <= gx[i] <= b['gx'][1], b['g2'][0] <= g2[i] <= b['g2'][1]]) >= 2: g_pass += 1
+            if sum([b['si1'][0] <= sing1[i] <= b['si1'][1], b['six'][0] <= singx[i] <= b['six'][1], b['si2'][0] <= sing2[i] <= b['si2'][1]]) >= 2: g_pass += 1
+            if sum([b['d1'][0] <= dub1[i] <= b['d1'][1], b['dx'][0] <= dubx[i] <= b['dx'][1], b['d2'][0] <= dub2[i] <= b['d2'][1]]) >= 2: g_pass += 1
+            if sum([b['t1'][0] <= trip1[i] <= b['t1'][1], b['tx'][0] <= tripx[i] <= b['tx'][1], b['t2'][0] <= trip2[i] <= b['t2'][1]]) >= 2: g_pass += 1
+            if sum([b['o1'][0] <= occ1[i] <= b['o1'][1], b['ox'][0] <= occx[i] <= b['ox'][1], b['o2'][0] <= occ2[i] <= b['o2'][1]]) >= 2: g_pass += 1
+            if sum([b['f'][0] <= fat_f[i] <= b['f'][1], b['a'][0] <= fat_a[i] <= b['a'][1], b['t'][0] <= fat_t[i] <= b['t'][1]]) >= 2: g_pass += 1
+            return g_pass >= slider_super_groups
+
+        def hard_history_bools(i):
+            gates = []
+            # Gate 1: Risk/värde – breda säkerhetsintervall, krav på majoritet.
+            risk_checks = []
+            if cb_sft: risk_checks.append(in_range(sft_sums[i], h_sft))
+            if cb_points: risk_checks.append(in_range(points_vals[i], h_points))
+            if cb_100minus: risk_checks.append(in_range(minus_sums[i], h_minus))
+            if cb_log_surprise: risk_checks.append(in_range(log_surprise_sums[i], h_log_surprise))
+            if cb_rank24: risk_checks.append(in_range(rank24_sums[i], h_rank24))
+            if cb_totaldiff: risk_checks.append(in_range(total_diff_vals[i], h_totaldiff))
+            if risk_checks:
+                gates.append(sum(risk_checks) >= _gate_req(len(risk_checks), 0.67))
+
+            # Gate 2: FAT-profil – bred men fortfarande hård.
+            if cb_fat:
+                gates.append(c_fatf[0] <= fat_f[i] <= c_fatf[1] and c_fata[0] <= fat_a[i] <= c_fata[1] and c_fatt[0] <= fat_t[i] <= c_fatt[1] and c_fatsum[0] <= fat_sums[i] <= c_fatsum[1])
+
+            # Gate 3: FAT-sekvenser – bredare säkerhetsintervall än softvarianten.
+            seq_checks = []
+            if cb_fat_sequences and i < len(fat_strings_hist):
+                fstr = fat_strings_hist[i]
+                if fat_seq2_list: seq_checks.append(in_range(count_fat_sequence_hits(fstr, fat_seq2_list), h_fat_seq2))
+                if fat_seq3_list: seq_checks.append(in_range(count_fat_sequence_hits(fstr, fat_seq3_list), h_fat_seq3))
+                if fat_pair_list: seq_checks.append(in_range(count_fat_pair_hits(fstr, fat_pair_list), h_fat_pairs))
+            if seq_checks:
+                gates.append(sum(seq_checks) >= max(1, min(2, len(seq_checks))))
+
+            # Gate 4: Struktur – bred strukturmajoritet, inte alla strukturfilter som AND.
+            struct_checks = []
+            if cb_base: struct_checks.append(c_ones[0] <= ones[i] <= c_ones[1] and c_draws[0] <= draws[i] <= c_draws[1] and c_twos[0] <= twos[i] <= c_twos[1])
+            if cb_streak: struct_checks.append(c_s1[0] <= s1[i] <= c_s1[1] and c_sx[0] <= sx[i] <= c_sx[1] and c_s2[0] <= s2[i] <= c_s2[1])
+            if cb_gap: struct_checks.append(c_g1[0] <= g1[i] <= c_g1[1] and c_gx[0] <= gx[i] <= c_gx[1] and c_g2[0] <= g2[i] <= c_g2[1])
+            if cb_single: struct_checks.append(c_sing1[0] <= sing1[i] <= c_sing1[1] and c_singx[0] <= singx[i] <= c_singx[1] and c_sing2[0] <= sing2[i] <= c_sing2[1] and c_singtot[0] <= sing_tot[i] <= c_singtot[1])
+            if cb_doublet: struct_checks.append(c_dub1[0] <= dub1[i] <= c_dub1[1] and c_dubx[0] <= dubx[i] <= c_dubx[1] and c_dub2[0] <= dub2[i] <= c_dub2[1] and c_dubtot[0] <= dub_tot[i] <= c_dubtot[1])
+            if cb_triplet: struct_checks.append(c_trip1[0] <= trip1[i] <= c_trip1[1] and c_tripx[0] <= tripx[i] <= c_tripx[1] and c_trip2[0] <= trip2[i] <= c_trip2[1] and c_triptot[0] <= trip_tot[i] <= c_triptot[1])
+            if cb_occur: struct_checks.append(c_occ1[0] <= occ1[i] <= c_occ1[1] and c_occx[0] <= occx[i] <= c_occx[1] and c_occ2[0] <= occ2[i] <= c_occ2[1] and c_occtot[0] <= occ_tot[i] <= c_occtot[1])
+            if struct_checks:
+                gates.append(sum(struct_checks) >= _gate_req(len(struct_checks), 0.60))
+
+            # Gate 5: Super-Makro som eget bredare stödfilter.
+            if cb_super_macro:
+                gates.append(_super_macro_hist_ok(i))
+
+            # Gate 6: Favorit/skrällbalans – minst hälften av aktiva delbilder.
+            fs_checks = []
+            if cb_u_favs: fs_checks.append(in_range(u_wins[i], h_u))
+            if cb_fav_pressure: fs_checks.append(in_range(fav70_wins[i], c_fav70) and in_range(fav60_wins[i], c_fav60) and in_range(fav50_wins[i], c_fav50))
+            if cb_shock_strength: fs_checks.append(in_range(shock_u10[i], c_shock10) and in_range(shock_u15[i], c_shock15) and in_range(shock_u20[i], c_shock20) and in_range(shock_lowest[i], c_shock_lowest))
+            if cb_fav_delta: fs_checks.append(in_range(fav_delta_vals[i], h_fav_delta))
+            if fs_checks:
+                gates.append(sum(fs_checks) >= _gate_req(len(fs_checks), 0.50))
+            return gates
+
+        def hard_candidate_bools(tr):
+            gates = []
+            c1, cx, c2 = tr.count('1'), tr.count('X'), tr.count('2')
+            s1_c, sx_c, s2_c, _ = get_streaks(tr)
+            g1_c, gx_c, g2_c, _ = get_gaps(tr)
+            si1_c, six_c, si2_c, singtot_c, _ = get_singles(tr)
+            d1_c, dx_c, d2_c, dubtot_c, _ = get_doublets(tr)
+            t1_c, tx_c, t2_c, triptot_c, _ = get_triplets(tr)
+            o1_c, ox_c, o2_c, occtot_c, _ = get_occurrences(tr)
+            f_c, a_c, t_c, fsum_c = get_fat(tr, filter_vec)
+
+            risk_checks = []
+            if cb_sft: risk_checks.append(in_range(get_sft_sum(tr, filter_vec), h_sft))
+            if cb_points: risk_checks.append(in_range(get_rank_points(tr, filter_vec), h_points))
+            if cb_100minus: risk_checks.append(in_range(get_100_minus_sum(tr, filter_vec), h_minus))
+            if cb_log_surprise: risk_checks.append(in_range(get_log_surprise_sum(tr, filter_vec), h_log_surprise))
+            if cb_rank24: risk_checks.append(in_range(get_rank_sum(tr, filter_vec), h_rank24))
+            if cb_totaldiff: risk_checks.append(in_range(calculate_total_diff(match_odds_filter, list(tr)), h_totaldiff))
+            if risk_checks:
+                gates.append(sum(risk_checks) >= _gate_req(len(risk_checks), 0.67))
+            if cb_fat:
+                gates.append(in_range(f_c, c_fatf) and in_range(a_c, c_fata) and in_range(t_c, c_fatt) and in_range(fsum_c, c_fatsum))
+            seq_checks = []
+            if cb_fat_sequences:
+                fstr = get_fat_string(tr, filter_vec)
+                if fat_seq2_list: seq_checks.append(in_range(count_fat_sequence_hits(fstr, fat_seq2_list), h_fat_seq2))
+                if fat_seq3_list: seq_checks.append(in_range(count_fat_sequence_hits(fstr, fat_seq3_list), h_fat_seq3))
+                if fat_pair_list: seq_checks.append(in_range(count_fat_pair_hits(fstr, fat_pair_list), h_fat_pairs))
+            if seq_checks:
+                gates.append(sum(seq_checks) >= max(1, min(2, len(seq_checks))))
+            struct_checks = []
+            if cb_base: struct_checks.append(in_range(c1, c_ones) and in_range(cx, c_draws) and in_range(c2, c_twos))
+            if cb_streak: struct_checks.append(in_range(s1_c, c_s1) and in_range(sx_c, c_sx) and in_range(s2_c, c_s2))
+            if cb_gap: struct_checks.append(in_range(g1_c, c_g1) and in_range(gx_c, c_gx) and in_range(g2_c, c_g2))
+            if cb_single: struct_checks.append(in_range(si1_c, c_sing1) and in_range(six_c, c_singx) and in_range(si2_c, c_sing2) and in_range(singtot_c, c_singtot))
+            if cb_doublet: struct_checks.append(in_range(d1_c, c_dub1) and in_range(dx_c, c_dubx) and in_range(d2_c, c_dub2) and in_range(dubtot_c, c_dubtot))
+            if cb_triplet: struct_checks.append(in_range(t1_c, c_trip1) and in_range(tx_c, c_tripx) and in_range(t2_c, c_trip2) and in_range(triptot_c, c_triptot))
+            if cb_occur: struct_checks.append(in_range(o1_c, c_occ1) and in_range(ox_c, c_occx) and in_range(o2_c, c_occ2) and in_range(occtot_c, c_occtot))
+            if struct_checks:
+                gates.append(sum(struct_checks) >= _gate_req(len(struct_checks), 0.60))
+            if cb_super_macro:
+                gates.append(pass_super_macro_row(tr, filter_vec, sm_bounds, slider_super_groups))
+            fs_checks = []
+            if cb_u_favs: fs_checks.append(in_range(get_top_n_favs_wins(tr, filter_vec, slider_u_count), h_u))
+            if cb_fav_pressure:
+                fp_c = get_favorite_pressure(tr, filter_vec)
+                fs_checks.append(in_range(fp_c['F70_Wins'], c_fav70) and in_range(fp_c['F60_Wins'], c_fav60) and in_range(fp_c['F50_Wins'], c_fav50))
+            if cb_shock_strength:
+                sh_c = get_shock_strength(tr, filter_vec)
+                fs_checks.append(in_range(sh_c['U10_Wins'], c_shock10) and in_range(sh_c['U15_Wins'], c_shock15) and in_range(sh_c['U20_Wins'], c_shock20) and in_range(sh_c['Lowest_Win_Pct'], c_shock_lowest))
+            if cb_fav_delta: fs_checks.append(in_range(get_favorite_delta(tr, filter_vec), h_fav_delta))
+            if fs_checks:
+                gates.append(sum(fs_checks) >= _gate_req(len(fs_checks), 0.50))
+            return gates
+
+        def hard_history_score(i):
+            return sum(1 for x in hard_history_bools(i) if x)
+
+        def hard_candidate_score(tr):
+            return sum(1 for x in hard_candidate_bools(tr) if x)
+
+        hard_gate_total = len(hard_history_bools(0)) if len(v_m) else 0
+        history_hard_scores = [hard_history_score(i) for i in range(len(v_m))]
+
         mall_hits = 0
         hard_all_hits = 0
         history_filter_scores = []
@@ -2471,20 +2627,11 @@ if st.session_state.get('har_kort_analys') and input_text:
                     # Om inget krav klarar målet: använd mjukaste möjliga och visa varning.
                     slider_pass_req = 1
 
+        # Slutligt krav väljs efter att både hårda gates och softpoäng har jämförts mot radmassan.
+        # Vi väntar med visning tills AutoHard+AutoSoft har valt bästa kombination.
         mall_hits = sum(1 for s in history_filter_scores if s >= slider_pass_req)
         hard_all_pct = (hard_all_hits / len(v_m) * 100) if len(v_m) else 0.0
         soft_hit_pct = (mall_hits / len(v_m) * 100) if len(v_m) else 0.0
-        soft_status = "✅ Godkänd" if mall_hits >= target_soft_hits else "⚠️ Under mål"
-        st.info(
-            f"📈 **SAMMANLAGD HISTORISK TRÄFF:** {soft_status}. "
-            f"Softfilter {mall_hits} av {len(v_m)} rader ({soft_hit_pct:.1f}%) klarade minst {slider_pass_req} av {total_active} aktiva filter. "
-            f"Mål: minst {target_soft_hits} av {len(v_m)} ({float(slider_combined_min_hist_pct):.0f}%)."
-        )
-        if total_active > 0:
-            st.caption(
-                f"AutoSoft väljer hårdaste softkrav som klarar den samlade historiska mallträffen. "
-                f"Om samma filter hade körts som helt hårda AND-filter hade {hard_all_hits} av {len(v_m)} historiska rader klarat alla {total_active} filter ({hard_all_pct:.1f}%)."
-            )
 
         # --- FILTERSTYRKA, FILTERREGLER OCH HELGARDERING-EXPORT ---
         # candidate_rows / total_candidates / match_odds_filter skapades redan ovan för AutoTrim.
@@ -2537,10 +2684,15 @@ if st.session_state.get('har_kort_analys') and input_text:
 
         combined_soft_survivors = combined_hard_survivors = 0
         combined_score_counts = {}
+        combined_hard_score_counts = {}
+        combined_matrix_counts = {}
         if total_active > 0 and total_candidates > 0:
             for tr in candidate_rows:
                 pts_c = score_candidate_row(tr)
+                hpts_c = hard_candidate_score(tr) if hard_gate_total > 0 else 0
                 combined_score_counts[pts_c] = combined_score_counts.get(pts_c, 0) + 1
+                combined_hard_score_counts[hpts_c] = combined_hard_score_counts.get(hpts_c, 0) + 1
+                combined_matrix_counts[(hpts_c, pts_c)] = combined_matrix_counts.get((hpts_c, pts_c), 0) + 1
                 if pts_c == total_active:
                     combined_hard_survivors += 1
                 if pts_c >= slider_pass_req:
@@ -2549,23 +2701,78 @@ if st.session_state.get('har_kort_analys') and input_text:
         combined_soft_keep_pct = (combined_soft_survivors / total_candidates * 100) if total_candidates else 0.0
         combined_est_label = "exakt" if exact_universe else "estimat"
 
-        # Komplett beslutstabell för softkravet: historisk träff + radmassa.
+        # AutoHard+AutoSoft: välj den kombination som klarar minsta historiska mallträff
+        # och samtidigt lämnar lägst kvarvarande radmassa. Hårda gates är bredare, softpoängen smalare.
+        hardsoft_decision_rows = []
+        selected_hard_req = 0
+        if hard_gate_total > 0 and total_active > 0 and hist_total_for_soft > 0:
+            valid_combos = []
+            for hreq in range(hard_gate_total, 0, -1):
+                for sreq in range(total_active, 0, -1):
+                    if manual_soft_req and sreq != int(slider_pass_req):
+                        continue
+                    hist_hits_combo = sum(1 for hs, ss in zip(history_hard_scores, history_filter_scores) if hs >= hreq and ss >= sreq)
+                    keep_rows_combo = sum(cnt for (hs, ss), cnt in combined_matrix_counts.items() if hs >= hreq and ss >= sreq)
+                    keep_pct_combo = (keep_rows_combo / total_candidates * 100) if total_candidates else 0.0
+                    row = {
+                        "Hårdkrav": hreq,
+                        "Softkrav": sreq,
+                        "Historiska träffar": hist_hits_combo,
+                        "Historisk träff %": round((hist_hits_combo / hist_total_for_soft) * 100, 1),
+                        "Kvar rader": int(keep_rows_combo),
+                        "Kvar rad %": round(keep_pct_combo, 1),
+                        "Reducerar %": round(100 - keep_pct_combo, 1),
+                        "Godkänd mot mål": hist_hits_combo >= target_soft_hits,
+                    }
+                    hardsoft_decision_rows.append(row)
+                    if row["Godkänd mot mål"]:
+                        valid_combos.append(row)
+            if valid_combos:
+                # Reducering först bland historiskt godkända, därefter hårdare krav som tie-breaker.
+                chosen_combo = min(valid_combos, key=lambda r: (r["Kvar rader"], -r["Hårdkrav"], -r["Softkrav"], -r["Historiska träffar"]))
+                selected_hard_req = int(chosen_combo["Hårdkrav"])
+                slider_pass_req = int(chosen_combo["Softkrav"])
+            else:
+                selected_hard_req = 1 if hard_gate_total > 0 else 0
+                # Om inget klarar mål: välj mjukaste kombination så att något överlever.
+                slider_pass_req = 1
+        else:
+            selected_hard_req = 0
+
+        mall_hits = sum(1 for hs, ss in zip(history_hard_scores, history_filter_scores) if (hs >= selected_hard_req if hard_gate_total > 0 else True) and ss >= slider_pass_req)
+        soft_hit_pct = (mall_hits / len(v_m) * 100) if len(v_m) else 0.0
+        hardsoft_keep_rows = sum(cnt for (hs, ss), cnt in combined_matrix_counts.items() if (hs >= selected_hard_req if hard_gate_total > 0 else True) and ss >= slider_pass_req)
+        combined_soft_survivors = hardsoft_keep_rows
+        combined_soft_keep_pct = (combined_soft_survivors / total_candidates * 100) if total_candidates else 0.0
+        hard_stage_survivors = sum(cnt for score, cnt in combined_hard_score_counts.items() if score >= selected_hard_req) if hard_gate_total > 0 else total_candidates
+        hard_stage_keep_pct = (hard_stage_survivors / total_candidates * 100) if total_candidates else 0.0
+        soft_status = "✅ Godkänd" if mall_hits >= target_soft_hits else "⚠️ Under mål"
+        st.info(
+            f"📈 **AUTOHARD + AUTOSOFT:** {soft_status}. "
+            f"Valt hårt krav **{selected_hard_req} av {hard_gate_total}** breda gates + softkrav **{slider_pass_req} av {total_active}**. "
+            f"Historiskt klarar {mall_hits} av {len(v_m)} rader ({soft_hit_pct:.1f}%). "
+            f"Mål: minst {target_soft_hits} av {len(v_m)} ({float(slider_combined_min_hist_pct):.0f}%)."
+        )
+        st.caption(
+            "Hårda filter körs bredare först. Softfilter är smalare och används efteråt. "
+            f"Estimat: efter hårda filter {hard_stage_survivors}/{total_candidates} ({hard_stage_keep_pct:.1f}%), "
+            f"efter hårt+soft {combined_soft_survivors}/{total_candidates} ({combined_soft_keep_pct:.1f}%)."
+        )
+
+        # Komplett beslutstabell för AutoHard+AutoSoft.
         soft_req_decision_rows = []
-        if total_active > 0 and hist_total_for_soft > 0:
-            for r in soft_req_options:
-                req = int(r["Softkrav"])
-                keep_rows_req = sum(cnt for score, cnt in combined_score_counts.items() if score >= req)
-                keep_pct_req = (keep_rows_req / total_candidates * 100) if total_candidates else 0.0
-                hist_hits_req = int(r["Historiska träffar"])
+        if hardsoft_decision_rows:
+            for r in sorted(hardsoft_decision_rows, key=lambda x: (-x["Godkänd mot mål"], x["Kvar rader"], -x["Hårdkrav"], -x["Softkrav"]))[:80]:
                 soft_req_decision_rows.append({
-                    "Vald": "✅" if req == slider_pass_req else "",
-                    "Softkrav": f"{req} av {total_active}",
-                    "Historisk träff": f"{hist_hits_req}/{hist_total_for_soft}",
-                    "Historisk träff %": round((hist_hits_req / hist_total_for_soft) * 100, 1),
-                    "Kvar rader": int(keep_rows_req),
-                    "Kvar rad %": round(keep_pct_req, 1),
-                    "Reducerar %": round(100 - keep_pct_req, 1),
-                    "Godkänd mot mål": "Ja" if hist_hits_req >= target_soft_hits else "Nej",
+                    "Vald": "✅" if int(r["Hårdkrav"]) == int(selected_hard_req) and int(r["Softkrav"]) == int(slider_pass_req) else "",
+                    "Hårdkrav": f"{int(r['Hårdkrav'])} av {hard_gate_total}",
+                    "Softkrav": f"{int(r['Softkrav'])} av {total_active}",
+                    "Historisk träff": f"{int(r['Historiska träffar'])}/{hist_total_for_soft}",
+                    "Historisk träff %": r["Historisk träff %"],
+                    "Kvar rader": int(r["Kvar rader"]),
+                    "Kvar rad %": r["Kvar rad %"],
+                    "Reducerar %": r["Reducerar %"],
+                    "Godkänd mot mål": "Ja" if r["Godkänd mot mål"] else "Nej",
                 })
 
         def pct_count(predicate, n_items):
@@ -2975,31 +3182,31 @@ if st.session_state.get('har_kort_analys') and input_text:
             with csum1:
                 st.metric("Mål", f"{target_soft_hits}/{len(v_m)}", f"{float(slider_combined_min_hist_pct):.0f}%")
             with csum2:
-                st.metric("Historisk soft-träff", f"{soft_hit_pct:.1f}%", f"{mall_hits}/{len(v_m)}")
+                st.metric("Historisk totalträff", f"{soft_hit_pct:.1f}%", f"{mall_hits}/{len(v_m)}")
             with csum3:
                 st.metric("Historisk hård träff", f"{hard_all_pct:.1f}%", f"{hard_all_hits}/{len(v_m)}")
             with csum4:
-                st.metric(f"Kvar rader soft ({combined_est_label})", f"{combined_soft_keep_pct:.1f}%", f"{combined_soft_survivors}/{total_candidates}")
+                st.metric(f"Kvar efter hårt+soft ({combined_est_label})", f"{combined_soft_keep_pct:.1f}%", f"{combined_soft_survivors}/{total_candidates}")
             with csum5:
                 st.metric(f"Kvar rader hårt ({combined_est_label})", f"{combined_hard_keep_pct:.1f}%", f"{combined_hard_survivors}/{total_candidates}")
 
             if mall_hits >= target_soft_hits:
                 st.success(
-                    f"AutoSoft valde **{slider_pass_req} av {total_active}** eftersom det är hårdaste krav som klarar minst "
+                    f"AutoHard+AutoSoft valde **{selected_hard_req} av {hard_gate_total}** hårda gates och **{slider_pass_req} av {total_active}** softkrav eftersom det är hårdaste/reducerande kombination som klarar minst "
                     f"{target_soft_hits} av {len(v_m)} historiska omgångar."
                 )
             else:
                 st.warning(
-                    f"Ingen softnivå klarade målet {target_soft_hits}/{len(v_m)} fullt ut. Appen använder mjukaste nivån och du bör bredda intervall/filter."
+                    f"Ingen hard+soft-kombination klarade målet {target_soft_hits}/{len(v_m)} fullt ut. Appen använder mjukaste nivå och du bör bredda intervall/filter."
                 )
 
             st.caption(
                 "Individuella filter kan vara starka var för sig men tillsammans bli för hårda. "
-                "AutoSoft testar därför alla softkrav och väljer hårdaste nivå som klarar minsta samlade historiska mallträff."
+                "AutoHard+AutoSoft testar kombinationer av breda hårda gates och smalare softkrav och väljer den radmässigt hårdaste kombinationen som klarar minsta samlade historiska mallträff."
             )
 
             if soft_req_decision_rows:
-                with st.expander("Visa hur AutoSoft valde softkrav", expanded=False):
+                with st.expander("Visa hur AutoHard+AutoSoft valde krav", expanded=False):
                     st.dataframe(pd.DataFrame(soft_req_decision_rows), use_container_width=True, hide_index=True)
 
             cdiag1, cdiag2, cdiag3, cdiag4 = st.columns(4)
@@ -3148,11 +3355,11 @@ if st.session_state.get('har_kort_analys') and input_text:
                 with ctm1:
                     st.metric("Grundram", f"{tm_base_count:,}".replace(',', ' '), tm_frame_note)
                 with ctm2:
-                    st.metric("Softkrav", f"{slider_pass_req} av {total_active}")
+                    st.metric("Hårt + Soft", f"{selected_hard_req}/{hard_gate_total} + {slider_pass_req}/{total_active}")
                 with ctm3:
                     st.metric("Motor", tm_mode)
                 with ctm4:
-                    st.metric("Max slutrader", f"{int(tm_output_limit):,}".replace(',', ' '))
+                    st.metric("Reduceringsläge", "Full garanti" if tm_guarantee_mode else f"Max {int(tm_output_limit):,}".replace(',', ' '))
 
                 with st.expander("Visa grundram som reduceras"):
                     st.code(frame_export_text(tm_frame), language="text")
@@ -3193,8 +3400,10 @@ if st.session_state.get('har_kort_analys') and input_text:
                         tm_scored = []
                         for rr in tm_rows:
                             pts = score_candidate_row(rr) if total_active > 0 else 0
-                            tm_scored.append((rr, pts, row_log_probability(rr, filter_vec)))
-                        tm_filtered_scored = [x for x in tm_scored if x[1] >= slider_pass_req]
+                            hpts = hard_candidate_score(rr) if hard_gate_total > 0 else 0
+                            tm_scored.append((rr, pts, hpts, row_log_probability(rr, filter_vec)))
+                        tm_hard_scored = [x for x in tm_scored if (x[2] >= selected_hard_req if hard_gate_total > 0 else True)]
+                        tm_filtered_scored = [x for x in tm_hard_scored if x[1] >= slider_pass_req]
 
                         truncated = False
                         if len(tm_filtered_scored) > int(tm_filter_limit):
@@ -3207,13 +3416,13 @@ if st.session_state.get('har_kort_analys') and input_text:
                         if tm_weighting == "Neutral":
                             tm_scores = [0.0 for _ in tm_filtered_scored]
                         elif tm_weighting == "Filterpoäng":
-                            tm_scores = [float(x[1]) for x in tm_filtered_scored]
+                            tm_scores = [float(x[1]) + float(x[2]) * 2.0 for x in tm_filtered_scored]
                         else:
-                            logs = [float(x[2]) for x in tm_filtered_scored]
+                            logs = [float(x[3]) for x in tm_filtered_scored]
                             if logs:
                                 mn, mx = min(logs), max(logs)
                                 span = max(mx - mn, 1e-9)
-                                tm_scores = [float(x[1]) * 10.0 + ((float(x[2]) - mn) / span) * 5.0 for x in tm_filtered_scored]
+                                tm_scores = [(float(x[1]) * 10.0 + float(x[2]) * 15.0 + ((float(x[3]) - mn) / span) * 5.0) for x in tm_filtered_scored]
                             else:
                                 tm_scores = []
 
@@ -3221,7 +3430,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                             tm_filtered_rows,
                             row_scores=tm_scores,
                             mode=tm_mode,
-                            max_output_rows=int(tm_output_limit),
+                            max_output_rows=(None if tm_guarantee_mode else int(tm_output_limit)),
                             seed=int(tm_seed)
                         )
                         tm_gtable, tm_gsum = build_tipsetmatrix_guarantee_table(
@@ -3233,17 +3442,17 @@ if st.session_state.get('har_kort_analys') and input_text:
 
                     if truncated:
                         st.warning(
-                            f"Efter softfilter fanns fler än spärren {int(tm_filter_limit):,} rader. "
+                            f"Efter hårda+softfilter fanns fler än spärren {int(tm_filter_limit):,} rader. "
                             "TipsetMatrix kördes på de högst rankade raderna. Garantitabellen gäller därför mot detta toppurval. "
                             "Höj spärren om du vill räkna på hela filtermassan."
                         )
 
                     if len(tm_filtered_rows) == 0:
-                        st.error("Inga rader överlevde softfiltret i den valda grundramen. Sänk softkravet eller bredda ramen.")
+                        st.error("Inga rader överlevde hårda+softfilter i den valda grundramen. Sänk softkravet eller bredda ramen.")
                     else:
                         ctm5, ctm6, ctm7, ctm8 = st.columns(4)
                         with ctm5:
-                            st.metric("Efter filter", f"{len(tm_filtered_rows):,}".replace(',', ' '))
+                            st.metric("Efter hårt → soft", f"{len(tm_hard_scored):,} → {len(tm_filtered_rows):,}".replace(',', ' '))
                         with ctm6:
                             st.metric("Efter TipsetMatrix", f"{len(tm_reduced_rows):,}".replace(',', ' '), f"-{tm_gsum['reduceringsgrad']:.1f}%")
                         with ctm7:
@@ -3296,7 +3505,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                                 elif not facit_report["I grundram"]:
                                     st.warning("Facitraden fanns inte i grundramen. Då kan inget filter eller reducering rädda 13 rätt.")
                                 elif not facit_report["Efter filter"]:
-                                    st.warning("Facitraden fanns i grundramen men filtrerades bort. Då är filter-/softkravet för hårt för just denna omgång.")
+                                    st.warning("Facitraden fanns i grundramen men filtrerades bort. Då är hard-/softpaketet för hårt för just denna omgång.")
 
                                 with st.expander("Visa närmaste reducerade rad/rader"):
                                     if facit_report["Närmaste reducerade rader"]:
