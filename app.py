@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v11.1-alpha – TipsetMatrix 12"
+APP_VERSION = "v11.1b-alpha – TipsetMatrix 12 Manuell ram"
 
 # ==========================================
 # 1. FUNKTIONER (FÖR 8 & 13 MATCHER)
@@ -413,16 +413,19 @@ def make_candidate_rows(antal_matcher, sample_size=25000):
 
 # --- TIPSETMATRIX 12: EXAKT GRUNDRAM, 12-GARANTI OCH GARANTITABELL ---
 def normalize_signs(signs):
-    """Normaliserar valda tecken till Helgardering-ordning: 1, X, 2."""
+    """Normaliserar valda tecken till Helgardering-ordning: 1, X, 2.
+
+    Tomt val returnerar tom lista. Det är viktigt i manuell grundram:
+    en match utan tecken ska ge felmeddelande, inte tyst bli 1X2.
+    """
     if signs is None:
-        return ['1', 'X', '2']
+        return []
     if isinstance(signs, str):
         raw = list(signs.upper().replace(' ', '').replace(',', '').replace('|', '').replace('/', '').replace('-', ''))
     else:
         raw = [str(s).strip().upper() for s in signs]
     order = ['1', 'X', '2']
-    out = [s for s in order if s in raw]
-    return out if out else ['1', 'X', '2']
+    return [s for s in order if s in raw]
 
 
 def parse_frame_text(text, antal_matcher):
@@ -444,6 +447,9 @@ def generate_rows_from_frame(frame, max_rows=50000):
     if not frame:
         return [], 0, False, "Ingen grundram finns."
     frame = [normalize_signs(s) for s in frame]
+    empty_matches = [i + 1 for i, signs in enumerate(frame) if len(signs) == 0]
+    if empty_matches:
+        return [], 0, False, "Alla matcher måste ha minst ett tecken. Saknar tecken i match: " + ", ".join(map(str, empty_matches))
     n_rows = frame_row_count(frame)
     if n_rows > int(max_rows):
         return [], n_rows, False, f"Grundramen är {n_rows:,} rader och överskrider spärren {int(max_rows):,}. Smalna av ramen eller höj spärren."
@@ -713,9 +719,14 @@ def build_match_ai_stats(v_m, filter_vec, antal_matcher):
     return rows
 
 def frame_row_count(frame):
+    if not frame:
+        return 0
     n = 1
     for signs in frame:
-        n *= max(1, len(signs))
+        signs = normalize_signs(signs)
+        if len(signs) == 0:
+            return 0
+        n *= len(signs)
     return int(n)
 
 def evaluate_frame(frame, hist_rows, antal_matcher):
@@ -1560,7 +1571,7 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("🧮 TipsetMatrix 12")
     cb_tipsetmatrix = st.checkbox("Visa TipsetMatrix 12", value=True)
-    tm_frame_source = st.selectbox("Grundram för TipsetMatrix", ["AI-Balansram", "Klickbar grundram", "Textgrundram"], index=0)
+    tm_frame_source = st.selectbox("Grundram för TipsetMatrix", ["Klickbar grundram", "AI-Balansram", "Textgrundram"], index=0)
     tm_base_limit = st.select_slider("Max rader i grundram", options=[1000, 2500, 5000, 10000, 15000, 25000, 50000, 75000], value=25000)
     tm_filter_limit = st.select_slider("Max rader efter filter", options=[500, 1000, 1500, 2500, 5000, 10000, 20000], value=5000)
     tm_output_limit = st.select_slider("Max reducerade rader", options=[50, 100, 150, 200, 300, 500, 750, 1000], value=300)
@@ -1581,17 +1592,41 @@ if 'cb_tipsetmatrix' in globals() and cb_tipsetmatrix:
         st.caption("Välj egen ram här om du vill reducera exakt de tecken du själv tänker spela. Full 13-hel spärras normalt av radgränsen.")
         if tm_frame_source == "Klickbar grundram":
             tm_click_frame = []
-            grid_cols = st.columns(4)
+            st.markdown("**Manuell teckenram** — klicka i exakt de tecken som ska vara med i varje match.")
+            st.caption("Alla tre tecken är markerade från start. Smalna av ramen till den kupong du faktiskt vill reducera.")
+
+            header = st.columns([0.9, 0.8, 0.8, 0.8, 1.7])
+            header[0].markdown("**Match**")
+            header[1].markdown("**1**")
+            header[2].markdown("**X**")
+            header[3].markdown("**2**")
+            header[4].markdown("**Val**")
+
             for mi in range(antal_matcher):
-                with grid_cols[mi % 4]:
-                    selected = st.multiselect(
-                        f"M{mi+1}",
-                        options=['1', 'X', '2'],
-                        default=['1', 'X', '2'],
-                        key=f"tm_frame_{spelform}_{mi}"
+                row_cols = st.columns([0.9, 0.8, 0.8, 0.8, 1.7])
+                row_cols[0].markdown(f"**M{mi+1}**")
+                selected = []
+                for col_idx, sign in enumerate(['1', 'X', '2'], start=1):
+                    checked = row_cols[col_idx].checkbox(
+                        sign,
+                        value=True,
+                        key=f"tm_manual_{spelform}_{mi}_{sign}",
+                        label_visibility="collapsed"
                     )
-                    tm_click_frame.append(normalize_signs(selected))
-            st.caption(f"Grundramens radantal just nu: {frame_row_count(tm_click_frame):,} rader")
+                    if checked:
+                        selected.append(sign)
+                selected = normalize_signs(selected)
+                tm_click_frame.append(selected)
+                if selected:
+                    row_cols[4].markdown(f"`{_sort_signs_display(selected)}`")
+                else:
+                    row_cols[4].markdown("⚠️ minst ett tecken")
+
+            empty_matches = [i + 1 for i, signs in enumerate(tm_click_frame) if len(signs) == 0]
+            tm_manual_rows = frame_row_count(tm_click_frame)
+            if empty_matches:
+                st.warning("Alla matcher måste ha minst ett tecken. Saknar tecken i match: " + ", ".join(map(str, empty_matches)))
+            st.caption(f"Grundramens radantal just nu: {tm_manual_rows:,} rader".replace(',', ' '))
         elif tm_frame_source == "Textgrundram":
             tm_text_frame_input = st.text_area(
                 "Textgrundram, en grupp per match",
@@ -2507,7 +2542,7 @@ if st.session_state.get('har_kort_analys') and input_text:
             st.markdown("---")
             st.subheader("🧮 TipsetMatrix 12-rätts reducering")
             st.caption(
-                "Motorn reducerar en exakt grundram efter softfilter och bygger garantitabell mot den filtrerade radmassan. "
+                "Motorn reducerar din exakta manuella grundram efter softfilter och bygger garantitabell mot den filtrerade radmassan. "
                 "Garantin gäller bara om 13-rättsraden finns kvar efter grundram och filter."
             )
 
