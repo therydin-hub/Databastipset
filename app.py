@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v11.1b-alpha – TipsetMatrix 12 Manuell ram"
+APP_VERSION = "v11.1c-alpha – TipsetMatrix Facitkontroll"
 
 # ==========================================
 # 1. FUNKTIONER (FÖR 8 & 13 MATCHER)
@@ -672,6 +672,63 @@ def build_tipsetmatrix_guarantee_table(filtered_rows, reduced_rows, antal_matche
     }
     return table, summary
 
+
+
+def parse_result_row(text, antal_matcher):
+    """Läser facit/vinstrad. Tillåter 1X2 med mellanslag, bindestreck eller klistrad rad."""
+    raw = str(text or "").strip().upper()
+    if not raw:
+        return None, ""
+    chars = re.findall(r'[1X2]', raw)
+    if len(chars) != antal_matcher:
+        return None, f"Facitraden måste innehålla exakt {antal_matcher} tecken (1/X/2). Hittade {len(chars)}."
+    return ''.join(chars), ""
+
+
+def result_in_frame(result_row, frame):
+    """Kontrollerar om facitraden ryms i den manuella/valda grundramen."""
+    if not result_row or not frame or len(result_row) != len(frame):
+        return False
+    return all(result_row[i] in set(frame[i]) for i in range(len(result_row)))
+
+
+def best_hit_against_rows(result_row, rows):
+    """Returnerar bästa antal rätt samt närmaste reducerade rader."""
+    if not result_row or not rows:
+        return 0, []
+    best = -1
+    nearest = []
+    for rr in rows:
+        hit = sum(1 for a, b in zip(result_row, rr) if a == b)
+        if hit > best:
+            best = hit
+            nearest = [rr]
+        elif hit == best and len(nearest) < 10:
+            nearest.append(rr)
+    return int(max(best, 0)), nearest
+
+
+def build_facit_check(result_row, frame, base_rows, filtered_rows, reduced_rows, antal_matcher):
+    """Felsökningsrapport för en känd historisk vinstrad/facitrad."""
+    base_set = set(base_rows or [])
+    filtered_set = set(filtered_rows or [])
+    reduced_set = set(reduced_rows or [])
+    best_hit, nearest = best_hit_against_rows(result_row, list(reduced_rows or []))
+    return {
+        "Facitrad": result_row,
+        "I grundram": result_in_frame(result_row, frame),
+        "I genererade grundrader": result_row in base_set,
+        "Efter filter": result_row in filtered_set,
+        "Efter TipsetMatrix": result_row in reduced_set,
+        "Bästa rätt efter TipsetMatrix": best_hit,
+        "Närmaste reducerade rader": nearest,
+        "Reduceringsgaranti giltig": result_row in filtered_set,
+        "12+ uppnått": best_hit >= antal_matcher - 1,
+    }
+
+
+def yes_no(v):
+    return "Ja" if bool(v) else "Nej"
 
 def frame_export_text(frame):
     if not frame:
@@ -1578,7 +1635,7 @@ with st.sidebar:
     tm_mode = st.selectbox("Reduceringsläge", ["Snabb", "Balans", "Max"], index=1)
     tm_weighting = st.selectbox("Viktning vid lika täckning", ["Filterpoäng + sannolikhet", "Filterpoäng", "Neutral"], index=0)
     tm_seed = st.number_input("Seed", min_value=1, max_value=999999, value=42, step=1)
-    cb_tm_backtest = st.checkbox("Visa backtest-panel", value=False)
+    cb_tm_backtest = st.checkbox("Visa facit-/backtestpanel", value=True)
 
 
 # --- MAIN AREA FÖR INMATNING ---
@@ -2583,6 +2640,30 @@ if st.session_state.get('har_kort_analys') and input_text:
                 with st.expander("Visa grundram som reduceras"):
                     st.code(frame_export_text(tm_frame), language="text")
 
+                tm_facit_text = ""
+                tm_test_label = ""
+                if cb_tm_backtest:
+                    with st.expander("🧾 Facitkontroll / manuell backtestlogg", expanded=True):
+                        st.caption(
+                            "Klistra in facit/vinstrad från en historisk omgång. Appen visar exakt var raden dör: "
+                            "i grundramen, i filtret eller i TipsetMatrix-reduceringen."
+                        )
+                        cfc1, cfc2 = st.columns([2, 1])
+                        with cfc1:
+                            tm_facit_text = st.text_input(
+                                f"Facitrad ({antal_matcher} tecken, valfritt)",
+                                value="",
+                                placeholder="Exempel: 1X2112X21X...",
+                                key=f"tm_facit_{spelform}_{antal_matcher}"
+                            )
+                        with cfc2:
+                            tm_test_label = st.text_input(
+                                "Testnamn/datum",
+                                value="",
+                                placeholder="t.ex. 2024-10-12",
+                                key=f"tm_testlabel_{spelform}_{antal_matcher}"
+                            )
+
                 if not tm_ok:
                     st.warning(tm_msg)
                 else:
@@ -2657,6 +2738,90 @@ if st.session_state.get('har_kort_analys') and input_text:
                         else:
                             st.success("TipsetMatrix hittade full 12-rättsgaranti inom den filtrerade radmassan.")
 
+                        # Facitkontroll för historiska omgångar.
+                        facit_row, facit_err = parse_result_row(tm_facit_text, antal_matcher) if cb_tm_backtest else (None, "")
+                        facit_report = None
+                        if cb_tm_backtest and tm_facit_text:
+                            if facit_err:
+                                st.error(facit_err)
+                            elif facit_row:
+                                facit_report = build_facit_check(
+                                    facit_row,
+                                    tm_frame,
+                                    tm_rows,
+                                    tm_filtered_rows,
+                                    tm_reduced_rows,
+                                    antal_matcher
+                                )
+                                st.markdown("### 🧾 Facitkontroll")
+                                f1, f2, f3, f4, f5 = st.columns(5)
+                                with f1:
+                                    st.metric("I grundram", yes_no(facit_report["I grundram"]))
+                                with f2:
+                                    st.metric("Efter filter", yes_no(facit_report["Efter filter"]))
+                                with f3:
+                                    st.metric("13 efter TM", yes_no(facit_report["Efter TipsetMatrix"]))
+                                with f4:
+                                    st.metric("Bästa rätt", f"{facit_report['Bästa rätt efter TipsetMatrix']} rätt")
+                                with f5:
+                                    st.metric("12+", yes_no(facit_report["12+ uppnått"]))
+
+                                if facit_report["Efter filter"] and not facit_report["12+ uppnått"]:
+                                    st.error("VARNING: Facitraden fanns efter filter men TipsetMatrix gav inte 12+. Det tyder på fel i reduceringen eller för låg maxgräns.")
+                                elif facit_report["Efter filter"] and facit_report["12+ uppnått"] and not facit_report["Efter TipsetMatrix"]:
+                                    st.info("Facitraden överlevde filtret men valdes inte som 13-rad. 12-rättsgarantin fungerade ändå.")
+                                elif facit_report["Efter TipsetMatrix"]:
+                                    st.success("Facitraden finns exakt bland de reducerade raderna: 13-rättsträff i detta test.")
+                                elif not facit_report["I grundram"]:
+                                    st.warning("Facitraden fanns inte i grundramen. Då kan inget filter eller reducering rädda 13 rätt.")
+                                elif not facit_report["Efter filter"]:
+                                    st.warning("Facitraden fanns i grundramen men filtrerades bort. Då är filter-/softkravet för hårt för just denna omgång.")
+
+                                with st.expander("Visa närmaste reducerade rad/rader"):
+                                    if facit_report["Närmaste reducerade rader"]:
+                                        st.code("\n".join(facit_report["Närmaste reducerade rader"]), language="text")
+                                    else:
+                                        st.caption("Inga reducerade rader att jämföra med.")
+
+                                if "tm_manual_backtest_log" not in st.session_state:
+                                    st.session_state["tm_manual_backtest_log"] = []
+                                if st.button("➕ Lägg till i manuell backtestlogg", key="tm_add_manual_backtest"):
+                                    st.session_state["tm_manual_backtest_log"].append({
+                                        "Tid": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                        "Spelform": spelform,
+                                        "Test": tm_test_label,
+                                        "Facitrad": facit_row,
+                                        "Grundram rader": tm_base_count,
+                                        "Efter filter": len(tm_filtered_rows),
+                                        "Efter TipsetMatrix": len(tm_reduced_rows),
+                                        "I grundram": yes_no(facit_report["I grundram"]),
+                                        "Efter filter facit": yes_no(facit_report["Efter filter"]),
+                                        "13 efter TM": yes_no(facit_report["Efter TipsetMatrix"]),
+                                        "Bästa rätt": facit_report["Bästa rätt efter TipsetMatrix"],
+                                        "12+": yes_no(facit_report["12+ uppnått"]),
+                                        "13-chans %": tm_gsum['13_oviktad'],
+                                        "13-chans viktad %": tm_gsum['13_viktad'],
+                                        "12+ garanti %": tm_gsum['12plus'],
+                                        "Softkrav": f"{slider_pass_req} av {total_active}",
+                                        "Motor": tm_mode,
+                                        "Viktning": tm_weighting,
+                                    })
+                                    st.success("Tillagd i manuell backtestlogg.")
+
+                        if cb_tm_backtest and st.session_state.get("tm_manual_backtest_log"):
+                            st.markdown("### 📘 Manuell backtestlogg")
+                            log_df = pd.DataFrame(st.session_state["tm_manual_backtest_log"])
+                            st.dataframe(log_df, use_container_width=True, hide_index=True)
+                            st.download_button(
+                                "⬇️ Ladda ner manuell backtestlogg CSV",
+                                log_df.to_csv(index=False, sep=';').encode('utf-8-sig'),
+                                file_name=f"tipsetmatrix_manual_backtest_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                                mime="text/csv"
+                            )
+                            if st.button("🧹 Rensa manuell backtestlogg", key="tm_clear_manual_backtest"):
+                                st.session_state["tm_manual_backtest_log"] = []
+                                st.success("Backtestloggen rensades.")
+
                         st.markdown("### 📊 Garantitabell – TipsetMatrix 12")
                         st.dataframe(tm_gtable, use_container_width=True, hide_index=True)
 
@@ -2675,10 +2840,24 @@ if st.session_state.get('har_kort_analys') and input_text:
                             f"12+ garanti: {tm_gsum['12plus']:.2f}%",
                             f"13-chans oviktad: {tm_gsum['13_oviktad']:.2f}%",
                             f"13-chans viktad: {tm_gsum['13_viktad']:.2f}%",
+                        ]
+                        if facit_report:
+                            tm_export_lines.extend([
+                                "",
+                                "FACITKONTROLL",
+                                f"Test: {tm_test_label}",
+                                f"Facitrad: {facit_report['Facitrad']}",
+                                f"I grundram: {yes_no(facit_report['I grundram'])}",
+                                f"Efter filter: {yes_no(facit_report['Efter filter'])}",
+                                f"Efter TipsetMatrix: {yes_no(facit_report['Efter TipsetMatrix'])}",
+                                f"Bästa rätt efter TipsetMatrix: {facit_report['Bästa rätt efter TipsetMatrix']}",
+                                f"12+ uppnått: {yes_no(facit_report['12+ uppnått'])}",
+                            ])
+                        tm_export_lines.extend([
                             "",
                             "REDUCERADE RADER",
                             *tm_reduced_rows,
-                        ]
+                        ])
                         tm_export_text = "\n".join(tm_export_lines)
                         dl_tm1, dl_tm2 = st.columns(2)
                         with dl_tm1:
@@ -2698,10 +2877,10 @@ if st.session_state.get('har_kort_analys') and input_text:
 
             if cb_tm_backtest:
                 st.markdown("---")
-                st.subheader("📈 Backtest-panel")
+                st.subheader("📈 Nästa backteststeg")
                 st.info(
-                    "Första v11.1-alpha innehåller motorn, exakt grundram och garantitabell. "
-                    "Nästa patch bör lägga walk-forward-backtest ovanpå samma funktioner: varje historisk omgång får då bara använda äldre omgångar."
+                    "Denna version har facitkontroll och manuell backtestlogg. "
+                    "Nästa större steg är automatisk walk-forward-backtest där varje historisk omgång bara får använda äldre omgångar."
                 )
 
         # --- AI-RAM & U-FILTER ---
