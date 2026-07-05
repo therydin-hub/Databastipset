@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v11.1o – Inlämningsformat egna rader"
+APP_VERSION = "v11.1q – Stabil grundram & teckenfördelning"
 
 
 st.markdown("""
@@ -24,6 +24,32 @@ st.markdown("""
     .tm-pill {display:inline-block; padding: .16rem .50rem; border:1px solid rgba(128,128,128,.35); border-radius:999px; font-size:.82rem; margin-right:.25rem; margin-top:.2rem;}
 </style>
 """, unsafe_allow_html=True)
+
+
+def tm_download_button(label, data, file_name, mime, **kwargs):
+    """Download-knapp som i nya Streamlit inte triggar full rerun vid klick.
+
+    Om appen körs på en äldre Streamlit-version faller den tillbaka till vanlig
+    download_button i stället för att krascha.
+    """
+    try:
+        return st.download_button(
+            label,
+            data,
+            file_name=file_name,
+            mime=mime,
+            on_click="ignore",
+            **kwargs,
+        )
+    except Exception:
+        return st.download_button(
+            label,
+            data,
+            file_name=file_name,
+            mime=mime,
+            **kwargs,
+        )
+
 
 # ==========================================
 # 1. FUNKTIONER (FÖR 8 & 13 MATCHER)
@@ -999,6 +1025,139 @@ def rows_to_submission_text(rows, spelform, antal_matcher):
         if len(clean) == int(antal_matcher):
             out.append(",".join([code] + list(clean)))
     return "\n".join(out)
+
+def selected_signs_missing(rows, frame, antal_matcher):
+    """Returnerar manuellt valda tecken som saknas helt i en radmassa.
+
+    Exempel: om M5 är helgarderad i grundramen men inga kvarvarande rader har 1 på M5,
+    returneras (5, '1'). Detta skyddar mot att filter/reducering omedvetet blankar ett tecken.
+    """
+    if not frame:
+        return []
+    rows = [normalize_single_row_text(r) for r in (rows or []) if len(normalize_single_row_text(r)) == int(antal_matcher)]
+    missing = []
+    for mi in range(int(antal_matcher)):
+        selected = normalize_signs(frame[mi]) if mi < len(frame) else []
+        if not selected:
+            continue
+        present = {r[mi] for r in rows} if rows else set()
+        for sign in selected:
+            if sign not in present:
+                missing.append((mi + 1, sign))
+    return missing
+
+
+def format_missing_signs(missing):
+    if not missing:
+        return ""
+    return ", ".join([f"M{m}:{s}" for m, s in missing])
+
+
+def build_sign_distribution_df(rows, frame, antal_matcher):
+    """Bygger en enkel teckenfördelning per match för filtrerad/reducerad radmassa."""
+    rows = [normalize_single_row_text(r) for r in (rows or []) if len(normalize_single_row_text(r)) == int(antal_matcher)]
+    total = len(rows)
+    out = []
+    for mi in range(int(antal_matcher)):
+        selected = normalize_signs(frame[mi]) if frame and mi < len(frame) else ['1', 'X', '2']
+        counts = {s: sum(1 for r in rows if r[mi] == s) for s in ['1', 'X', '2']}
+        zero_selected = [s for s in selected if counts.get(s, 0) == 0]
+        out.append({
+            "Match": mi + 1,
+            "Grundram": _sort_signs_display(selected),
+            "1": counts['1'],
+            "X": counts['X'],
+            "2": counts['2'],
+            "1 %": round((counts['1'] / total * 100), 1) if total else 0.0,
+            "X %": round((counts['X'] / total * 100), 1) if total else 0.0,
+            "2 %": round((counts['2'] / total * 100), 1) if total else 0.0,
+            "Teckenskydd": "⚠️ " + "".join(zero_selected) if zero_selected else "OK",
+        })
+    return pd.DataFrame(out)
+
+
+def _fmt_counts_with_pct(counts, total):
+    parts = []
+    for s in ['1', 'X', '2']:
+        n = int(counts.get(s, 0))
+        pct = (n / total * 100.0) if total else 0.0
+        parts.append(f"{s}: {n:,} ({pct:.1f}%)".replace(',', ' '))
+    return " | ".join(parts)
+
+
+def build_combined_sign_distribution_df(filter_rows, reduced_rows, frame, antal_matcher):
+    """Kompakt matchvis teckenfördelning: grundram, efter filter och efter inlämningsrader."""
+    filter_rows = [normalize_single_row_text(r) for r in (filter_rows or []) if len(normalize_single_row_text(r)) == int(antal_matcher)]
+    reduced_rows = [normalize_single_row_text(r) for r in (reduced_rows or []) if len(normalize_single_row_text(r)) == int(antal_matcher)]
+    filter_total = len(filter_rows)
+    reduced_total = len(reduced_rows)
+    out = []
+    for mi in range(int(antal_matcher)):
+        selected = normalize_signs(frame[mi]) if frame and mi < len(frame) else ['1', 'X', '2']
+        f_counts = {s: sum(1 for r in filter_rows if r[mi] == s) for s in ['1', 'X', '2']}
+        r_counts = {s: sum(1 for r in reduced_rows if r[mi] == s) for s in ['1', 'X', '2']}
+        zero_filter = [s for s in selected if f_counts.get(s, 0) == 0]
+        zero_reduced = [s for s in selected if r_counts.get(s, 0) == 0]
+        status = []
+        if zero_filter:
+            status.append("Filter saknar " + "".join(zero_filter))
+        if zero_reduced:
+            status.append("Slutrader saknar " + "".join(zero_reduced))
+        out.append({
+            "Match/lag": f"M{mi + 1}",
+            "Grundram": _sort_signs_display(selected),
+            "Efter filter": _fmt_counts_with_pct(f_counts, filter_total),
+            "Efter inlämning": _fmt_counts_with_pct(r_counts, reduced_total),
+            "Status": "⚠️ " + "; ".join(status) if status else "OK",
+        })
+    return pd.DataFrame(out)
+
+
+def add_rows_for_sign_coverage(source_rows, selected_rows, frame, row_scores=None, antal_matcher=None):
+    """Lägger till bästa tillgängliga rader så att alla manuellt valda tecken finns i slutraderna.
+
+    Detta ändrar inte filtermassan. Det lägger bara till extra reducerade rader från redan filtrerad radmassa
+    om TipsetMatrix-valet råkar ge 0 rader på ett tecken som spelaren aktivt markerat i grundramen.
+    """
+    if antal_matcher is None:
+        antal_matcher = len(frame) if frame else 0
+    source_rows = [normalize_single_row_text(r) for r in (source_rows or []) if len(normalize_single_row_text(r)) == int(antal_matcher)]
+    selected_rows = list(dict.fromkeys([normalize_single_row_text(r) for r in (selected_rows or []) if len(normalize_single_row_text(r)) == int(antal_matcher)]))
+    if not frame or not source_rows or not selected_rows:
+        return selected_rows, [], selected_signs_missing(selected_rows, frame, antal_matcher)
+
+    if row_scores is None or len(row_scores) != len(source_rows):
+        scores = [0.0] * len(source_rows)
+    else:
+        scores = [float(x) for x in row_scores]
+
+    selected_set = set(selected_rows)
+    added = []
+    missing = selected_signs_missing(selected_rows, frame, antal_matcher)
+    safety = 0
+    while missing and safety < int(antal_matcher) * 3:
+        best_idx = None
+        best_key = None
+        for idx, rr in enumerate(source_rows):
+            if rr in selected_set:
+                continue
+            covers = sum(1 for m, s in missing if rr[m - 1] == s)
+            if covers <= 0:
+                continue
+            key = (covers, scores[idx])
+            if best_key is None or key > best_key:
+                best_key = key
+                best_idx = idx
+        if best_idx is None:
+            break
+        chosen = source_rows[best_idx]
+        selected_rows.append(chosen)
+        selected_set.add(chosen)
+        added.append(chosen)
+        missing = selected_signs_missing(selected_rows, frame, antal_matcher)
+        safety += 1
+    return selected_rows, added, missing
+
 
 
 def submission_file_stem(spelform):
@@ -2060,42 +2219,79 @@ if 'cb_tipsetmatrix' in globals() and cb_tipsetmatrix:
     with st.expander("🧮 TipsetMatrix grundram", expanded=(tm_frame_source == "Klickbar grundram")):
         st.caption("Välj egen ram här om du vill reducera exakt de tecken du själv tänker spela. Full 13-hel spärras normalt av radgränsen.")
         if tm_frame_source == "Klickbar grundram":
-            tm_click_frame = []
-            st.markdown("**Manuell teckenram** — klicka i exakt de tecken som ska vara med i varje match.")
-            st.caption("Alla tre tecken är markerade från start. Smalna av ramen till den kupong du faktiskt vill reducera.")
+            frame_state_key = f"tm_saved_frame_{spelform}_{antal_matcher}"
+            if frame_state_key not in st.session_state:
+                st.session_state[frame_state_key] = [['1', 'X', '2'] for _ in range(antal_matcher)]
+            saved_frame = [normalize_signs(x) for x in st.session_state.get(frame_state_key, [])]
+            if len(saved_frame) != int(antal_matcher):
+                saved_frame = [['1', 'X', '2'] for _ in range(antal_matcher)]
+                st.session_state[frame_state_key] = saved_frame
 
-            header = st.columns([0.9, 0.8, 0.8, 0.8, 1.7])
-            header[0].markdown("**Match**")
-            header[1].markdown("**1**")
-            header[2].markdown("**X**")
-            header[3].markdown("**2**")
-            header[4].markdown("**Val**")
+            tm_click_frame = saved_frame
+            st.markdown("**Manuell teckenram** — ändra tecken och tryck sedan **Spara grundram**.")
+            st.caption(
+                "Tecknen ligger nu i ett formulär. Appen kör inte om AutoFilter/TipsetMatrix för varje klick på 1/X/2, "
+                "utan först när du sparar ramen och sedan trycker Kör."
+            )
 
-            for mi in range(antal_matcher):
-                row_cols = st.columns([0.9, 0.8, 0.8, 0.8, 1.7])
-                row_cols[0].markdown(f"**M{mi+1}**")
-                selected = []
-                for col_idx, sign in enumerate(['1', 'X', '2'], start=1):
-                    checked = row_cols[col_idx].checkbox(
-                        sign,
-                        value=True,
-                        key=f"tm_manual_{spelform}_{mi}_{sign}",
-                        label_visibility="collapsed"
-                    )
-                    if checked:
-                        selected.append(sign)
-                selected = normalize_signs(selected)
-                tm_click_frame.append(selected)
-                if selected:
-                    row_cols[4].markdown(f"`{_sort_signs_display(selected)}`")
+            with st.form(key=f"tm_manual_frame_form_{spelform}_{antal_matcher}"):
+                draft_frame = []
+                header = st.columns([0.9, 0.8, 0.8, 0.8, 1.7])
+                header[0].markdown("**Match**")
+                header[1].markdown("**1**")
+                header[2].markdown("**X**")
+                header[3].markdown("**2**")
+                header[4].markdown("**Sparat val**")
+
+                for mi in range(antal_matcher):
+                    saved_signs = normalize_signs(saved_frame[mi]) if mi < len(saved_frame) else ['1', 'X', '2']
+                    row_cols = st.columns([0.9, 0.8, 0.8, 0.8, 1.7])
+                    row_cols[0].markdown(f"**M{mi+1}**")
+                    selected = []
+                    for col_idx, sign in enumerate(['1', 'X', '2'], start=1):
+                        checked = row_cols[col_idx].checkbox(
+                            sign,
+                            value=(sign in saved_signs),
+                            key=f"tm_manual_draft_{spelform}_{mi}_{sign}",
+                            label_visibility="collapsed"
+                        )
+                        if checked:
+                            selected.append(sign)
+                    selected = normalize_signs(selected)
+                    draft_frame.append(selected)
+                    if saved_signs:
+                        row_cols[4].markdown(f"`{_sort_signs_display(saved_signs)}`")
+                    else:
+                        row_cols[4].markdown("⚠️ minst ett tecken")
+
+                submitted_frame = st.form_submit_button("💾 Spara grundram", use_container_width=True)
+
+            if submitted_frame:
+                empty_draft_matches = [i + 1 for i, signs in enumerate(draft_frame) if len(signs) == 0]
+                if empty_draft_matches:
+                    st.warning("Grundramen sparades inte. Minst ett tecken saknas i match: " + ", ".join(map(str, empty_draft_matches)))
                 else:
-                    row_cols[4].markdown("⚠️ minst ett tecken")
+                    st.session_state[frame_state_key] = draft_frame
+                    tm_click_frame = draft_frame
+                    st.session_state['har_kort_analys'] = False
+                    st.success("Grundramen är sparad. Tryck Kör AutoFilter + TipsetMatrix när du vill räkna om systemet.")
 
             empty_matches = [i + 1 for i, signs in enumerate(tm_click_frame) if len(signs) == 0]
             tm_manual_rows = frame_row_count(tm_click_frame)
             if empty_matches:
                 st.warning("Alla matcher måste ha minst ett tecken. Saknar tecken i match: " + ", ".join(map(str, empty_matches)))
-            st.caption(f"Grundramens radantal just nu: {tm_manual_rows:,} rader".replace(',', ' '))
+            st.caption(f"Sparad grundram: {tm_manual_rows:,} rader".replace(',', ' '))
+
+            with st.expander("📊 Sparad grundram – tecken per match", expanded=False):
+                frame_rows = []
+                for mi, signs in enumerate(tm_click_frame, start=1):
+                    frame_rows.append({
+                        "Match/lag": f"M{mi}",
+                        "Tecken": _sort_signs_display(signs),
+                        "Antal tecken": len(signs),
+                    })
+                st.dataframe(pd.DataFrame(frame_rows), use_container_width=True, hide_index=True)
+
         elif tm_frame_source == "Textgrundram":
             tm_text_frame_input = st.text_area(
                 "Textgrundram, en grupp per match",
@@ -3870,7 +4066,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                         pkg_cols = [c for c in pkg_cols if c in starter_df.columns]
                         st.dataframe(starter_df[pkg_cols], use_container_width=True, hide_index=True)
 
-                    st.download_button(
+                    tm_download_button(
                         "⬇️ Ladda ner filterrevision CSV",
                         revision_df.to_csv(index=False, sep=';').encode('utf-8-sig'),
                         file_name=f"filterrevision_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
@@ -4029,9 +4225,9 @@ if st.session_state.get('har_kort_analys') and input_text:
 
             col_dl1, col_dl2, col_dl3 = st.columns(3)
             with col_dl1:
-                st.download_button("⬇️ Ladda ner filterregler CSV", filter_rules_df.to_csv(index=False, sep=';').encode('utf-8-sig'), file_name=f"filterregler_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
+                tm_download_button("⬇️ Ladda ner filterregler CSV", filter_rules_df.to_csv(index=False, sep=';').encode('utf-8-sig'), file_name=f"filterregler_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
             with col_dl2:
-                st.download_button("⬇️ Ladda ner Helgardering TXT", helg_text.encode('utf-8'), file_name=f"helgardering_export_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt", mime="text/plain")
+                tm_download_button("⬇️ Ladda ner Helgardering TXT", helg_text.encode('utf-8'), file_name=f"helgardering_export_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt", mime="text/plain")
             with col_dl3:
                 if st.button("💾 Spara analys lokalt"):
                     outdir = Path("analysis_exports")
@@ -4125,8 +4321,36 @@ if st.session_state.get('har_kort_analys') and input_text:
                             pts = score_candidate_row(rr) if total_active > 0 else 0
                             hpts = hard_candidate_score(rr) if hard_gate_total > 0 else 0
                             tm_scored.append((rr, pts, hpts, row_log_probability(rr, filter_vec)))
-                        tm_hard_scored = [x for x in tm_scored if (x[2] >= selected_hard_req if hard_gate_total > 0 else True)]
-                        tm_filtered_scored = [x for x in tm_hard_scored if spets_candidate_passes(x[0])]
+                        # Teckenskydd: normal-läget ska inte omedvetet blanka ett tecken som du markerat i grundramen.
+                        # Om ett valt spetsfilter gör att t.ex. M5:1 blir 0 rader kvar, tas senaste spetsfiltret bort runtime.
+                        tm_runtime_hard_req = int(selected_hard_req)
+                        tm_active_spets_names = list(selected_spets_names)
+                        tm_active_spets_rows = list(selected_spets_rows)
+                        tm_sign_guard_removed_spets = []
+                        tm_sign_guard_lowered_hard = False
+                        tm_sign_guard_missing_after_filter = []
+
+                        def _runtime_filter_rows(hreq, names):
+                            hard_rows = [x for x in tm_scored if (x[2] >= int(hreq) if hard_gate_total > 0 else True)]
+                            filtered_rows = [x for x in hard_rows if spets_candidate_passes(x[0], names)]
+                            return hard_rows, filtered_rows
+
+                        tm_hard_scored, tm_filtered_scored = _runtime_filter_rows(tm_runtime_hard_req, tm_active_spets_names)
+                        tm_sign_guard_missing_after_filter = selected_signs_missing([x[0] for x in tm_filtered_scored], tm_frame, antal_matcher)
+
+                        while tm_sign_guard_missing_after_filter and tm_active_spets_names:
+                            removed_name = tm_active_spets_names.pop()
+                            tm_sign_guard_removed_spets.append(removed_name)
+                            tm_active_spets_rows = [r for r in tm_active_spets_rows if r.get("Filter") != removed_name]
+                            tm_hard_scored, tm_filtered_scored = _runtime_filter_rows(tm_runtime_hard_req, tm_active_spets_names)
+                            tm_sign_guard_missing_after_filter = selected_signs_missing([x[0] for x in tm_filtered_scored], tm_frame, antal_matcher)
+
+                        # Om redan basfiltret blankar ett manuellt tecken sänks bas-gatekravet ett steg i taget.
+                        while tm_sign_guard_missing_after_filter and hard_gate_total > 0 and tm_runtime_hard_req > 0:
+                            tm_runtime_hard_req -= 1
+                            tm_sign_guard_lowered_hard = True
+                            tm_hard_scored, tm_filtered_scored = _runtime_filter_rows(tm_runtime_hard_req, tm_active_spets_names)
+                            tm_sign_guard_missing_after_filter = selected_signs_missing([x[0] for x in tm_filtered_scored], tm_frame, antal_matcher)
 
                         truncated = False
                         if len(tm_filtered_scored) > int(tm_filter_limit):
@@ -4156,6 +4380,18 @@ if st.session_state.get('har_kort_analys') and input_text:
                             max_output_rows=(None if tm_guarantee_mode else int(tm_output_limit)),
                             seed=int(tm_seed)
                         )
+
+                        # Teckenskydd även efter själva TipsetMatrix-valet.
+                        # 12-garantin kan tekniskt täcka en saknad 13-rad via ett annat tecken, men för Egna rader
+                        # vill vi inte ha 0 finalrader på ett tecken som spelaren aktivt markerat.
+                        tm_reduced_rows, tm_sign_guard_added_rows, tm_sign_guard_missing_after_reduce = add_rows_for_sign_coverage(
+                            tm_filtered_rows,
+                            tm_reduced_rows,
+                            tm_frame,
+                            row_scores=tm_scores,
+                            antal_matcher=antal_matcher
+                        )
+
                         tm_gtable, tm_gsum = build_tipsetmatrix_guarantee_table(
                             tm_filtered_rows,
                             tm_reduced_rows,
@@ -4173,6 +4409,20 @@ if st.session_state.get('har_kort_analys') and input_text:
                     if len(tm_filtered_rows) == 0:
                         st.error("Inga rader överlevde bas+spetsfilter i den valda grundramen. Bredda ramen eller sänk historikmålet.")
                     else:
+                        if tm_sign_guard_removed_spets or tm_sign_guard_lowered_hard or tm_sign_guard_added_rows:
+                            parts = []
+                            if tm_sign_guard_removed_spets:
+                                parts.append("tog bort spetsfilter: " + ", ".join(tm_sign_guard_removed_spets))
+                            if tm_sign_guard_lowered_hard:
+                                parts.append(f"sänkte basfilter från {selected_hard_req}/{hard_gate_total} till {tm_runtime_hard_req}/{hard_gate_total}")
+                            if tm_sign_guard_added_rows:
+                                parts.append(f"lade till {len(tm_sign_guard_added_rows)} slutrad(er) i TipsetMatrix")
+                            st.warning("🛡️ Teckenskydd aktivt: " + "; ".join(parts) + ". Detta gjordes för att inget manuellt markerat tecken ska bli 0 rader.")
+                        if tm_sign_guard_missing_after_filter:
+                            st.error("Teckenskydd kunde inte bevara dessa tecken efter filter: " + format_missing_signs(tm_sign_guard_missing_after_filter))
+                        if tm_sign_guard_missing_after_reduce:
+                            st.error("Teckenskydd kunde inte bevara dessa tecken efter TipsetMatrix: " + format_missing_signs(tm_sign_guard_missing_after_reduce))
+
                         ctm5, ctm6, ctm7, ctm8 = st.columns(4)
                         with ctm5:
                             st.metric("Efter bas → spets", f"{len(tm_hard_scored):,} → {len(tm_filtered_rows):,}".replace(',', ' '))
@@ -4255,7 +4505,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                                         "13-chans %": tm_gsum['13_oviktad'],
                                         "13-chans viktad %": tm_gsum['13_viktad'],
                                         "12+ garanti %": tm_gsum['12plus'],
-                                        "Spetsfilter": ", ".join(selected_spets_names) if selected_spets_names else "Inga",
+                                        "Spetsfilter": ", ".join(tm_active_spets_names) if tm_active_spets_names else "Inga",
                                         "Motor": tm_mode,
                                         "Viktning": tm_weighting,
                                     })
@@ -4265,7 +4515,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                             st.markdown("### 📘 Manuell backtestlogg")
                             log_df = pd.DataFrame(st.session_state["tm_manual_backtest_log"])
                             st.dataframe(log_df, use_container_width=True, hide_index=True)
-                            st.download_button(
+                            tm_download_button(
                                 "⬇️ Ladda ner manuell backtestlogg CSV",
                                 log_df.to_csv(index=False, sep=';').encode('utf-8-sig'),
                                 file_name=f"tipsetmatrix_manual_backtest_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
@@ -4274,6 +4524,22 @@ if st.session_state.get('har_kort_analys') and input_text:
                             if st.button("🧹 Rensa manuell backtestlogg", key="tm_clear_manual_backtest"):
                                 st.session_state["tm_manual_backtest_log"] = []
                                 st.success("Backtestloggen rensades.")
+
+                        with st.expander("📊 Teckenfördelning per match/lag", expanded=True):
+                            st.caption(
+                                "Visar hur varje match/lag får sina 1/X/2-tecken efter bas+spetsfilter och i de faktiska inlämningsraderna. "
+                                "Status ska vara OK för alla tecken du markerat i grundramen."
+                            )
+                            st.dataframe(
+                                build_combined_sign_distribution_df(tm_filtered_rows, tm_reduced_rows, tm_frame, antal_matcher),
+                                use_container_width=True,
+                                hide_index=True
+                            )
+                            with st.expander("Detaljtabeller med separata kolumner", expanded=False):
+                                st.markdown("**Efter bas+spetsfilter**")
+                                st.dataframe(build_sign_distribution_df(tm_filtered_rows, tm_frame, antal_matcher), use_container_width=True, hide_index=True)
+                                st.markdown("**Efter TipsetMatrix / inlämningsrader**")
+                                st.dataframe(build_sign_distribution_df(tm_reduced_rows, tm_frame, antal_matcher), use_container_width=True, hide_index=True)
 
                         st.markdown("### 📊 Garantitabell – TipsetMatrix 12")
                         st.dataframe(tm_gtable, use_container_width=True, hide_index=True)
@@ -4295,11 +4561,11 @@ if st.session_state.get('har_kort_analys') and input_text:
                             f"Grundram: {frame_export_text(tm_frame)}",
                             f"Grundram rader: {tm_base_count}",
                             f"Efter filter: {len(tm_filtered_rows)}",
-                            f"Basfilter: {selected_hard_req} av {hard_gate_total}",
-                            f"Spetsfilter: {', '.join(selected_spets_names) if selected_spets_names else 'Inga'}",
+                            f"Basfilter: {tm_runtime_hard_req} av {hard_gate_total}",
+                            f"Spetsfilter: {', '.join(tm_active_spets_names) if tm_active_spets_names else 'Inga'}",
                             "",
                             "VALDA SPETSFILTER OCH INTERVALL",
-                            *[f"{idx}. {r['Filter']} | {r.get('Intervall/regler', _spets_rule_text(r['Filter']))} | {int(r['Före rader'])} -> {int(r['Efter rader'])} | hist {int(r['Historisk träff'])}/{hist_total_for_soft}" for idx, r in enumerate(selected_spets_rows, start=1)],
+                            *[f"{idx}. {r['Filter']} | {r.get('Intervall/regler', _spets_rule_text(r['Filter']))} | {int(r['Före rader'])} -> {int(r['Efter rader'])} | hist {int(r['Historisk träff'])}/{hist_total_for_soft}" for idx, r in enumerate(tm_active_spets_rows, start=1)],
                             "",
                             f"Efter TipsetMatrix: {len(tm_reduced_rows)}",
                             f"12+ garanti: {tm_gsum['12plus']:.2f}%",
@@ -4329,21 +4595,21 @@ if st.session_state.get('har_kort_analys') and input_text:
                         tm_export_text = "\n".join(tm_export_lines)
                         dl_tm1, dl_tm2, dl_tm3 = st.columns(3)
                         with dl_tm1:
-                            st.download_button(
+                            tm_download_button(
                                 "⬇️ Ladda ner inlämningsfil TXT",
                                 tm_submission_text.encode('utf-8'),
                                 file_name=f"egna_rader_{submission_file_stem(spelform)}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
                                 mime="text/plain"
                             )
                         with dl_tm2:
-                            st.download_button(
+                            tm_download_button(
                                 "⬇️ Ladda ner råa rader TXT",
                                 "\n".join(tm_reduced_rows).encode('utf-8'),
                                 file_name=f"tipsetmatrix12_rader_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
                                 mime="text/plain"
                             )
                         with dl_tm3:
-                            st.download_button(
+                            tm_download_button(
                                 "⬇️ Ladda ner rapport TXT",
                                 tm_export_text.encode('utf-8'),
                                 file_name=f"tipsetmatrix12_rapport_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
@@ -4459,7 +4725,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                     f"Idag 1 {ms['1 idag %']}%, X {ms['X idag %']}%, 2 {ms['2 idag %']}%"
                 )
             ai_frame_export = "\n".join(ai_frame_export_lines)
-            st.download_button(
+            tm_download_button(
                 "⬇️ Ladda ner AI-Ram & U-filter TXT",
                 ai_frame_export.encode('utf-8'),
                 file_name=f"ai_ram_u_filter_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
