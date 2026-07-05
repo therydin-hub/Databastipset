@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v11.1n – Visar valda filter och intervall"
+APP_VERSION = "v11.1o – Inlämningsformat egna rader"
 
 
 st.markdown("""
@@ -960,6 +960,50 @@ def frame_export_text(frame):
     if not frame:
         return ""
     return " / ".join(_sort_signs_display(set(s)) for s in frame)
+
+def submission_game_header_and_code(spelform):
+    """Returnerar rubrik och radprefix för inlämningsformatet egna rader.
+
+    Formatet är t.ex. Europatipset:
+    EUROPATIPSET
+    E,2,2,1,X,2,...
+    """
+    sf = str(spelform or "").strip().lower()
+    if "europa" in sf:
+        return "EUROPATIPSET", "E"
+    if "stryk" in sf:
+        return "STRYKTIPSET", "S"
+    if "topp" in sf:
+        return "TOPPTIPSET", "T"
+    if "power" in sf:
+        return "POWERPLAY", "P"
+    return str(spelform or "TIPSET").upper(), "R"
+
+
+def normalize_single_row_text(row):
+    """Gör en rad robust: tar bort kommatecken/mellanslag och behåller bara 1/X/2."""
+    raw = str(row or "").upper()
+    return "".join(ch for ch in raw if ch in {"1", "X", "2"})
+
+
+def rows_to_submission_text(rows, spelform, antal_matcher):
+    """Bygger inlämningsfil för Egna rader.
+
+    Varje enkelrad får prefix enligt spelform och kommatecken mellan alla tecken:
+    E,2,2,1,X,2,X,X,2,1,2,2,1,1
+    """
+    header, code = submission_game_header_and_code(spelform)
+    out = [header]
+    for row in rows or []:
+        clean = normalize_single_row_text(row)
+        if len(clean) == int(antal_matcher):
+            out.append(",".join([code] + list(clean)))
+    return "\n".join(out)
+
+
+def submission_file_stem(spelform):
+    header, _ = submission_game_header_and_code(spelform)
+    return header.lower().replace("å", "a").replace("ä", "a").replace("ö", "o")
 
 
 # --- AI-RAM / U-FILTER ---
@@ -4234,10 +4278,16 @@ if st.session_state.get('har_kort_analys') and input_text:
                         st.markdown("### 📊 Garantitabell – TipsetMatrix 12")
                         st.dataframe(tm_gtable, use_container_width=True, hide_index=True)
 
-                        with st.expander("Visa reducerade rader"):
+                        tm_submission_text = rows_to_submission_text(tm_reduced_rows, spelform, antal_matcher)
+
+                        with st.expander("Visa reducerade rader / inlämningsformat"):
+                            st.markdown("**Inlämningsformat för Egna rader**")
+                            st.caption("Första raden är spelformen. Varje rad börjar med spelformens prefix, t.ex. E för Europatipset.")
+                            st.code("\n".join(tm_submission_text.splitlines()[:1000]), language="text")
+                            if len(tm_reduced_rows) > 999:
+                                st.caption("Visar första 999 spelraderna plus rubrik i appen. Nedladdningen innehåller alla.")
+                            st.markdown("**Råa reducerade rader utan prefix**")
                             st.code("\n".join(tm_reduced_rows[:1000]), language="text")
-                            if len(tm_reduced_rows) > 1000:
-                                st.caption("Visar första 1000 raderna i appen. Nedladdningen innehåller alla.")
 
                         tm_export_lines = [
                             f"TIPSETMATRIX 12 - {spelform}",
@@ -4270,21 +4320,31 @@ if st.session_state.get('har_kort_analys') and input_text:
                             ])
                         tm_export_lines.extend([
                             "",
-                            "REDUCERADE RADER",
+                            "INLÄMNINGSFORMAT EGNA RADER",
+                            tm_submission_text,
+                            "",
+                            "REDUCERADE RADER UTAN PREFIX",
                             *tm_reduced_rows,
                         ])
                         tm_export_text = "\n".join(tm_export_lines)
-                        dl_tm1, dl_tm2 = st.columns(2)
+                        dl_tm1, dl_tm2, dl_tm3 = st.columns(3)
                         with dl_tm1:
                             st.download_button(
-                                "⬇️ Ladda ner reducerade rader TXT",
-                                "\n".join(tm_reduced_rows).encode('utf-8'),
-                                file_name=f"tipsetmatrix12_rader_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                                "⬇️ Ladda ner inlämningsfil TXT",
+                                tm_submission_text.encode('utf-8'),
+                                file_name=f"egna_rader_{submission_file_stem(spelform)}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
                                 mime="text/plain"
                             )
                         with dl_tm2:
                             st.download_button(
-                                "⬇️ Ladda ner TipsetMatrix-rapport TXT",
+                                "⬇️ Ladda ner råa rader TXT",
+                                "\n".join(tm_reduced_rows).encode('utf-8'),
+                                file_name=f"tipsetmatrix12_rader_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                                mime="text/plain"
+                            )
+                        with dl_tm3:
+                            st.download_button(
+                                "⬇️ Ladda ner rapport TXT",
                                 tm_export_text.encode('utf-8'),
                                 file_name=f"tipsetmatrix12_rapport_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
                                 mime="text/plain"
