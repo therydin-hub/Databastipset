@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v11.1l – En kontroll: 100k+ & mallträff"
+APP_VERSION = "v11.1m – Fler hårda spetsfilter"
 
 
 st.markdown("""
@@ -2727,41 +2727,188 @@ if st.session_state.get('har_kort_analys') and input_text:
         # 2) enskilda hårda spetsfilter som bara väljs om de både klarar historikmålet
         #    och reducerar den kvarvarande radmassan tydligt.
 
+        def _pass_ratio(bools, ratio=0.70):
+            vals = [bool(x) for x in bools if x is not None]
+            if not vals:
+                return False
+            req = max(1, int(np.ceil(len(vals) * ratio)))
+            return sum(vals) >= req
+
         def _spets_history_checks(i):
             checks = {}
+
+            # FAT-sekvenser och sekvenspaket
+            fat_seq_checks = []
             if cb_fat_sequences and i < len(fat_strings_hist):
                 fstr = fat_strings_hist[i]
                 if fat_seq2_list:
-                    checks["FAT 2-sekvenser"] = in_range(count_fat_sequence_hits(fstr, fat_seq2_list), c_fat_seq2)
+                    v = in_range(count_fat_sequence_hits(fstr, fat_seq2_list), c_fat_seq2)
+                    checks["FAT 2-sekvenser"] = v
+                    fat_seq_checks.append(v)
                 if fat_seq3_list:
-                    checks["FAT 3-sekvenser"] = in_range(count_fat_sequence_hits(fstr, fat_seq3_list), c_fat_seq3)
+                    v = in_range(count_fat_sequence_hits(fstr, fat_seq3_list), c_fat_seq3)
+                    checks["FAT 3-sekvenser"] = v
+                    fat_seq_checks.append(v)
                 if fat_pair_list:
-                    checks["FAT dubbelchans"] = in_range(count_fat_pair_hits(fstr, fat_pair_list), c_fat_pairs)
+                    v = in_range(count_fat_pair_hits(fstr, fat_pair_list), c_fat_pairs)
+                    checks["FAT dubbelchans"] = v
+                    fat_seq_checks.append(v)
+                if len(fat_seq_checks) >= 2:
+                    checks["FAT-sekvenspaket"] = _pass_ratio(fat_seq_checks, 0.67)
+
+            # Värde-/riskfilter, både enskilt och som paket.
+            risk_checks = []
             if cb_points:
-                checks["Poängfilter smal"] = in_range(points_vals[i], c_points)
+                v = in_range(points_vals[i], c_points)
+                checks["Poängfilter smal"] = v
+                risk_checks.append(v)
             if cb_rank24:
-                checks["Ranksumma smal"] = in_range(rank24_sums[i], c_rank24)
+                v = in_range(rank24_sums[i], c_rank24)
+                checks["Ranksumma smal"] = v
+                risk_checks.append(v)
             if cb_log_surprise:
-                checks["Skrälltryck Log smal"] = in_range(log_surprise_sums[i], c_log_surprise)
+                v = in_range(log_surprise_sums[i], c_log_surprise)
+                checks["Skrälltryck Log smal"] = v
+                risk_checks.append(v)
             if cb_sft:
-                checks["SFT Summa smal"] = in_range(sft_sums[i], c_sft)
+                v = in_range(sft_sums[i], c_sft)
+                checks["SFT Summa smal"] = v
+                risk_checks.append(v)
             if cb_100minus:
-                checks["100-minus smal"] = in_range(minus_sums[i], c_minus)
+                v = in_range(minus_sums[i], c_minus)
+                checks["100-minus smal"] = v
+                risk_checks.append(v)
             if cb_totaldiff:
-                checks["Total Diff smal"] = in_range(total_diff_vals[i], c_totaldiff)
-            if cb_fat:
-                checks["FAT-profil smal"] = (
-                    in_range(fat_f[i], c_fatf) and in_range(fat_a[i], c_fata) and
-                    in_range(fat_t[i], c_fatt) and in_range(fat_sums[i], c_fatsum)
-                )
-            if cb_u_favs:
-                checks[f"Topp {slider_u_count} favoriter smal"] = in_range(u_wins[i], c_u)
-            if cb_fav_pressure:
-                checks["Favorittryck smal"] = in_range(fav70_wins[i], c_fav70) and in_range(fav60_wins[i], c_fav60) and in_range(fav50_wins[i], c_fav50)
-            if cb_shock_strength:
-                checks["Skrällstyrka smal"] = in_range(shock_u10[i], c_shock10) and in_range(shock_u15[i], c_shock15) and in_range(shock_u20[i], c_shock20) and in_range(shock_lowest[i], c_shock_lowest)
+                v = in_range(total_diff_vals[i], c_totaldiff)
+                checks["Total Diff smal"] = v
+                risk_checks.append(v)
             if cb_fav_delta:
-                checks["Favorit-delta smal"] = in_range(fav_delta_vals[i], c_fav_delta)
+                v = in_range(fav_delta_vals[i], c_fav_delta)
+                checks["Favorit-delta smal"] = v
+                risk_checks.append(v)
+            if len(risk_checks) >= 3:
+                checks["Risk-/värdepaket smal"] = _pass_ratio(risk_checks, 0.70)
+
+            # FAT-profil som helhet och som delkomponenter.
+            fat_profile_checks = []
+            if cb_fat:
+                vf = in_range(fat_f[i], c_fatf)
+                va = in_range(fat_a[i], c_fata)
+                vt = in_range(fat_t[i], c_fatt)
+                vs = in_range(fat_sums[i], c_fatsum)
+                checks["FAT F smal"] = vf
+                checks["FAT A smal"] = va
+                checks["FAT T smal"] = vt
+                checks["FAT Summa smal"] = vs
+                checks["FAT-profil smal"] = vf and va and vt and vs
+                fat_profile_checks.extend([vf, va, vt, vs])
+                checks["FAT-profilpaket"] = _pass_ratio(fat_profile_checks, 0.75)
+
+            # Favorit-/skrällbalans, både enskilt och paket.
+            fav_shock_checks = []
+            if cb_u_favs:
+                v = in_range(u_wins[i], c_u)
+                checks[f"Topp {slider_u_count} favoriter smal"] = v
+                fav_shock_checks.append(v)
+            if cb_fav_pressure:
+                v70 = in_range(fav70_wins[i], c_fav70)
+                v60 = in_range(fav60_wins[i], c_fav60)
+                v50 = in_range(fav50_wins[i], c_fav50)
+                checks["Favorittryck 70 smal"] = v70
+                checks["Favorittryck 60 smal"] = v60
+                checks["Favorittryck 50 smal"] = v50
+                checks["Favorittryck smal"] = v70 and v60 and v50
+                fav_shock_checks.extend([v70, v60, v50])
+            if cb_shock_strength:
+                vu10 = in_range(shock_u10[i], c_shock10)
+                vu15 = in_range(shock_u15[i], c_shock15)
+                vu20 = in_range(shock_u20[i], c_shock20)
+                vlow = in_range(shock_lowest[i], c_shock_lowest)
+                checks["Skrällstyrka U10 smal"] = vu10
+                checks["Skrällstyrka U15 smal"] = vu15
+                checks["Skrällstyrka U20 smal"] = vu20
+                checks["Lägsta vinnare smal"] = vlow
+                checks["Skrällstyrka smal"] = vu10 and vu15 and vu20 and vlow
+                fav_shock_checks.extend([vu10, vu15, vu20, vlow])
+            if len(fav_shock_checks) >= 3:
+                checks["Favorit-/skrällpaket smal"] = _pass_ratio(fav_shock_checks, 0.70)
+
+            # Strukturfilter: nu används även delkomponenter som hårda spetsfilter.
+            struct_checks = []
+            if cb_base:
+                v1 = in_range(ones[i], c_ones)
+                vx = in_range(draws[i], c_draws)
+                v2 = in_range(twos[i], c_twos)
+                checks["Antal 1 smal"] = v1
+                checks["Antal X smal"] = vx
+                checks["Antal 2 smal"] = v2
+                checks["Teckenbalans 1X2 smal"] = v1 and vx and v2
+                struct_checks.extend([v1, vx, v2])
+            if cb_streak:
+                v1 = in_range(s1[i], c_s1)
+                vx = in_range(sx[i], c_sx)
+                v2 = in_range(s2[i], c_s2)
+                checks["Sviter 1 smal"] = v1
+                checks["Sviter X smal"] = vx
+                checks["Sviter 2 smal"] = v2
+                checks["Sviter paket smal"] = v1 and vx and v2
+                struct_checks.extend([v1, vx, v2])
+            if cb_gap:
+                v1 = in_range(g1[i], c_g1)
+                vx = in_range(gx[i], c_gx)
+                v2 = in_range(g2[i], c_g2)
+                checks["Luckor 1 smal"] = v1
+                checks["Luckor X smal"] = vx
+                checks["Luckor 2 smal"] = v2
+                checks["Luckor paket smal"] = v1 and vx and v2
+                struct_checks.extend([v1, vx, v2])
+            if cb_single:
+                v1 = in_range(sing1[i], c_sing1)
+                vx = in_range(singx[i], c_singx)
+                v2 = in_range(sing2[i], c_sing2)
+                vt = in_range(sing_tot[i], c_singtot)
+                checks["Singlar 1 smal"] = v1
+                checks["Singlar X smal"] = vx
+                checks["Singlar 2 smal"] = v2
+                checks["Singlar total smal"] = vt
+                checks["Singlar paket smal"] = v1 and vx and v2 and vt
+                struct_checks.extend([v1, vx, v2, vt])
+            if cb_doublet:
+                v1 = in_range(dub1[i], c_dub1)
+                vx = in_range(dubx[i], c_dubx)
+                v2 = in_range(dub2[i], c_dub2)
+                vt = in_range(dub_tot[i], c_dubtot)
+                checks["Dubbletter 1 smal"] = v1
+                checks["Dubbletter X smal"] = vx
+                checks["Dubbletter 2 smal"] = v2
+                checks["Dubbletter total smal"] = vt
+                checks["Dubbletter paket smal"] = v1 and vx and v2 and vt
+                struct_checks.extend([v1, vx, v2, vt])
+            if cb_triplet:
+                v1 = in_range(trip1[i], c_trip1)
+                vx = in_range(tripx[i], c_tripx)
+                v2 = in_range(trip2[i], c_trip2)
+                vt = in_range(trip_tot[i], c_triptot)
+                checks["Tripplar 1 smal"] = v1
+                checks["Tripplar X smal"] = vx
+                checks["Tripplar 2 smal"] = v2
+                checks["Tripplar total smal"] = vt
+                checks["Tripplar paket smal"] = v1 and vx and v2 and vt
+                struct_checks.extend([v1, vx, v2, vt])
+            if cb_occur:
+                v1 = in_range(occ1[i], c_occ1)
+                vx = in_range(occx[i], c_occx)
+                v2 = in_range(occ2[i], c_occ2)
+                vt = in_range(occ_tot[i], c_occtot)
+                checks["Uppkomster 1 smal"] = v1
+                checks["Uppkomster X smal"] = vx
+                checks["Uppkomster 2 smal"] = v2
+                checks["Uppkomster total smal"] = vt
+                checks["Uppkomster paket smal"] = v1 and vx and v2 and vt
+                struct_checks.extend([v1, vx, v2, vt])
+            if len(struct_checks) >= 5:
+                checks["Strukturpaket smal"] = _pass_ratio(struct_checks, 0.72)
+
             if cb_super_macro:
                 checks["Super-Makro"] = _super_macro_hist_ok(i)
             return checks
@@ -2776,38 +2923,174 @@ if st.session_state.get('har_kort_analys') and input_text:
             t1_c, tx_c, t2_c, triptot_c, _ = get_triplets(tr)
             o1_c, ox_c, o2_c, occtot_c, _ = get_occurrences(tr)
             f_c, a_c, t_c, fsum_c = get_fat(tr, filter_vec)
+
+            fat_seq_checks = []
             if cb_fat_sequences:
                 fstr = get_fat_string(tr, filter_vec)
                 if fat_seq2_list:
-                    checks["FAT 2-sekvenser"] = in_range(count_fat_sequence_hits(fstr, fat_seq2_list), c_fat_seq2)
+                    v = in_range(count_fat_sequence_hits(fstr, fat_seq2_list), c_fat_seq2)
+                    checks["FAT 2-sekvenser"] = v
+                    fat_seq_checks.append(v)
                 if fat_seq3_list:
-                    checks["FAT 3-sekvenser"] = in_range(count_fat_sequence_hits(fstr, fat_seq3_list), c_fat_seq3)
+                    v = in_range(count_fat_sequence_hits(fstr, fat_seq3_list), c_fat_seq3)
+                    checks["FAT 3-sekvenser"] = v
+                    fat_seq_checks.append(v)
                 if fat_pair_list:
-                    checks["FAT dubbelchans"] = in_range(count_fat_pair_hits(fstr, fat_pair_list), c_fat_pairs)
+                    v = in_range(count_fat_pair_hits(fstr, fat_pair_list), c_fat_pairs)
+                    checks["FAT dubbelchans"] = v
+                    fat_seq_checks.append(v)
+                if len(fat_seq_checks) >= 2:
+                    checks["FAT-sekvenspaket"] = _pass_ratio(fat_seq_checks, 0.67)
+
+            risk_checks = []
             if cb_points:
-                checks["Poängfilter smal"] = in_range(get_rank_points(tr, filter_vec), c_points)
+                v = in_range(get_rank_points(tr, filter_vec), c_points)
+                checks["Poängfilter smal"] = v
+                risk_checks.append(v)
             if cb_rank24:
-                checks["Ranksumma smal"] = in_range(get_rank_sum(tr, filter_vec), c_rank24)
+                v = in_range(get_rank_sum(tr, filter_vec), c_rank24)
+                checks["Ranksumma smal"] = v
+                risk_checks.append(v)
             if cb_log_surprise:
-                checks["Skrälltryck Log smal"] = in_range(get_log_surprise_sum(tr, filter_vec), c_log_surprise)
+                v = in_range(get_log_surprise_sum(tr, filter_vec), c_log_surprise)
+                checks["Skrälltryck Log smal"] = v
+                risk_checks.append(v)
             if cb_sft:
-                checks["SFT Summa smal"] = in_range(get_sft_sum(tr, filter_vec), c_sft)
+                v = in_range(get_sft_sum(tr, filter_vec), c_sft)
+                checks["SFT Summa smal"] = v
+                risk_checks.append(v)
             if cb_100minus:
-                checks["100-minus smal"] = in_range(get_100_minus_sum(tr, filter_vec), c_minus)
+                v = in_range(get_100_minus_sum(tr, filter_vec), c_minus)
+                checks["100-minus smal"] = v
+                risk_checks.append(v)
             if cb_totaldiff:
-                checks["Total Diff smal"] = in_range(calculate_total_diff(match_odds_filter, list(tr)), c_totaldiff)
+                v = in_range(calculate_total_diff(match_odds_filter, list(tr)), c_totaldiff)
+                checks["Total Diff smal"] = v
+                risk_checks.append(v)
+            if cb_fav_delta:
+                v = in_range(get_favorite_delta(tr, filter_vec), c_fav_delta)
+                checks["Favorit-delta smal"] = v
+                risk_checks.append(v)
+            if len(risk_checks) >= 3:
+                checks["Risk-/värdepaket smal"] = _pass_ratio(risk_checks, 0.70)
+
             if cb_fat:
-                checks["FAT-profil smal"] = in_range(f_c, c_fatf) and in_range(a_c, c_fata) and in_range(t_c, c_fatt) and in_range(fsum_c, c_fatsum)
+                vf = in_range(f_c, c_fatf)
+                va = in_range(a_c, c_fata)
+                vt = in_range(t_c, c_fatt)
+                vs = in_range(fsum_c, c_fatsum)
+                checks["FAT F smal"] = vf
+                checks["FAT A smal"] = va
+                checks["FAT T smal"] = vt
+                checks["FAT Summa smal"] = vs
+                checks["FAT-profil smal"] = vf and va and vt and vs
+                checks["FAT-profilpaket"] = _pass_ratio([vf, va, vt, vs], 0.75)
+
+            fav_shock_checks = []
             if cb_u_favs:
-                checks[f"Topp {slider_u_count} favoriter smal"] = in_range(get_top_n_favs_wins(tr, filter_vec, slider_u_count), c_u)
+                v = in_range(get_top_n_favs_wins(tr, filter_vec, slider_u_count), c_u)
+                checks[f"Topp {slider_u_count} favoriter smal"] = v
+                fav_shock_checks.append(v)
             if cb_fav_pressure:
                 fp_c = get_favorite_pressure(tr, filter_vec)
-                checks["Favorittryck smal"] = in_range(fp_c['F70_Wins'], c_fav70) and in_range(fp_c['F60_Wins'], c_fav60) and in_range(fp_c['F50_Wins'], c_fav50)
+                v70 = in_range(fp_c['F70_Wins'], c_fav70)
+                v60 = in_range(fp_c['F60_Wins'], c_fav60)
+                v50 = in_range(fp_c['F50_Wins'], c_fav50)
+                checks["Favorittryck 70 smal"] = v70
+                checks["Favorittryck 60 smal"] = v60
+                checks["Favorittryck 50 smal"] = v50
+                checks["Favorittryck smal"] = v70 and v60 and v50
+                fav_shock_checks.extend([v70, v60, v50])
             if cb_shock_strength:
                 sh_c = get_shock_strength(tr, filter_vec)
-                checks["Skrällstyrka smal"] = in_range(sh_c['U10_Wins'], c_shock10) and in_range(sh_c['U15_Wins'], c_shock15) and in_range(sh_c['U20_Wins'], c_shock20) and in_range(sh_c['Lowest_Win_Pct'], c_shock_lowest)
-            if cb_fav_delta:
-                checks["Favorit-delta smal"] = in_range(get_favorite_delta(tr, filter_vec), c_fav_delta)
+                vu10 = in_range(sh_c['U10_Wins'], c_shock10)
+                vu15 = in_range(sh_c['U15_Wins'], c_shock15)
+                vu20 = in_range(sh_c['U20_Wins'], c_shock20)
+                vlow = in_range(sh_c['Lowest_Win_Pct'], c_shock_lowest)
+                checks["Skrällstyrka U10 smal"] = vu10
+                checks["Skrällstyrka U15 smal"] = vu15
+                checks["Skrällstyrka U20 smal"] = vu20
+                checks["Lägsta vinnare smal"] = vlow
+                checks["Skrällstyrka smal"] = vu10 and vu15 and vu20 and vlow
+                fav_shock_checks.extend([vu10, vu15, vu20, vlow])
+            if len(fav_shock_checks) >= 3:
+                checks["Favorit-/skrällpaket smal"] = _pass_ratio(fav_shock_checks, 0.70)
+
+            struct_checks = []
+            if cb_base:
+                v1 = in_range(c1, c_ones)
+                vx = in_range(cx, c_draws)
+                v2 = in_range(c2, c_twos)
+                checks["Antal 1 smal"] = v1
+                checks["Antal X smal"] = vx
+                checks["Antal 2 smal"] = v2
+                checks["Teckenbalans 1X2 smal"] = v1 and vx and v2
+                struct_checks.extend([v1, vx, v2])
+            if cb_streak:
+                v1 = in_range(s1_c, c_s1)
+                vx = in_range(sx_c, c_sx)
+                v2 = in_range(s2_c, c_s2)
+                checks["Sviter 1 smal"] = v1
+                checks["Sviter X smal"] = vx
+                checks["Sviter 2 smal"] = v2
+                checks["Sviter paket smal"] = v1 and vx and v2
+                struct_checks.extend([v1, vx, v2])
+            if cb_gap:
+                v1 = in_range(g1_c, c_g1)
+                vx = in_range(gx_c, c_gx)
+                v2 = in_range(g2_c, c_g2)
+                checks["Luckor 1 smal"] = v1
+                checks["Luckor X smal"] = vx
+                checks["Luckor 2 smal"] = v2
+                checks["Luckor paket smal"] = v1 and vx and v2
+                struct_checks.extend([v1, vx, v2])
+            if cb_single:
+                v1 = in_range(si1_c, c_sing1)
+                vx = in_range(six_c, c_singx)
+                v2 = in_range(si2_c, c_sing2)
+                vt = in_range(singtot_c, c_singtot)
+                checks["Singlar 1 smal"] = v1
+                checks["Singlar X smal"] = vx
+                checks["Singlar 2 smal"] = v2
+                checks["Singlar total smal"] = vt
+                checks["Singlar paket smal"] = v1 and vx and v2 and vt
+                struct_checks.extend([v1, vx, v2, vt])
+            if cb_doublet:
+                v1 = in_range(d1_c, c_dub1)
+                vx = in_range(dx_c, c_dubx)
+                v2 = in_range(d2_c, c_dub2)
+                vt = in_range(dubtot_c, c_dubtot)
+                checks["Dubbletter 1 smal"] = v1
+                checks["Dubbletter X smal"] = vx
+                checks["Dubbletter 2 smal"] = v2
+                checks["Dubbletter total smal"] = vt
+                checks["Dubbletter paket smal"] = v1 and vx and v2 and vt
+                struct_checks.extend([v1, vx, v2, vt])
+            if cb_triplet:
+                v1 = in_range(t1_c, c_trip1)
+                vx = in_range(tx_c, c_tripx)
+                v2 = in_range(t2_c, c_trip2)
+                vt = in_range(triptot_c, c_triptot)
+                checks["Tripplar 1 smal"] = v1
+                checks["Tripplar X smal"] = vx
+                checks["Tripplar 2 smal"] = v2
+                checks["Tripplar total smal"] = vt
+                checks["Tripplar paket smal"] = v1 and vx and v2 and vt
+                struct_checks.extend([v1, vx, v2, vt])
+            if cb_occur:
+                v1 = in_range(o1_c, c_occ1)
+                vx = in_range(ox_c, c_occx)
+                v2 = in_range(o2_c, c_occ2)
+                vt = in_range(occtot_c, c_occtot)
+                checks["Uppkomster 1 smal"] = v1
+                checks["Uppkomster X smal"] = vx
+                checks["Uppkomster 2 smal"] = v2
+                checks["Uppkomster total smal"] = vt
+                checks["Uppkomster paket smal"] = v1 and vx and v2 and vt
+                struct_checks.extend([v1, vx, v2, vt])
+            if len(struct_checks) >= 5:
+                checks["Strukturpaket smal"] = _pass_ratio(struct_checks, 0.72)
+
             if cb_super_macro:
                 checks["Super-Makro"] = pass_super_macro_row(tr, filter_vec, sm_bounds, slider_super_groups)
             return checks
@@ -2884,8 +3167,8 @@ if st.session_state.get('har_kort_analys') and input_text:
             for name in all_spets_names:
                 cand_spets_map[name].append(bool(checks.get(name, False)))
 
-        min_spets_reduction_pct = 10.0
-        max_spets_filters = 5
+        min_spets_reduction_pct = 5.0
+        max_spets_filters = 10
         current_hist_mask = list(hard_only_hist_mask)
         current_cand_mask = list(hard_only_cand_mask)
         selected_spets_rows = []
