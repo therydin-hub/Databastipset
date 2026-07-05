@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v11.1k – AutoHard Spetsfilter utan soft"
+APP_VERSION = "v11.1l – En kontroll: 100k+ & mallträff"
 
 
 st.markdown("""
@@ -1767,20 +1767,11 @@ if st.session_state['aktuell_spelform'] != spelform:
 # --- SIDEBAR (REN KONTROLLPANEL) ---
 with st.sidebar:
     st.header("🎛️ Kontrollpanel")
-    st.caption("Normal-läget använder hårda basfilter och hårda spetsfilter. Soft används inte som aktivt filtersteg.")
+    st.caption("Normal-läget styrs av utdelningsnivå och samlad mallträff. Appen väljer intervaller, basfilter, spetsfilter och TipsetMatrix-inställningar själv.")
 
     if st.button("🧹 Töm minne / rensa cache", use_container_width=True):
         st.cache_data.clear()
         st.success("Cachen tömd. Ladda om sidan vid behov.")
-
-    st.markdown("---")
-    st.subheader("1) AutoFilter")
-    filter_profile = st.selectbox(
-        "Filterläge",
-        ["Rekommenderad", "Försiktig", "Hård", "Expert"],
-        index=0,
-        help="Rekommenderad passar normalspel. Försiktig räddar fler historiska rader. Hård reducerar mer. Expert visar alla gamla reglage."
-    )
 
     profile_defaults = {
         "Försiktig": {"top_n": 40, "core_val": 95, "core_str": 100, "automin": 90, "group": 90, "pass_ratio": 0.80, "super": 3},
@@ -1788,51 +1779,10 @@ with st.sidebar:
         "Hård": {"top_n": 30, "core_val": 85, "core_str": 95, "automin": 80, "group": 85, "pass_ratio": 0.97, "super": 5},
         "Expert": {"top_n": 30, "core_val": 90, "core_str": 100, "automin": 85, "group": 90, "pass_ratio": 0.90, "super": 4},
     }
-    defaults = profile_defaults[filter_profile]
-
-    slider_top_n = st.slider("Liknande historiska omgångar", 5, 100, int(defaults["top_n"]), step=5)
-    slider_combined_min_hist_pct = st.slider(
-        "Min samlad mallträff %",
-        50, 95, 67, step=1,
-        help="AutoHard Spetsfilter väljer hårda basfilter och lägger bara till spetsfilter som både klarar denna historiska träff och reducerar veckans radmassa tydligt. 67 % motsvarar ca 20 av 30 omgångar."
-    )
-    slider_core_val = st.slider("Värdeintervall / kärna %", 40, 100, int(defaults["core_val"]), step=5)
-    slider_core_str = st.slider("Strukturintervall / kärna %", 40, 100, int(defaults["core_str"]), step=5)
-
-    cb_autotrim = st.toggle("AutoTrim: välj rationella intervall", value=True)
-    slider_autotrim_min_hist = st.slider("AutoTrim: min historisk träff %", 70, 100, int(defaults["automin"]), step=5)
-
     p_opts = [0, 500, 1000, 2500, 5000, 10000, 25000, 50000, 75000, 100000, 250000, 500000, 750000, 1000000, 2500000, 5000000, 10000000]
-    slider_payout = st.select_slider("Utdelningsspann i historik", options=p_opts, value=(0, p_opts[-1]))
 
     st.markdown("---")
-    st.subheader("2) Reducering")
-    slider_macro_target = st.slider("Super-Makro historisk träff %", 40, 100, 90, step=5)
-    slider_super_groups = st.slider("Super-Makro krav", 1, 8, int(defaults["super"]), step=1, help="Kravet är minst X av 8 struktur-/FAT-grupper.")
-    slider_group_target = st.slider("Pro-gruppmål historisk träff %", 70, 100, int(defaults["group"]), step=5)
-
-    slider_u_count = st.slider("Toppfavoriter / U-tecken", 1, antal_matcher, min(3, antal_matcher), step=1)
-
-    frame_budget_options = [864, 1728, 3456, 6912, 10368, 15552, 20736, 25000, 31104, 50000, 75000]
-    slider_frame_budget = st.select_slider("AI-Balansram max radantal", options=frame_budget_options, value=25000)
-    slider_frame_max_full = st.slider("AI-Balansram max helgarderingar", 0, antal_matcher, min(4, antal_matcher), step=1)
-    slider_u_target = st.slider("U-rad mål historisk träff %", 70, 100, 90, step=5)
-
-    st.markdown("---")
-    st.subheader("3) TipsetMatrix 12")
-    cb_tipsetmatrix = True
-    tm_frame_source = st.selectbox("Grundram", ["Klickbar grundram", "AI-Balansram", "Textgrundram"], index=0)
-    tm_base_limit = st.select_slider("Max rader i grundram", options=[1000, 2500, 5000, 10000, 15000, 25000, 50000, 75000], value=25000)
-    tm_filter_limit = st.select_slider("Max rader efter filter", options=[500, 1000, 1500, 2500, 5000, 10000, 20000], value=5000)
-    tm_output_limit = st.select_slider("Max reducerade rader i budgetläge", options=[50, 100, 150, 200, 300, 500, 750, 1000], value=300)
-    tm_guarantee_mode = st.toggle("Kör till full 12-garanti", value=True, help="På = motorn stannar inte vid maxrader, utan kör tills hela filtrerade radmassan är 12-täckt. Av = budgetläge med maxrader.")
-    tm_mode = st.selectbox("Motorläge", ["Snabb", "Balans", "Max"], index=1)
-    tm_weighting = st.selectbox("Viktning", ["Filterpoäng + sannolikhet", "Filterpoäng", "Neutral"], index=0)
-    tm_seed = st.number_input("Seed", min_value=1, max_value=999999, value=42, step=1)
-    cb_tm_backtest = st.toggle("Visa rättning/facitpanel", value=True)
-
-    st.markdown("---")
-    expert_mode = st.toggle("🔧 Expertläge: visa filterreglage", value=(filter_profile == "Expert"))
+    expert_mode = st.toggle("🔧 Expertläge", value=False, help="Av = normalspel med en huvudkontroll. På = visa alla tekniska reglage.")
 
     # Standard: allt på. Expertläget kan användas för felsökning.
     cb_payout = True
@@ -1865,11 +1815,106 @@ with st.sidebar:
     cb_group_shock = True
     cb_group_fat = True
     cb_group_structure = True
-    cb_ai_frame = True
+    cb_ai_frame = False
 
     max_rank = 3**antal_matcher
-    if expert_mode:
-        with st.expander("Aktiva filter", expanded=True):
+
+    if not expert_mode:
+        # Normalspel: Niklas-spåret.
+        # En historisk mall: hög utdelning + liknande procentbild + samlad mallträff.
+        defaults = profile_defaults["Rekommenderad"]
+        slider_top_n = 30
+        st.subheader("Spelprofil")
+        payout_min_normal = st.select_slider(
+            "Historik: minsta utdelning",
+            options=p_opts,
+            value=100000,
+            help="Appen jämför bara mot historiska omgångar där 13-rättsutdelningen är minst denna nivå. Standard: 100 000 kr+."
+        )
+        slider_payout = (int(payout_min_normal), p_opts[-1])
+        target_hits_normal = st.slider(
+            "Samlad mallträff av 30",
+            15, 30, 20, step=1,
+            help="Appen väljer bara filterpaket där minst detta antal av de 30 mest lika historiska högutdelningsomgångarna överlever."
+        )
+        slider_combined_min_hist_pct = (100.0 * float(target_hits_normal) / float(slider_top_n)) if slider_top_n else 67.0
+        st.caption(f"Mål: minst {target_hits_normal}/{slider_top_n} historiska mallrader inom {int(payout_min_normal):,} kr+.")
+
+        # Fasta rationella standardvärden i normal-läge.
+        slider_core_val = int(defaults["core_val"])
+        slider_core_str = int(defaults["core_str"])
+        cb_autotrim = True
+        slider_autotrim_min_hist = int(defaults["automin"])
+        slider_macro_target = 90
+        slider_super_groups = int(defaults["super"])
+        slider_group_target = int(defaults["group"])
+        slider_u_count = min(3, antal_matcher)
+        slider_frame_budget = 25000
+        slider_frame_max_full = min(4, antal_matcher)
+        slider_u_target = 90
+
+        # TipsetMatrix standard i normal-läge: klickbar ram och full 12-garanti.
+        cb_tipsetmatrix = True
+        tm_frame_source = "Klickbar grundram"
+        tm_base_limit = 25000
+        tm_filter_limit = 5000
+        tm_output_limit = 300
+        tm_guarantee_mode = True
+        tm_mode = "Balans"
+        tm_weighting = "Filterpoäng + sannolikhet"
+        tm_seed = 42
+        cb_tm_backtest = False
+
+        st.markdown("---")
+        st.success("Normal-läge: appen väljer bästa intervaller, hårda basfilter och hårda spetsfilter automatiskt utifrån träffbilden.")
+
+    else:
+        st.subheader("1) AutoFilter")
+        filter_profile = st.selectbox(
+            "Filterläge",
+            ["Rekommenderad", "Försiktig", "Hård", "Expert"],
+            index=0,
+            help="Expertläge visar de gamla tekniska reglagen. Normal-läge använder bara utdelning + samlad mallträff."
+        )
+        defaults = profile_defaults[filter_profile]
+
+        slider_top_n = st.slider("Liknande historiska omgångar", 5, 100, int(defaults["top_n"]), step=5)
+        slider_combined_min_hist_pct = st.slider(
+            "Min samlad mallträff %",
+            50, 95, 67, step=1,
+            help="AutoHard Spetsfilter väljer hårda basfilter och lägger bara till spetsfilter som både klarar denna historiska träff och reducerar veckans radmassa tydligt."
+        )
+        slider_core_val = st.slider("Värdeintervall / kärna %", 40, 100, int(defaults["core_val"]), step=5)
+        slider_core_str = st.slider("Strukturintervall / kärna %", 40, 100, int(defaults["core_str"]), step=5)
+        cb_autotrim = st.toggle("AutoTrim: välj rationella intervall", value=True)
+        slider_autotrim_min_hist = st.slider("AutoTrim: min historisk träff %", 70, 100, int(defaults["automin"]), step=5)
+        slider_payout = st.select_slider("Utdelningsspann i historik", options=p_opts, value=(100000, p_opts[-1]))
+
+        st.markdown("---")
+        st.subheader("2) Reducering")
+        slider_macro_target = st.slider("Super-Makro historisk träff %", 40, 100, 90, step=5)
+        slider_super_groups = st.slider("Super-Makro krav", 1, 8, int(defaults["super"]), step=1, help="Kravet är minst X av 8 struktur-/FAT-grupper.")
+        slider_group_target = st.slider("Pro-gruppmål historisk träff %", 70, 100, int(defaults["group"]), step=5)
+        slider_u_count = st.slider("Toppfavoriter / U-tecken", 1, antal_matcher, min(3, antal_matcher), step=1)
+        frame_budget_options = [864, 1728, 3456, 6912, 10368, 15552, 20736, 25000, 31104, 50000, 75000]
+        slider_frame_budget = st.select_slider("AI-Balansram max radantal", options=frame_budget_options, value=25000)
+        slider_frame_max_full = st.slider("AI-Balansram max helgarderingar", 0, antal_matcher, min(4, antal_matcher), step=1)
+        slider_u_target = st.slider("U-rad mål historisk träff %", 70, 100, 90, step=5)
+
+        st.markdown("---")
+        st.subheader("3) TipsetMatrix 12")
+        cb_tipsetmatrix = True
+        tm_frame_source = st.selectbox("Grundram", ["Klickbar grundram", "AI-Balansram", "Textgrundram"], index=0)
+        tm_base_limit = st.select_slider("Max rader i grundram", options=[1000, 2500, 5000, 10000, 15000, 25000, 50000, 75000], value=25000)
+        tm_filter_limit = st.select_slider("Max rader efter filter", options=[500, 1000, 1500, 2500, 5000, 10000, 20000], value=5000)
+        tm_output_limit = st.select_slider("Max reducerade rader i budgetläge", options=[50, 100, 150, 200, 300, 500, 750, 1000], value=300)
+        tm_guarantee_mode = st.toggle("Kör till full 12-garanti", value=True, help="På = motorn stannar inte vid maxrader, utan kör tills hela filtrerade radmassan är 12-täckt. Av = budgetläge med maxrader.")
+        tm_mode = st.selectbox("Motorläge", ["Snabb", "Balans", "Max"], index=1)
+        tm_weighting = st.selectbox("Viktning", ["Filterpoäng + sannolikhet", "Filterpoäng", "Neutral"], index=0)
+        tm_seed = st.number_input("Seed", min_value=1, max_value=999999, value=42, step=1)
+        cb_tm_backtest = st.toggle("Visa rättning/facitpanel", value=False)
+
+        with st.expander("Aktiva filter", expanded=False):
             cb_payout = st.checkbox("Utdelning", value=cb_payout)
             cb_u_favs = st.checkbox("Topp-Favoriter", value=cb_u_favs)
             cb_sft = st.checkbox("SFT Summa", value=cb_sft)
@@ -1905,8 +1950,6 @@ with st.sidebar:
             cb_group_shock = st.checkbox("Skrällgrupp", value=cb_group_shock)
             cb_group_fat = st.checkbox("FAT-profilgrupp", value=cb_group_fat)
             cb_group_structure = st.checkbox("Strukturgrupp", value=cb_group_structure)
-    else:
-        st.info("Alla filter är aktiva. Appen väljer breda hårda basfilter först och lägger därefter bara till hårda spetsfilter som både klarar historikmålet och reducerar radmassan tydligt.")
 
     active_filters_list = [
         cb_u_favs, cb_sft, cb_fat, cb_fat_sequences, cb_points, cb_100minus, cb_log_surprise, cb_rank24, cb_totaldiff,
@@ -1920,9 +1963,7 @@ with st.sidebar:
     else:
         auto_pass_req = 0
 
-    # Detta är bara ett preliminärt krav innan historiska facitrader har poängsatts.
-    # Det diagnostiska poängkravet används bara för analys/viktning. Aktiv filtrering görs med AutoHard Spetsfilter längre ned
-    # (standard 67 % = ungefär 20 av 30 historiska omgångar).
+    # Diagnostiskt poängkrav används bara för analys/viktning. Aktiv filtrering görs med AutoHard Spetsfilter.
     manual_soft_req = False
     if expert_mode and total_active > 0:
         manual_soft_req = st.checkbox("Styr diagnostiskt poängkrav manuellt", value=False)
@@ -1933,8 +1974,6 @@ with st.sidebar:
             st.metric("Diagnostisk filterpoäng", f"{slider_pass_req} av {total_active}")
     else:
         slider_pass_req = auto_pass_req
-        st.metric("Diagnostisk filterpoäng", f"{slider_pass_req} av {total_active}")
-
 # --- MAIN AREA FÖR INMATNING ---
 st.markdown(
     f"""
