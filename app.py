@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v11.1q – Stabil grundram & teckenfördelning"
+APP_VERSION = "v11.1r – Teckenskydd ersätter filter & 13-chans"
 
 
 st.markdown("""
@@ -1160,6 +1160,51 @@ def add_rows_for_sign_coverage(source_rows, selected_rows, frame, row_scores=Non
 
 
 
+def add_rows_for_min_13_chance(source_rows, selected_rows, target_pct=0.0, row_scores=None, antal_matcher=None):
+    """Lägger till högst rankade rader från filtermassan tills oviktad 13-chans når målet.
+
+    13-chansen här är andelen inlämnade rader av den filtrerade radmassan.
+    Funktionen ändrar inte filtermassan och kan därför inte sänka 12-garantin; den ökar bara antal slutrader.
+    """
+    if antal_matcher is None:
+        antal_matcher = len(source_rows[0]) if source_rows else 0
+    source_rows = [normalize_single_row_text(r) for r in (source_rows or []) if len(normalize_single_row_text(r)) == int(antal_matcher)]
+    selected_rows = list(dict.fromkeys([normalize_single_row_text(r) for r in (selected_rows or []) if len(normalize_single_row_text(r)) == int(antal_matcher)]))
+    try:
+        target_pct = float(target_pct)
+    except Exception:
+        target_pct = 0.0
+    target_pct = max(0.0, min(100.0, target_pct))
+    if not source_rows or target_pct <= 0:
+        return selected_rows, []
+
+    needed = int(np.ceil(len(source_rows) * (target_pct / 100.0)))
+    needed = max(0, min(len(source_rows), needed))
+    if len(selected_rows) >= needed:
+        return selected_rows, []
+
+    if row_scores is None or len(row_scores) != len(source_rows):
+        scores = [0.0] * len(source_rows)
+    else:
+        scores = [float(x) for x in row_scores]
+
+    selected_set = set(selected_rows)
+    candidates = []
+    for idx, rr in enumerate(source_rows):
+        if rr not in selected_set:
+            candidates.append((float(scores[idx]), idx, rr))
+    candidates.sort(reverse=True)
+
+    added = []
+    for _, _, rr in candidates:
+        if len(selected_rows) >= needed:
+            break
+        selected_rows.append(rr)
+        selected_set.add(rr)
+        added.append(rr)
+    return selected_rows, added
+
+
 def submission_file_stem(spelform):
     header, _ = submission_game_header_and_code(spelform)
     return header.lower().replace("å", "a").replace("ä", "a").replace("ö", "o")
@@ -2042,6 +2087,11 @@ with st.sidebar:
         )
         slider_combined_min_hist_pct = (100.0 * float(target_hits_normal) / float(slider_top_n)) if slider_top_n else 67.0
         st.caption(f"Mål: minst {target_hits_normal}/{slider_top_n} historiska mallrader inom {int(payout_min_normal):,} kr+.")
+        tm_min_13_chance_pct = st.slider(
+            "Minsta 13-chans efter reducering",
+            0, 35, 20, step=1,
+            help="Om TipsetMatrix 12-garanti ger lägre 13-chans än detta lägger appen till högst rankade rader från den filtrerade radmassan tills målet nås. 0 = avstängt."
+        )
 
         # Fasta rationella standardvärden i normal-läge.
         slider_core_val = int(defaults["core_val"])
@@ -2112,6 +2162,11 @@ with st.sidebar:
         tm_filter_limit = st.select_slider("Max rader efter filter", options=[500, 1000, 1500, 2500, 5000, 10000, 20000], value=5000)
         tm_output_limit = st.select_slider("Max reducerade rader i budgetläge", options=[50, 100, 150, 200, 300, 500, 750, 1000], value=300)
         tm_guarantee_mode = st.toggle("Kör till full 12-garanti", value=True, help="På = motorn stannar inte vid maxrader, utan kör tills hela filtrerade radmassan är 12-täckt. Av = budgetläge med maxrader.")
+        tm_min_13_chance_pct = st.slider(
+            "Minsta 13-chans efter reducering %",
+            0, 50, 20, step=1,
+            help="Lägger till högst rankade rader från filtermassan om 13-chansen efter TipsetMatrix blir lägre än målet. 0 = avstängt."
+        )
         tm_mode = st.selectbox("Motorläge", ["Snabb", "Balans", "Max"], index=1)
         tm_weighting = st.selectbox("Viktning", ["Filterpoäng + sannolikhet", "Filterpoäng", "Neutral"], index=0)
         tm_seed = st.number_input("Seed", min_value=1, max_value=999999, value=42, step=1)
@@ -4335,6 +4390,72 @@ if st.session_state.get('har_kort_analys') and input_text:
                             filtered_rows = [x for x in hard_rows if spets_candidate_passes(x[0], names)]
                             return hard_rows, filtered_rows
 
+                        def _runtime_history_hits(hreq, names):
+                            hits = 0
+                            for ii in range(len(v_m)):
+                                base_ok = (history_hard_scores[ii] >= int(hreq) if hard_gate_total > 0 else True)
+                                if not base_ok:
+                                    continue
+                                checks = _spets_history_checks(ii)
+                                if all(bool(checks.get(n, False)) for n in names):
+                                    hits += 1
+                            return hits
+
+                        def _try_add_runtime_replacement_spets(hreq, names, removed_names):
+                            """Försöker ersätta spetsfilter som teckenskyddet tog bort.
+
+                            Ersättaren måste:
+                            - klara samlad historisk mallträff
+                            - ge minsta reducering på exakt veckans filtermassa
+                            - inte nolla något manuellt markerat tecken
+                            """
+                            added_rows = []
+                            active = list(names)
+                            blocked = set(removed_names or [])
+                            safety = 0
+                            while len(active) < int(max_spets_filters) and safety < int(max_spets_filters) * 2:
+                                safety += 1
+                                _, current_filtered = _runtime_filter_rows(hreq, active)
+                                current_count = len(current_filtered)
+                                if current_count <= 0:
+                                    break
+                                best = None
+                                for cand_name in all_spets_names:
+                                    if cand_name in active or cand_name in blocked:
+                                        continue
+                                    trial_names = active + [cand_name]
+                                    hist_hits_trial = _runtime_history_hits(hreq, trial_names)
+                                    if hist_hits_trial < target_soft_hits:
+                                        continue
+                                    _, trial_filtered = _runtime_filter_rows(hreq, trial_names)
+                                    after_count = len(trial_filtered)
+                                    if after_count <= 0 or after_count >= current_count:
+                                        continue
+                                    missing_trial = selected_signs_missing([x[0] for x in trial_filtered], tm_frame, antal_matcher)
+                                    if missing_trial:
+                                        continue
+                                    red_pct = ((current_count - after_count) / current_count * 100.0) if current_count else 0.0
+                                    if red_pct < float(min_spets_reduction_pct):
+                                        continue
+                                    row = {
+                                        "Filter": cand_name,
+                                        "Intervall/regler": _spets_rule_text(cand_name),
+                                        "Före rader": current_count,
+                                        "Efter rader": after_count,
+                                        "Reducerar steg %": round(red_pct, 1),
+                                        "Historisk träff": hist_hits_trial,
+                                        "Historisk träff %": round((hist_hits_trial / hist_total_for_soft) * 100, 1) if hist_total_for_soft else 0.0,
+                                    }
+                                    key = (red_pct, hist_hits_trial, -after_count)
+                                    if best is None or key > best[0]:
+                                        best = (key, cand_name, row)
+                                if best is None:
+                                    break
+                                _, chosen_name, chosen_row = best
+                                active.append(chosen_name)
+                                added_rows.append(chosen_row)
+                            return active, added_rows
+
                         tm_hard_scored, tm_filtered_scored = _runtime_filter_rows(tm_runtime_hard_req, tm_active_spets_names)
                         tm_sign_guard_missing_after_filter = selected_signs_missing([x[0] for x in tm_filtered_scored], tm_frame, antal_matcher)
 
@@ -4351,6 +4472,20 @@ if st.session_state.get('har_kort_analys') and input_text:
                             tm_sign_guard_lowered_hard = True
                             tm_hard_scored, tm_filtered_scored = _runtime_filter_rows(tm_runtime_hard_req, tm_active_spets_names)
                             tm_sign_guard_missing_after_filter = selected_signs_missing([x[0] for x in tm_filtered_scored], tm_frame, antal_matcher)
+
+                        # Om teckenskyddet behövde ta bort ett spetsfilter försöker appen nu ersätta det
+                        # med andra hårda spetsfilter som fortfarande klarar mallträffen och inte blankar tecken.
+                        tm_sign_guard_added_spets_rows = []
+                        if not tm_sign_guard_missing_after_filter and tm_sign_guard_removed_spets:
+                            tm_active_spets_names, tm_sign_guard_added_spets_rows = _try_add_runtime_replacement_spets(
+                                tm_runtime_hard_req,
+                                tm_active_spets_names,
+                                tm_sign_guard_removed_spets,
+                            )
+                            if tm_sign_guard_added_spets_rows:
+                                tm_active_spets_rows.extend(tm_sign_guard_added_spets_rows)
+                                tm_hard_scored, tm_filtered_scored = _runtime_filter_rows(tm_runtime_hard_req, tm_active_spets_names)
+                                tm_sign_guard_missing_after_filter = selected_signs_missing([x[0] for x in tm_filtered_scored], tm_frame, antal_matcher)
 
                         truncated = False
                         if len(tm_filtered_scored) > int(tm_filter_limit):
@@ -4392,6 +4527,14 @@ if st.session_state.get('har_kort_analys') and input_text:
                             antal_matcher=antal_matcher
                         )
 
+                        tm_reduced_rows, tm_13chance_added_rows = add_rows_for_min_13_chance(
+                            tm_filtered_rows,
+                            tm_reduced_rows,
+                            target_pct=float(tm_min_13_chance_pct),
+                            row_scores=tm_scores,
+                            antal_matcher=antal_matcher
+                        )
+
                         tm_gtable, tm_gsum = build_tipsetmatrix_guarantee_table(
                             tm_filtered_rows,
                             tm_reduced_rows,
@@ -4409,15 +4552,19 @@ if st.session_state.get('har_kort_analys') and input_text:
                     if len(tm_filtered_rows) == 0:
                         st.error("Inga rader överlevde bas+spetsfilter i den valda grundramen. Bredda ramen eller sänk historikmålet.")
                     else:
-                        if tm_sign_guard_removed_spets or tm_sign_guard_lowered_hard or tm_sign_guard_added_rows:
+                        if tm_sign_guard_removed_spets or tm_sign_guard_lowered_hard or tm_sign_guard_added_rows or tm_sign_guard_added_spets_rows or tm_13chance_added_rows:
                             parts = []
                             if tm_sign_guard_removed_spets:
                                 parts.append("tog bort spetsfilter: " + ", ".join(tm_sign_guard_removed_spets))
+                            if tm_sign_guard_added_spets_rows:
+                                parts.append("ersatte med spetsfilter: " + ", ".join([r.get("Filter", "") for r in tm_sign_guard_added_spets_rows]))
                             if tm_sign_guard_lowered_hard:
                                 parts.append(f"sänkte basfilter från {selected_hard_req}/{hard_gate_total} till {tm_runtime_hard_req}/{hard_gate_total}")
                             if tm_sign_guard_added_rows:
-                                parts.append(f"lade till {len(tm_sign_guard_added_rows)} slutrad(er) i TipsetMatrix")
-                            st.warning("🛡️ Teckenskydd aktivt: " + "; ".join(parts) + ". Detta gjordes för att inget manuellt markerat tecken ska bli 0 rader.")
+                                parts.append(f"lade till {len(tm_sign_guard_added_rows)} slutrad(er) för teckenskydd")
+                            if tm_13chance_added_rows:
+                                parts.append(f"lade till {len(tm_13chance_added_rows)} slutrad(er) för att nå minst {float(tm_min_13_chance_pct):.0f}% 13-chans")
+                            st.warning("🛡️ Teckenskydd/13-chans aktivt: " + "; ".join(parts) + ".")
                         if tm_sign_guard_missing_after_filter:
                             st.error("Teckenskydd kunde inte bevara dessa tecken efter filter: " + format_missing_signs(tm_sign_guard_missing_after_filter))
                         if tm_sign_guard_missing_after_reduce:
@@ -4432,6 +4579,23 @@ if st.session_state.get('har_kort_analys') and input_text:
                             st.metric("12+ garanti", f"{tm_gsum['12plus']:.2f}%", f"min {tm_gsum['min_garanti']} rätt")
                         with ctm8:
                             st.metric("13-chans", f"{tm_gsum['13_oviktad']:.2f}%", f"viktad {tm_gsum['13_viktad']:.2f}%")
+                        st.caption(f"Mål för 13-chans: minst {float(tm_min_13_chance_pct):.0f}% i normal/expert-inställningen. Om målet är högre än grundreduceringen läggs extra högst rankade rader till från filtermassan.")
+
+                        if tm_active_spets_names != selected_spets_names:
+                            st.markdown("**Faktiskt använda spetsfilter efter teckenskydd**")
+                            actual_rows = []
+                            for idx, name in enumerate(tm_active_spets_names, start=1):
+                                row_info = next((r for r in tm_active_spets_rows if r.get("Filter") == name), None)
+                                actual_rows.append({
+                                    "#": idx,
+                                    "Filter": name,
+                                    "Intervall/regler": (row_info or {}).get("Intervall/regler", _spets_rule_text(name)),
+                                    "Historisk träff": (f"{int((row_info or {}).get('Historisk träff', 0))}/{hist_total_for_soft}" if row_info else "-"),
+                                    "Före": int((row_info or {}).get("Före rader", 0)) if row_info else "-",
+                                    "Efter": int((row_info or {}).get("Efter rader", 0)) if row_info else "-",
+                                    "Reducerar": (f"{float((row_info or {}).get('Reducerar steg %', 0.0)):.1f}%" if row_info else "-"),
+                                })
+                            st.dataframe(pd.DataFrame(actual_rows), use_container_width=True, hide_index=True)
 
                         if not tm_meta.get('complete', False):
                             st.error(
@@ -4569,8 +4733,10 @@ if st.session_state.get('har_kort_analys') and input_text:
                             "",
                             f"Efter TipsetMatrix: {len(tm_reduced_rows)}",
                             f"12+ garanti: {tm_gsum['12plus']:.2f}%",
+                            f"Minsta 13-chans mål: {float(tm_min_13_chance_pct):.0f}%",
                             f"13-chans oviktad: {tm_gsum['13_oviktad']:.2f}%",
                             f"13-chans viktad: {tm_gsum['13_viktad']:.2f}%",
+                            f"Extra rader för 13-chans: {len(tm_13chance_added_rows)}",
                         ]
                         if facit_report:
                             tm_export_lines.extend([
