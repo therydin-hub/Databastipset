@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v11.1s – Smartare spetsfilter-sökning"
+APP_VERSION = "v11.1t – Max hårda filter"
 
 
 st.markdown("""
@@ -3016,7 +3016,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                 if active_ai_min <= rank_c <= active_ai_max: pts += 1
             return pts
 
-        # --- AUTOHARD SPETSFILTER ---
+        # --- AUTOHARD MAX SPETSFILTER ---
         # Soft som aktivt filtersteg är borttaget. Vi använder i stället:
         # 1) breda hårda bas-gates
         # 2) enskilda hårda spetsfilter som bara väljs om de både klarar historikmålet
@@ -3610,14 +3610,15 @@ if st.session_state.get('har_kort_analys') and input_text:
             for name in all_spets_names:
                 cand_spets_map[name].append(bool(checks.get(name, False)))
 
-        # v11.1s: välj spetsfilter med en liten beam search i stället för enkel greedy.
-        # Greedy kunde fastna på 2-3 filter trots att en annan kombination av flera filter
-        # hade klarat mallträffen och reducerat mycket bättre. Här testas många delkombinationer
-        # men begränsas hårt för att inte göra sidan långsam.
-        min_spets_reduction_pct = 3.0
-        relaxed_spets_reduction_pct = 1.5
-        max_spets_filters = 14
-        beam_width = 32
+        # v11.1t: Max hårda filter. Först görs en begränsad kombinationssökning,
+        # därefter fortsätter appen greedigt att lägga till varje hårt spetsfilter som
+        # fortfarande klarar samlad mallträff, reducerar radmassan och senare klarar teckenskydd.
+        min_spets_reduction_pct = 0.25
+        relaxed_spets_reduction_pct = 0.10
+        # Normal-läget ska inte stoppa vid 3–8 filter. Använd så många hårda filter som går.
+        max_spets_filters = max(1, min(40, len(all_spets_names)))
+        beam_width = 20
+        beam_search_depth = min(12, max_spets_filters)
         desired_estimated_after_spets = min(int(tm_filter_limit), 1500) if 'tm_filter_limit' in locals() else 1500
 
         current_hist_mask = list(hard_only_hist_mask)
@@ -3651,23 +3652,23 @@ if st.session_state.get('har_kort_analys') and input_text:
                 "Historisk träff": hist_hits,
                 "Historisk träff %": round((hist_hits / hist_total_for_soft) * 100, 1) if hist_total_for_soft else 0.0,
                 "Godkänd historik": hist_hits >= target_soft_hits,
-                "Godkänd reduktion": red_pct >= relaxed_spets_reduction_pct,
+                "Godkänd reduktion": keep_rows < base_rows,
             }
-            if row["Godkänd historik"] and row["Godkänd reduktion"] and keep_rows > 0:
+            if row["Godkänd historik"] and keep_rows > 0 and keep_rows < base_rows:
                 initial_options.append((name, keep_rows, red_pct, hist_hits))
             else:
                 skipped_spets_rows.append(row)
 
         # Behåll de mest intressanta filtren för kombinationssökningen.
         # Sortering: få rader kvar, hög reducering, hög historisk träff.
-        candidate_filter_names = [x[0] for x in sorted(initial_options, key=lambda x: (x[1], -x[2], -x[3]))[:28]]
+        candidate_filter_names = [x[0] for x in sorted(initial_options, key=lambda x: (x[1], -x[2], -x[3]))[:60]]
 
         # state = (names_tuple, hist_arr, cand_arr, rows_detail_list)
         beam = [(tuple(), base_hist_arr, base_cand_arr, [])]
         best_state = beam[0]
         all_examined_rows = []
 
-        for depth in range(max_spets_filters):
+        for depth in range(beam_search_depth):
             next_states = []
             seen = set()
             for names_tuple, hist_arr, cand_arr, rows_detail in beam:
@@ -3724,6 +3725,60 @@ if st.session_state.get('har_kort_analys') and input_text:
                 best_state = candidate_best
             # Om vi är klart under målnivån och nästa steg inte förbättrar mycket stoppar sökningen senare via valid_options.
 
+        # Maxfyllning: efter kombinationssökningen fortsätter vi lägga till alla filter
+        # som fortfarande förbättrar paketet utan att bryta mallträffsmålet. Detta är den
+        # viktiga skillnaden mot tidigare versioner där appen kunde stanna på t.ex. 3 spets.
+        fill_names = tuple(best_state[0])
+        fill_hist_arr = np.array(best_state[1], dtype=bool)
+        fill_cand_arr = np.array(best_state[2], dtype=bool)
+        fill_rows_detail = list(best_state[3])
+        fill_safety = 0
+        while len(fill_names) < int(max_spets_filters) and fill_safety < int(max_spets_filters) * 2:
+            fill_safety += 1
+            current_rows = int(fill_cand_arr.sum())
+            if current_rows <= 0:
+                break
+            best_add = None
+            for name in candidate_filter_names:
+                if name in fill_names:
+                    continue
+                new_hist_arr = fill_hist_arr & hist_np[name]
+                hist_hits = int(new_hist_arr.sum())
+                if hist_hits < target_soft_hits:
+                    continue
+                new_cand_arr = fill_cand_arr & cand_np[name]
+                keep_rows = int(new_cand_arr.sum())
+                if keep_rows <= 0 or keep_rows >= current_rows:
+                    continue
+                red_pct = ((current_rows - keep_rows) / current_rows * 100.0) if current_rows else 0.0
+                # En liten men verklig förbättring räcker. Huvudspärren är samlad mallträff.
+                if red_pct < float(relaxed_spets_reduction_pct):
+                    continue
+                detail_row = {
+                    "Filter": name,
+                    "Intervall/regler": _spets_rule_text(name),
+                    "Före rader": current_rows,
+                    "Efter rader": keep_rows,
+                    "Reducerar steg %": round(red_pct, 1),
+                    "Kvar total %": round((keep_rows / total_candidates * 100), 1) if total_candidates else 0.0,
+                    "Historisk träff": hist_hits,
+                    "Historisk träff %": round((hist_hits / hist_total_for_soft) * 100, 1) if hist_total_for_soft else 0.0,
+                    "Godkänd historik": True,
+                    "Godkänd reduktion": True,
+                }
+                # Välj den kandidat som ger lägst radantal; historik är sekundärt så länge målet uppfylls.
+                key = (keep_rows, -red_pct, -hist_hits)
+                if best_add is None or key < best_add[0]:
+                    best_add = (key, name, new_hist_arr, new_cand_arr, detail_row)
+            if best_add is None:
+                break
+            _, add_name, fill_hist_arr, fill_cand_arr, detail_row = best_add
+            fill_names = tuple(list(fill_names) + [add_name])
+            fill_rows_detail.append(detail_row)
+            all_examined_rows.append(detail_row)
+
+        best_state = (fill_names, fill_hist_arr, fill_cand_arr, fill_rows_detail)
+
         selected_spets_names = list(best_state[0])
         selected_spets_rows = list(best_state[3])
         current_hist_mask = list(np.array(best_state[1], dtype=bool))
@@ -3746,7 +3801,7 @@ if st.session_state.get('har_kort_analys') and input_text:
         spets_status = "✅ Godkänd" if mall_hits >= target_soft_hits else "⚠️ Under mål"
 
         st.info(
-            f"📈 **AUTOHARD SPETSFILTER:** {spets_status}. "
+            f"📈 **AUTOHARD MAX SPETSFILTER:** {spets_status}. "
             f"Valt basfilter **{selected_hard_req} av {hard_gate_total}** breda gates. "
             f"Valda spetsfilter: **{len(selected_spets_names)}**. "
             f"Historiskt klarar {mall_hits} av {len(v_m)} rader ({soft_hit_pct:.1f}%). "
@@ -3754,7 +3809,7 @@ if st.session_state.get('har_kort_analys') and input_text:
         )
         st.caption(
             "Soft som aktivt filtersteg används inte längre. Spetsfilter väljs bara om de klarar historikmålet "
-            f"och kombinationssökningen använder ungefär {relaxed_spets_reduction_pct:.1f}–{min_spets_reduction_pct:.0f}% minsta stegreducering beroende på kvarvarande radmassa. "
+            f"och Max hårda filter fortsätter lägga till alla spetsfilter som klarar mallträff och ger mätbar extra reducering. "
             f"Estimat: efter basfilter {hard_stage_survivors}/{total_candidates} ({hard_stage_keep_pct:.1f}%), "
             f"efter bas+spets {combined_soft_survivors}/{total_candidates} ({combined_soft_keep_pct:.1f}%)."
         )
@@ -4509,7 +4564,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                                     if missing_trial:
                                         continue
                                     red_pct = ((current_count - after_count) / current_count * 100.0) if current_count else 0.0
-                                    if red_pct < float(min_spets_reduction_pct):
+                                    if red_pct < float(relaxed_spets_reduction_pct):
                                         continue
                                     row = {
                                         "Filter": cand_name,
@@ -4547,10 +4602,11 @@ if st.session_state.get('har_kort_analys') and input_text:
                             tm_hard_scored, tm_filtered_scored = _runtime_filter_rows(tm_runtime_hard_req, tm_active_spets_names)
                             tm_sign_guard_missing_after_filter = selected_signs_missing([x[0] for x in tm_filtered_scored], tm_frame, antal_matcher)
 
-                        # Om teckenskyddet behövde ta bort ett spetsfilter försöker appen nu ersätta det
-                        # med andra hårda spetsfilter som fortfarande klarar mallträffen och inte blankar tecken.
+                        # Max hårda filter även på exakt grundram: efter teckenskydd försöker appen lägga till
+                        # fler spetsfilter som fortfarande klarar mallträffen, reducerar exakt veckans radmassa
+                        # och inte blankar något manuellt markerat tecken.
                         tm_sign_guard_added_spets_rows = []
-                        if not tm_sign_guard_missing_after_filter and tm_sign_guard_removed_spets:
+                        if not tm_sign_guard_missing_after_filter:
                             tm_active_spets_names, tm_sign_guard_added_spets_rows = _try_add_runtime_replacement_spets(
                                 tm_runtime_hard_req,
                                 tm_active_spets_names,
@@ -4631,7 +4687,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                             if tm_sign_guard_removed_spets:
                                 parts.append("tog bort spetsfilter: " + ", ".join(tm_sign_guard_removed_spets))
                             if tm_sign_guard_added_spets_rows:
-                                parts.append("ersatte med spetsfilter: " + ", ".join([r.get("Filter", "") for r in tm_sign_guard_added_spets_rows]))
+                                parts.append("lade till/ersatte med spetsfilter: " + ", ".join([r.get("Filter", "") for r in tm_sign_guard_added_spets_rows]))
                             if tm_sign_guard_lowered_hard:
                                 parts.append(f"sänkte basfilter från {selected_hard_req}/{hard_gate_total} till {tm_runtime_hard_req}/{hard_gate_total}")
                             if tm_sign_guard_added_rows:
