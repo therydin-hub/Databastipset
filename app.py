@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v11.1t – Max hårda filter"
+APP_VERSION = "v11.1u – Exakt filteroptimering på manuell grundram"
 
 
 st.markdown("""
@@ -3016,7 +3016,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                 if active_ai_min <= rank_c <= active_ai_max: pts += 1
             return pts
 
-        # --- AUTOHARD MAX SPETSFILTER ---
+        # --- AUTOHARD EXAKT SPETSFILTER ---
         # Soft som aktivt filtersteg är borttaget. Vi använder i stället:
         # 1) breda hårda bas-gates
         # 2) enskilda hårda spetsfilter som bara väljs om de både klarar historikmålet
@@ -3610,7 +3610,7 @@ if st.session_state.get('har_kort_analys') and input_text:
             for name in all_spets_names:
                 cand_spets_map[name].append(bool(checks.get(name, False)))
 
-        # v11.1t: Max hårda filter. Först görs en begränsad kombinationssökning,
+        # v11.1u: Exakt filteroptimering på manuell grundram. Först görs en begränsad kombinationssökning,
         # därefter fortsätter appen greedigt att lägga till varje hårt spetsfilter som
         # fortfarande klarar samlad mallträff, reducerar radmassan och senare klarar teckenskydd.
         min_spets_reduction_pct = 0.25
@@ -3801,7 +3801,7 @@ if st.session_state.get('har_kort_analys') and input_text:
         spets_status = "✅ Godkänd" if mall_hits >= target_soft_hits else "⚠️ Under mål"
 
         st.info(
-            f"📈 **AUTOHARD MAX SPETSFILTER:** {spets_status}. "
+            f"📈 **AUTOHARD EXAKT SPETSFILTER:** {spets_status}. "
             f"Valt basfilter **{selected_hard_req} av {hard_gate_total}** breda gates. "
             f"Valda spetsfilter: **{len(selected_spets_names)}**. "
             f"Historiskt klarar {mall_hits} av {len(v_m)} rader ({soft_hit_pct:.1f}%). "
@@ -3809,7 +3809,7 @@ if st.session_state.get('har_kort_analys') and input_text:
         )
         st.caption(
             "Soft som aktivt filtersteg används inte längre. Spetsfilter väljs bara om de klarar historikmålet "
-            f"och Max hårda filter fortsätter lägga till alla spetsfilter som klarar mallträff och ger mätbar extra reducering. "
+            f"och Exakt filteroptimering väljer spetsfilter på den faktiska manuella grundramen och behåller bara filter som minskar exakt radmassa utan att bryta mallträff/teckenskydd. "
             f"Estimat: efter basfilter {hard_stage_survivors}/{total_candidates} ({hard_stage_keep_pct:.1f}%), "
             f"efter bas+spets {combined_soft_survivors}/{total_candidates} ({combined_soft_keep_pct:.1f}%)."
         )
@@ -4585,37 +4585,239 @@ if st.session_state.get('har_kort_analys') and input_text:
                                 added_rows.append(chosen_row)
                             return active, added_rows
 
+                        # v11.1u: Exakt filteroptimering på den faktiska manuella grundramen.
+                        # Tidigare valdes många spetsfilter först via kandidat-estimat. Det kunde ge 3→12 filter
+                        # utan att den exakta radmassan minskade särskilt mycket. Här optimeras bas+spets om
+                        # direkt på tm_rows/tm_scored, med samlad mallträff och teckenskydd som hårda spärrar.
+                        tm_prelim_spets_names = list(tm_active_spets_names)
+
+                        def _mask_missing_selected_signs(mask_arr):
+                            """Snabb teckenskyddskontroll direkt på en bool-mask över tm_scored."""
+                            missing = []
+                            if mask_arr is None or len(mask_arr) == 0 or not bool(np.any(mask_arr)):
+                                return selected_signs_missing([], tm_frame, antal_matcher)
+                            present = [set() for _ in range(antal_matcher)]
+                            idxs = np.flatnonzero(mask_arr)
+                            for idx in idxs:
+                                rr = tm_scored[int(idx)][0]
+                                for j, ch in enumerate(rr):
+                                    if j < antal_matcher:
+                                        present[j].add(ch)
+                            for j, allowed in enumerate(tm_frame):
+                                for ch in allowed:
+                                    if ch not in present[j]:
+                                        missing.append((j + 1, ch))
+                            return missing
+
+                        def _rows_from_mask(mask_arr):
+                            return [tm_scored[int(idx)] for idx in np.flatnonzero(mask_arr)]
+
+                        def _build_exact_spets_np():
+                            exact = {name: np.zeros(len(tm_scored), dtype=bool) for name in all_spets_names}
+                            for idx, item in enumerate(tm_scored):
+                                checks = _spets_candidate_checks(item[0])
+                                for name in all_spets_names:
+                                    exact[name][idx] = bool(checks.get(name, False))
+                            return exact
+
+                        def _optimize_exact_manual_filters():
+                            exact_spets_np = _build_exact_spets_np()
+                            hist_np_local = {name: np.array(hist_spets_map.get(name, []), dtype=bool) for name in all_spets_names}
+                            n_exact = len(tm_scored)
+                            if n_exact == 0:
+                                return int(selected_hard_req), [], [], [], []
+
+                            # Högsta bas-krav testas först, men slutvalet styrs av lägst exakt radantal.
+                            # Om två paket ger samma radantal väljer vi högre historisk träff och därefter högre bas-krav.
+                            hard_candidates = list(range(int(hard_gate_total), -1, -1)) if hard_gate_total > 0 else [0]
+                            global_best = None
+                            global_log = []
+                            exact_min_reduction_pct = 0.01  # minsta faktiska förbättring; huvudspärren är mallträff + teckenskydd
+                            exact_beam_width = 25
+                            exact_beam_depth = min(18, max(1, len(all_spets_names)))
+                            exact_max_filters = max(1, min(40, len(all_spets_names)))
+
+                            for hreq in hard_candidates:
+                                base_hist_arr = np.array([(history_hard_scores[ii] >= int(hreq) if hard_gate_total > 0 else True) for ii in range(len(v_m))], dtype=bool)
+                                base_hist_hits = int(base_hist_arr.sum())
+                                if base_hist_hits < int(target_soft_hits):
+                                    global_log.append({"Basfilter": hreq, "Status": "Nekad", "Orsak": f"Historik {base_hist_hits}/{hist_total_for_soft}"})
+                                    continue
+
+                                base_exact_arr = np.array([(x[2] >= int(hreq) if hard_gate_total > 0 else True) for x in tm_scored], dtype=bool)
+                                base_count = int(base_exact_arr.sum())
+                                if base_count <= 0:
+                                    global_log.append({"Basfilter": hreq, "Status": "Nekad", "Orsak": "0 rader efter bas"})
+                                    continue
+                                miss_base = _mask_missing_selected_signs(base_exact_arr)
+                                if miss_base:
+                                    global_log.append({"Basfilter": hreq, "Status": "Nekad", "Orsak": "Teckenskydd: " + format_missing_signs(miss_base)})
+                                    continue
+
+                                # Förhandslista på filter som åtminstone kan reducera från basläget och klara historiken.
+                                viable_names = []
+                                rejected_preview = []
+                                for name in all_spets_names:
+                                    h_arr = base_hist_arr & hist_np_local[name]
+                                    hist_hits = int(h_arr.sum())
+                                    if hist_hits < int(target_soft_hits):
+                                        rejected_preview.append((name, "historik", hist_hits, base_count, base_count, 0.0))
+                                        continue
+                                    e_arr = base_exact_arr & exact_spets_np[name]
+                                    keep_count = int(e_arr.sum())
+                                    if keep_count <= 0 or keep_count >= base_count:
+                                        rejected_preview.append((name, "ingen extra reducering", hist_hits, base_count, keep_count, 0.0))
+                                        continue
+                                    miss = _mask_missing_selected_signs(e_arr)
+                                    if miss:
+                                        rejected_preview.append((name, "teckenskydd", hist_hits, base_count, keep_count, 0.0))
+                                        continue
+                                    red_pct = ((base_count - keep_count) / base_count * 100.0) if base_count else 0.0
+                                    viable_names.append((name, keep_count, red_pct, hist_hits))
+
+                                viable_names = [x[0] for x in sorted(viable_names, key=lambda x: (x[1], -x[2], -x[3]))[:70]]
+
+                                beam = [(tuple(), base_hist_arr, base_exact_arr, [])]
+                                best_for_h = (tuple(), base_hist_arr, base_exact_arr, [])
+                                examined = []
+                                for _depth in range(exact_beam_depth):
+                                    next_states = []
+                                    seen = set()
+                                    for names_tuple, hist_arr, exact_arr, details in beam:
+                                        current_count = int(exact_arr.sum())
+                                        if current_count <= 0 or len(names_tuple) >= exact_max_filters:
+                                            continue
+                                        for name in viable_names:
+                                            if name in names_tuple:
+                                                continue
+                                            new_hist_arr = hist_arr & hist_np_local[name]
+                                            hist_hits = int(new_hist_arr.sum())
+                                            if hist_hits < int(target_soft_hits):
+                                                continue
+                                            new_exact_arr = exact_arr & exact_spets_np[name]
+                                            keep_count = int(new_exact_arr.sum())
+                                            if keep_count <= 0 or keep_count >= current_count:
+                                                continue
+                                            red_pct = ((current_count - keep_count) / current_count * 100.0) if current_count else 0.0
+                                            if red_pct < exact_min_reduction_pct:
+                                                continue
+                                            miss = _mask_missing_selected_signs(new_exact_arr)
+                                            if miss:
+                                                continue
+                                            new_names = tuple(list(names_tuple) + [name])
+                                            sig = tuple(sorted(new_names))
+                                            if sig in seen:
+                                                continue
+                                            seen.add(sig)
+                                            row = {
+                                                "Filter": name,
+                                                "Intervall/regler": _spets_rule_text(name),
+                                                "Före rader": current_count,
+                                                "Efter rader": keep_count,
+                                                "Reducerar steg %": round(red_pct, 2),
+                                                "Kvar total %": round((keep_count / n_exact * 100), 1) if n_exact else 0.0,
+                                                "Historisk träff": hist_hits,
+                                                "Historisk träff %": round((hist_hits / hist_total_for_soft) * 100, 1) if hist_total_for_soft else 0.0,
+                                                "Godkänd historik": True,
+                                                "Godkänd reduktion": True,
+                                            }
+                                            examined.append(row)
+                                            next_states.append((new_names, new_hist_arr, new_exact_arr, details + [row]))
+                                    if not next_states:
+                                        break
+                                    next_states = sorted(next_states, key=lambda stt: (int(stt[2].sum()), -int(stt[1].sum()), len(stt[0])))[:exact_beam_width]
+                                    beam = next_states
+                                    candidate = beam[0]
+                                    if int(candidate[2].sum()) < int(best_for_h[2].sum()):
+                                        best_for_h = candidate
+
+                                # Maxfyll exakt: fortsätt lägga till varje filter som faktiskt minskar den exakta manuella radmassan.
+                                fill_names = tuple(best_for_h[0])
+                                fill_hist_arr = np.array(best_for_h[1], dtype=bool)
+                                fill_exact_arr = np.array(best_for_h[2], dtype=bool)
+                                fill_details = list(best_for_h[3])
+                                safety = 0
+                                while len(fill_names) < exact_max_filters and safety < exact_max_filters * 2:
+                                    safety += 1
+                                    current_count = int(fill_exact_arr.sum())
+                                    best_add = None
+                                    for name in viable_names:
+                                        if name in fill_names:
+                                            continue
+                                        new_hist_arr = fill_hist_arr & hist_np_local[name]
+                                        hist_hits = int(new_hist_arr.sum())
+                                        if hist_hits < int(target_soft_hits):
+                                            continue
+                                        new_exact_arr = fill_exact_arr & exact_spets_np[name]
+                                        keep_count = int(new_exact_arr.sum())
+                                        if keep_count <= 0 or keep_count >= current_count:
+                                            continue
+                                        red_pct = ((current_count - keep_count) / current_count * 100.0) if current_count else 0.0
+                                        if red_pct < exact_min_reduction_pct:
+                                            continue
+                                        miss = _mask_missing_selected_signs(new_exact_arr)
+                                        if miss:
+                                            continue
+                                        row = {
+                                            "Filter": name,
+                                            "Intervall/regler": _spets_rule_text(name),
+                                            "Före rader": current_count,
+                                            "Efter rader": keep_count,
+                                            "Reducerar steg %": round(red_pct, 2),
+                                            "Kvar total %": round((keep_count / n_exact * 100), 1) if n_exact else 0.0,
+                                            "Historisk träff": hist_hits,
+                                            "Historisk träff %": round((hist_hits / hist_total_for_soft) * 100, 1) if hist_total_for_soft else 0.0,
+                                            "Godkänd historik": True,
+                                            "Godkänd reduktion": True,
+                                        }
+                                        key = (keep_count, -red_pct, -hist_hits)
+                                        if best_add is None or key < best_add[0]:
+                                            best_add = (key, name, new_hist_arr, new_exact_arr, row)
+                                    if best_add is None:
+                                        break
+                                    _, add_name, fill_hist_arr, fill_exact_arr, add_row = best_add
+                                    fill_names = tuple(list(fill_names) + [add_name])
+                                    fill_details.append(add_row)
+                                    examined.append(add_row)
+
+                                final_count = int(fill_exact_arr.sum())
+                                final_hits = int(fill_hist_arr.sum())
+                                pack = {
+                                    "hreq": int(hreq),
+                                    "names": list(fill_names),
+                                    "hist_arr": fill_hist_arr,
+                                    "exact_arr": fill_exact_arr,
+                                    "rows": fill_details,
+                                    "final_count": final_count,
+                                    "hist_hits": final_hits,
+                                    "base_count": base_count,
+                                    "examined": examined,
+                                }
+                                global_log.append({
+                                    "Basfilter": hreq,
+                                    "Status": "Testad",
+                                    "Orsak": f"{base_count} → {final_count} rader, {final_hits}/{hist_total_for_soft} hist, {len(fill_names)} spets",
+                                })
+                                key = (final_count, -final_hits, -int(hreq), len(fill_names))
+                                if global_best is None or key < global_best[0]:
+                                    global_best = (key, pack)
+
+                            if global_best is None:
+                                # Fallback till tidigare kandidatval om exakt sökning inte hittar något paket.
+                                hreq = int(selected_hard_req)
+                                hard_rows, filtered_rows = _runtime_filter_rows(hreq, tm_prelim_spets_names)
+                                return hreq, list(tm_prelim_spets_names), list(tm_active_spets_rows), global_log, ["fallback"]
+
+                            pack = global_best[1]
+                            return int(pack["hreq"]), list(pack["names"]), list(pack["rows"]), global_log, []
+
+                        tm_runtime_hard_req, tm_active_spets_names, tm_active_spets_rows, tm_exact_optimizer_log, tm_exact_optimizer_fallback = _optimize_exact_manual_filters()
+                        tm_sign_guard_lowered_hard = int(tm_runtime_hard_req) < int(selected_hard_req)
+                        tm_sign_guard_removed_spets = [n for n in tm_prelim_spets_names if n not in set(tm_active_spets_names)]
+                        tm_sign_guard_added_spets_rows = [r for r in tm_active_spets_rows if r.get("Filter") not in set(tm_prelim_spets_names)]
+
                         tm_hard_scored, tm_filtered_scored = _runtime_filter_rows(tm_runtime_hard_req, tm_active_spets_names)
                         tm_sign_guard_missing_after_filter = selected_signs_missing([x[0] for x in tm_filtered_scored], tm_frame, antal_matcher)
-
-                        while tm_sign_guard_missing_after_filter and tm_active_spets_names:
-                            removed_name = tm_active_spets_names.pop()
-                            tm_sign_guard_removed_spets.append(removed_name)
-                            tm_active_spets_rows = [r for r in tm_active_spets_rows if r.get("Filter") != removed_name]
-                            tm_hard_scored, tm_filtered_scored = _runtime_filter_rows(tm_runtime_hard_req, tm_active_spets_names)
-                            tm_sign_guard_missing_after_filter = selected_signs_missing([x[0] for x in tm_filtered_scored], tm_frame, antal_matcher)
-
-                        # Om redan basfiltret blankar ett manuellt tecken sänks bas-gatekravet ett steg i taget.
-                        while tm_sign_guard_missing_after_filter and hard_gate_total > 0 and tm_runtime_hard_req > 0:
-                            tm_runtime_hard_req -= 1
-                            tm_sign_guard_lowered_hard = True
-                            tm_hard_scored, tm_filtered_scored = _runtime_filter_rows(tm_runtime_hard_req, tm_active_spets_names)
-                            tm_sign_guard_missing_after_filter = selected_signs_missing([x[0] for x in tm_filtered_scored], tm_frame, antal_matcher)
-
-                        # Max hårda filter även på exakt grundram: efter teckenskydd försöker appen lägga till
-                        # fler spetsfilter som fortfarande klarar mallträffen, reducerar exakt veckans radmassa
-                        # och inte blankar något manuellt markerat tecken.
-                        tm_sign_guard_added_spets_rows = []
-                        if not tm_sign_guard_missing_after_filter:
-                            tm_active_spets_names, tm_sign_guard_added_spets_rows = _try_add_runtime_replacement_spets(
-                                tm_runtime_hard_req,
-                                tm_active_spets_names,
-                                tm_sign_guard_removed_spets,
-                            )
-                            if tm_sign_guard_added_spets_rows:
-                                tm_active_spets_rows.extend(tm_sign_guard_added_spets_rows)
-                                tm_hard_scored, tm_filtered_scored = _runtime_filter_rows(tm_runtime_hard_req, tm_active_spets_names)
-                                tm_sign_guard_missing_after_filter = selected_signs_missing([x[0] for x in tm_filtered_scored], tm_frame, antal_matcher)
 
                         truncated = False
                         if len(tm_filtered_scored) > int(tm_filter_limit):
@@ -4711,8 +4913,11 @@ if st.session_state.get('har_kort_analys') and input_text:
                             st.metric("13-chans", f"{tm_gsum['13_oviktad']:.2f}%", f"viktad {tm_gsum['13_viktad']:.2f}%")
                         st.caption(f"Mål för 13-chans: minst {float(tm_min_13_chance_pct):.0f}% i normal/expert-inställningen. Om målet är högre än grundreduceringen läggs extra högst rankade rader till från filtermassan.")
 
+                        if True:
+                            st.caption("v11.1u: Bas + spets som används i TipsetMatrix är nu omoptimerat exakt på den sparade manuella grundramen, inte bara på kandidat-estimatet.")
+
                         if tm_active_spets_names != selected_spets_names:
-                            st.markdown("**Faktiskt använda spetsfilter efter teckenskydd**")
+                            st.markdown("**Faktiskt använda spetsfilter efter exakt optimering / teckenskydd**")
                             actual_rows = []
                             for idx, name in enumerate(tm_active_spets_names, start=1):
                                 row_info = next((r for r in tm_active_spets_rows if r.get("Filter") == name), None)
