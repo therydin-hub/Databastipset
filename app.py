@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v11.1u – Exakt filteroptimering på manuell grundram"
+APP_VERSION = "v11.1w – Alla poängfilter som spetsfilter"
 
 
 st.markdown("""
@@ -2544,6 +2544,61 @@ if st.session_state.get('har_kort_analys') and input_text:
         c_shock20 = clamp_interval(c_shock20_raw, 0, todays_shock_capacity.get(20, 0))
         c_shock_lowest = get_best_interval(shock_lowest, c_v)
         c_fav_delta = _auto_interval('Favorit-delta', fav_delta_vals, lambda tr: get_favorite_delta(tr, filter_vec), 2)
+        # --- SPETSFILTERVARIANTER ---
+        # Alla poäng-/värdefilter som visas i VECKANS MALL ska även kunna bli hårda spetsfilter:
+        # AI-Rank, Delta, Total Diff, Rank Summa, 100-minus, Skrälltryck Log, SFT, Poängfilter,
+        # Favorit-delta, Toppfavoriter och FAT-delar. Varje filter testas i flera hårdhetsgrader.
+        # Varianten används bara om hela paketet klarar samlad mallträff och minst 5% faktisk stegreducering.
+        spets_variant_defs = {}
+
+        def _add_interval_variants(label, hist_values, cand_getter, decimals=0, coverages=(95, 90, 85, 80, 75)):
+            seen_intervals = set()
+            vals = [v for v in hist_values if not pd.isna(v)]
+            if not vals:
+                return
+            for cov in coverages:
+                try:
+                    interval = get_best_interval(vals, cov)
+                except Exception:
+                    continue
+                key = (round(float(interval[0]), 6), round(float(interval[1]), 6))
+                if key in seen_intervals:
+                    continue
+                seen_intervals.add(key)
+                # Undvik att skapa en variant som är identisk med huvudregeln men ge ändå 85/80/75 utrymme.
+                name = f"{label} spets {int(cov)}%"
+                spets_variant_defs[name] = {
+                    "label": label,
+                    "coverage": int(cov),
+                    "interval": interval,
+                    "hist_values": hist_values,
+                    "getter": cand_getter,
+                    "decimals": decimals,
+                }
+
+        if cb_points:
+            _add_interval_variants('Poängfilter', points_vals, lambda tr: get_rank_points(tr, filter_vec), 0)
+        if cb_rank24:
+            _add_interval_variants('Ranksumma', rank24_sums, lambda tr: get_rank_sum(tr, filter_vec), 1)
+        if cb_log_surprise:
+            _add_interval_variants('Skrälltryck Log', log_surprise_sums, lambda tr: get_log_surprise_sum(tr, filter_vec), 0)
+        if cb_sft:
+            _add_interval_variants('SFT Summa', sft_sums, lambda tr: get_sft_sum(tr, filter_vec), 1)
+        if cb_100minus:
+            _add_interval_variants('100-minus', minus_sums, lambda tr: get_100_minus_sum(tr, filter_vec), 1)
+        if cb_totaldiff:
+            _add_interval_variants('Total Diff', total_diff_vals, lambda tr: calculate_total_diff(match_odds_filter, list(tr)), 0)
+        if cb_fav_delta:
+            _add_interval_variants('Favorit-delta', fav_delta_vals, lambda tr: get_favorite_delta(tr, filter_vec), 2)
+        # Delta visas alltid i VECKANS MALL och ska därför också kunna väljas som hårt spetsfilter.
+        _add_interval_variants('Delta', list(v_m['Delta']), lambda tr: calculate_delta(tr, filter_vec), 1)
+        if cb_u_favs:
+            _add_interval_variants(f'Topp {slider_u_count} favoriter', u_wins, lambda tr: get_top_n_favs_wins(tr, filter_vec, slider_u_count), 0)
+        if cb_fat:
+            _add_interval_variants('FAT F', fat_f, lambda tr: get_fat(tr, filter_vec)[0], 0)
+            _add_interval_variants('FAT A', fat_a, lambda tr: get_fat(tr, filter_vec)[1], 0)
+            _add_interval_variants('FAT T', fat_t, lambda tr: get_fat(tr, filter_vec)[2], 0)
+            _add_interval_variants('FAT Summa', fat_sums, lambda tr: get_fat(tr, filter_vec)[3], 0)
         # --- FAT-SEKVENSER: aktiva reduceringsbyggklossar ---
         fat_strings_hist = [get_fat_string(row['Correct_Row'], row['Prob_Vector']) for _, row in v_m.iterrows() if len(str(row['Correct_Row'])) == antal_matcher]
         base_fat_strings = [get_fat_string(row['Correct_Row'], row['Prob_Vector']) for _, row in db_full.iterrows() if len(str(row['Correct_Row'])) == antal_matcher]
@@ -2570,6 +2625,14 @@ if st.session_state.get('har_kort_analys') and input_text:
         else:
             c_fat_pairs = (0, 0)
 
+        if cb_fat_sequences:
+            if fat_seq2_list:
+                _add_interval_variants('FAT 2-sekvenser', fat_seq2_hits, lambda tr: count_fat_sequence_hits(get_fat_string(tr, filter_vec), fat_seq2_list), 0, coverages=(95, 90, 85, 80, 75))
+            if fat_seq3_list:
+                _add_interval_variants('FAT 3-sekvenser', fat_seq3_hits, lambda tr: count_fat_sequence_hits(get_fat_string(tr, filter_vec), fat_seq3_list), 0, coverages=(95, 90, 85, 80, 75))
+            if fat_pair_list:
+                _add_interval_variants('FAT dubbelchans', fat_pair_hits, lambda tr: count_fat_pair_hits(get_fat_string(tr, filter_vec), fat_pair_list), 0, coverages=(95, 90, 85, 80, 75))
+
         fat_sequence_active_parts = sum([bool(fat_seq2_list), bool(fat_seq3_list), bool(fat_pair_list)])
         fat_sequence_group_req = 2 if fat_sequence_active_parts >= 2 else 1
 
@@ -2592,6 +2655,22 @@ if st.session_state.get('har_kort_analys') and input_text:
         c_ai_rank = get_best_interval(ai_ranks, c_v) if len(ai_ranks) > 0 else (1, max_rank)
         active_ai_min, active_ai_max = slider_ai_rank if cb_manual_ai_rank else c_ai_rank
         ai_txt = "AI-Rank (MANUELL)" if cb_manual_ai_rank else f"AI-Rank (AUTO {c_v}%)"
+
+        # AI-Rank beräknas från veckans aktuella procentmatris för kandidat-/grundrader.
+        # Den ska behandlas som samma typ av hårt poängfilter som övriga värdefilter.
+        spets_ai_matrix = spets_ai_scores_asc = spets_ai_tot = None
+        if cb_aimatrix and not cb_manual_ai_rank and len(ai_ranks) > 0:
+            try:
+                spets_ai_matrix, spets_ai_scores_asc, spets_ai_tot = calculate_ai_matrix_from_values(filter_vec)
+                _add_interval_variants(
+                    'AI-Rank',
+                    ai_ranks,
+                    lambda tr: get_exact_rank(tr, spets_ai_matrix, spets_ai_scores_asc, spets_ai_tot)[0],
+                    0,
+                    coverages=(95, 90, 85, 80, 75, 70)
+                )
+            except Exception:
+                pass
 
         # --- SUPER-MAKRO ---
         def get_super_macro_bounds(total_rows, target_prob, req_groups):
@@ -3077,6 +3156,17 @@ if st.session_state.get('har_kort_analys') and input_text:
                 v = in_range(total_diff_vals[i], c_totaldiff)
                 checks["Total Diff smal"] = v
                 risk_checks.append(v)
+            if 'Delta' in v_m.columns:
+                try:
+                    v = in_range(list(v_m['Delta'])[i], c_delta)
+                    checks["Delta smal"] = v
+                    risk_checks.append(v)
+                except Exception:
+                    pass
+            if cb_aimatrix and i < len(ai_ranks):
+                v = in_range(ai_ranks[i], c_ai_rank)
+                checks["AI-Rank smal"] = v
+                risk_checks.append(v)
             if cb_fav_delta:
                 v = in_range(fav_delta_vals[i], c_fav_delta)
                 checks["Favorit-delta smal"] = v
@@ -3204,6 +3294,13 @@ if st.session_state.get('har_kort_analys') and input_text:
             if len(struct_checks) >= 5:
                 checks["Strukturpaket smal"] = _pass_ratio(struct_checks, 0.72)
 
+            for _vname, _vdef in spets_variant_defs.items():
+                try:
+                    if i < len(_vdef.get("hist_values", [])):
+                        checks[_vname] = in_range(_vdef["hist_values"][i], _vdef["interval"])
+                except Exception:
+                    pass
+
             if cb_super_macro:
                 checks["Super-Makro"] = _super_macro_hist_ok(i)
             return checks
@@ -3262,6 +3359,20 @@ if st.session_state.get('har_kort_analys') and input_text:
                 v = in_range(calculate_total_diff(match_odds_filter, list(tr)), c_totaldiff)
                 checks["Total Diff smal"] = v
                 risk_checks.append(v)
+            try:
+                v = in_range(calculate_delta(tr, filter_vec), c_delta)
+                checks["Delta smal"] = v
+                risk_checks.append(v)
+            except Exception:
+                pass
+            if cb_aimatrix and spets_ai_matrix is not None:
+                try:
+                    rank_c, _ = get_exact_rank(tr, spets_ai_matrix, spets_ai_scores_asc, spets_ai_tot)
+                    v = in_range(rank_c, c_ai_rank)
+                    checks["AI-Rank smal"] = v
+                    risk_checks.append(v)
+                except Exception:
+                    pass
             if cb_fav_delta:
                 v = in_range(get_favorite_delta(tr, filter_vec), c_fav_delta)
                 checks["Favorit-delta smal"] = v
@@ -3386,6 +3497,12 @@ if st.session_state.get('har_kort_analys') and input_text:
             if len(struct_checks) >= 5:
                 checks["Strukturpaket smal"] = _pass_ratio(struct_checks, 0.72)
 
+            for _vname, _vdef in spets_variant_defs.items():
+                try:
+                    checks[_vname] = in_range(_vdef["getter"](tr), _vdef["interval"])
+                except Exception:
+                    pass
+
             if cb_super_macro:
                 checks["Super-Makro"] = pass_super_macro_row(tr, filter_vec, sm_bounds, slider_super_groups)
             return checks
@@ -3407,6 +3524,9 @@ if st.session_state.get('har_kort_analys') and input_text:
 
         def _spets_rule_text(name):
             """Kort Helgardering-liknande regeltext för valt spetsfilter."""
+            if name in spets_variant_defs:
+                _v = spets_variant_defs[name]
+                return f"{_v['label']}: {fmt_interval(_v['interval'], _v.get('decimals', 0))} | variant {int(_v.get('coverage', 0))}%"
             dynamic_top = f"Topp {slider_u_count} favoriter smal"
             rules = {
                 "FAT 2-sekvenser": f"Träffar {fmt_interval(c_fat_seq2)} av toppsekvenser: {_short_join(fat_seq2_list)}",
@@ -3424,6 +3544,8 @@ if st.session_state.get('har_kort_analys') and input_text:
                 "SFT Summa smal": _maybe_interval("SFT Summa", c_sft, 1),
                 "100-minus smal": _maybe_interval("100-minus", c_minus, 1),
                 "Total Diff smal": _maybe_interval("Total Diff", c_totaldiff, 0),
+                "Delta smal": _maybe_interval("Delta", c_delta, 1),
+                "AI-Rank smal": _maybe_interval("AI-Rank", c_ai_rank, 0),
                 "Favorit-delta smal": _maybe_interval("Favorit-delta", c_fav_delta, 2),
                 "Risk-/värdepaket smal": _parts(
                     "Minst ca 70% av aktiva risk/värde-delar",
@@ -3433,6 +3555,8 @@ if st.session_state.get('har_kort_analys') and input_text:
                     _maybe_interval("Log", c_log_surprise, 0),
                     _maybe_interval("100-minus", c_minus, 1),
                     _maybe_interval("TotalDiff", c_totaldiff, 0),
+                    _maybe_interval("Delta", c_delta, 1),
+                    _maybe_interval("AI-Rank", c_ai_rank, 0),
                 ),
                 "FAT F smal": _maybe_interval("F", c_fatf, 0),
                 "FAT A smal": _maybe_interval("A", c_fata, 0),
@@ -3613,8 +3737,8 @@ if st.session_state.get('har_kort_analys') and input_text:
         # v11.1u: Exakt filteroptimering på manuell grundram. Först görs en begränsad kombinationssökning,
         # därefter fortsätter appen greedigt att lägga till varje hårt spetsfilter som
         # fortfarande klarar samlad mallträff, reducerar radmassan och senare klarar teckenskydd.
-        min_spets_reduction_pct = 0.25
-        relaxed_spets_reduction_pct = 0.10
+        min_spets_reduction_pct = 5.0
+        relaxed_spets_reduction_pct = 5.0
         # Normal-läget ska inte stoppa vid 3–8 filter. Använd så många hårda filter som går.
         max_spets_filters = max(1, min(40, len(all_spets_names)))
         beam_width = 20
@@ -3809,7 +3933,7 @@ if st.session_state.get('har_kort_analys') and input_text:
         )
         st.caption(
             "Soft som aktivt filtersteg används inte längre. Spetsfilter väljs bara om de klarar historikmålet "
-            f"och Exakt filteroptimering väljer spetsfilter på den faktiska manuella grundramen och behåller bara filter som minskar exakt radmassa utan att bryta mallträff/teckenskydd. "
+            f"och Exakt filteroptimering väljer spetsfilter på den faktiska manuella grundramen och behåller bara filter som minskar exakt radmassa minst 5% utan att bryta mallträff/teckenskydd. Alla poäng-/värdefilter från VECKANS MALL testas som spetskandidater. "
             f"Estimat: efter basfilter {hard_stage_survivors}/{total_candidates} ({hard_stage_keep_pct:.1f}%), "
             f"efter bas+spets {combined_soft_survivors}/{total_candidates} ({combined_soft_keep_pct:.1f}%)."
         )
@@ -4632,7 +4756,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                             hard_candidates = list(range(int(hard_gate_total), -1, -1)) if hard_gate_total > 0 else [0]
                             global_best = None
                             global_log = []
-                            exact_min_reduction_pct = 0.01  # minsta faktiska förbättring; huvudspärren är mallträff + teckenskydd
+                            exact_min_reduction_pct = 5.0  # minsta faktiska stegreducering; filter under 5% tas inte med i aktivt spetsfilterpaket
                             exact_beam_width = 25
                             exact_beam_depth = min(18, max(1, len(all_spets_names)))
                             exact_max_filters = max(1, min(40, len(all_spets_names)))
