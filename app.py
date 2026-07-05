@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v11.1m – Fler hårda spetsfilter"
+APP_VERSION = "v11.1n – Visar valda filter och intervall"
 
 
 st.markdown("""
@@ -3095,6 +3095,154 @@ if st.session_state.get('har_kort_analys') and input_text:
                 checks["Super-Makro"] = pass_super_macro_row(tr, filter_vec, sm_bounds, slider_super_groups)
             return checks
 
+        # --- VISNING: filterregler/intervall för valda bas- och spetsfilter ---
+        def _short_join(items, max_items=6):
+            items = [str(x) for x in items if str(x)]
+            if not items:
+                return "-"
+            if len(items) <= max_items:
+                return ", ".join(items)
+            return ", ".join(items[:max_items]) + f" +{len(items)-max_items} till"
+
+        def _parts(*items):
+            return " | ".join([str(x) for x in items if str(x)])
+
+        def _maybe_interval(label, interval, decimals=0):
+            return f"{label}: {fmt_interval(interval, decimals)}"
+
+        def _spets_rule_text(name):
+            """Kort Helgardering-liknande regeltext för valt spetsfilter."""
+            dynamic_top = f"Topp {slider_u_count} favoriter smal"
+            rules = {
+                "FAT 2-sekvenser": f"Träffar {fmt_interval(c_fat_seq2)} av toppsekvenser: {_short_join(fat_seq2_list)}",
+                "FAT 3-sekvenser": f"Träffar {fmt_interval(c_fat_seq3)} av toppsekvenser: {_short_join(fat_seq3_list)}",
+                "FAT dubbelchans": f"Träffar {fmt_interval(c_fat_pairs)} av topp-par: {_short_join(fat_pair_list)}",
+                "FAT-sekvenspaket": _parts(
+                    f"Minst 2 av aktiva FAT-sekvensdelar",
+                    f"2-seq {fmt_interval(c_fat_seq2)}: {_short_join(fat_seq2_list, 4)}",
+                    f"3-seq {fmt_interval(c_fat_seq3)}: {_short_join(fat_seq3_list, 4)}",
+                    f"dubbel {fmt_interval(c_fat_pairs)}: {_short_join(fat_pair_list, 4)}",
+                ),
+                "Poängfilter smal": _maybe_interval("Poängfilter", c_points, 0),
+                "Ranksumma smal": _maybe_interval("Rank Summa", c_rank24, 1),
+                "Skrälltryck Log smal": _maybe_interval("Skrälltryck Log", c_log_surprise, 0),
+                "SFT Summa smal": _maybe_interval("SFT Summa", c_sft, 1),
+                "100-minus smal": _maybe_interval("100-minus", c_minus, 1),
+                "Total Diff smal": _maybe_interval("Total Diff", c_totaldiff, 0),
+                "Favorit-delta smal": _maybe_interval("Favorit-delta", c_fav_delta, 2),
+                "Risk-/värdepaket smal": _parts(
+                    "Minst ca 70% av aktiva risk/värde-delar",
+                    _maybe_interval("Poäng", c_points, 0),
+                    _maybe_interval("Rank", c_rank24, 1),
+                    _maybe_interval("SFT", c_sft, 1),
+                    _maybe_interval("Log", c_log_surprise, 0),
+                    _maybe_interval("100-minus", c_minus, 1),
+                    _maybe_interval("TotalDiff", c_totaldiff, 0),
+                ),
+                "FAT F smal": _maybe_interval("F", c_fatf, 0),
+                "FAT A smal": _maybe_interval("A", c_fata, 0),
+                "FAT T smal": _maybe_interval("T", c_fatt, 0),
+                "FAT Summa smal": _maybe_interval("FAT Summa", c_fatsum, 0),
+                "FAT-profil smal": _parts(_maybe_interval("F", c_fatf, 0), _maybe_interval("A", c_fata, 0), _maybe_interval("T", c_fatt, 0), _maybe_interval("Summa", c_fatsum, 0)),
+                "FAT-profilpaket": _parts("Minst 3 av 4 FAT-delar", _maybe_interval("F", c_fatf, 0), _maybe_interval("A", c_fata, 0), _maybe_interval("T", c_fatt, 0), _maybe_interval("Summa", c_fatsum, 0)),
+                dynamic_top: f"{fmt_interval(c_u)} vinster bland topp {slider_u_count} favoriter",
+                "Favorittryck 70 smal": _maybe_interval("F70-vinster", c_fav70, 0),
+                "Favorittryck 60 smal": _maybe_interval("F60-vinster", c_fav60, 0),
+                "Favorittryck 50 smal": _maybe_interval("F50-vinster", c_fav50, 0),
+                "Favorittryck smal": _parts(_maybe_interval("F70", c_fav70, 0), _maybe_interval("F60", c_fav60, 0), _maybe_interval("F50", c_fav50, 0)),
+                "Skrällstyrka U10 smal": _maybe_interval("U10-vinster", c_shock10, 0),
+                "Skrällstyrka U15 smal": _maybe_interval("U15-vinster", c_shock15, 0),
+                "Skrällstyrka U20 smal": _maybe_interval("U20-vinster", c_shock20, 0),
+                "Lägsta vinnare smal": _maybe_interval("Lägsta vinnarprocent", c_shock_lowest, 1),
+                "Skrällstyrka smal": _parts(_maybe_interval("U10", c_shock10, 0), _maybe_interval("U15", c_shock15, 0), _maybe_interval("U20", c_shock20, 0), _maybe_interval("Lägsta", c_shock_lowest, 1)),
+                "Favorit-/skrällpaket smal": _parts(
+                    "Minst ca 70% av aktiva favorit-/skrälldelar",
+                    _maybe_interval("Toppfav", c_u, 0),
+                    _maybe_interval("F70", c_fav70, 0),
+                    _maybe_interval("F60", c_fav60, 0),
+                    _maybe_interval("F50", c_fav50, 0),
+                    _maybe_interval("U10", c_shock10, 0),
+                    _maybe_interval("U15", c_shock15, 0),
+                    _maybe_interval("U20", c_shock20, 0),
+                ),
+                "Antal 1 smal": _maybe_interval("Antal 1", c_ones, 0),
+                "Antal X smal": _maybe_interval("Antal X", c_draws, 0),
+                "Antal 2 smal": _maybe_interval("Antal 2", c_twos, 0),
+                "Teckenbalans 1X2 smal": _parts(_maybe_interval("1", c_ones, 0), _maybe_interval("X", c_draws, 0), _maybe_interval("2", c_twos, 0)),
+                "Sviter 1 smal": _maybe_interval("Sviter 1", c_s1, 0),
+                "Sviter X smal": _maybe_interval("Sviter X", c_sx, 0),
+                "Sviter 2 smal": _maybe_interval("Sviter 2", c_s2, 0),
+                "Sviter paket smal": _parts(_maybe_interval("S1", c_s1, 0), _maybe_interval("SX", c_sx, 0), _maybe_interval("S2", c_s2, 0)),
+                "Luckor 1 smal": _maybe_interval("Luckor 1", c_g1, 0),
+                "Luckor X smal": _maybe_interval("Luckor X", c_gx, 0),
+                "Luckor 2 smal": _maybe_interval("Luckor 2", c_g2, 0),
+                "Luckor paket smal": _parts(_maybe_interval("G1", c_g1, 0), _maybe_interval("GX", c_gx, 0), _maybe_interval("G2", c_g2, 0)),
+                "Singlar 1 smal": _maybe_interval("Singlar 1", c_sing1, 0),
+                "Singlar X smal": _maybe_interval("Singlar X", c_singx, 0),
+                "Singlar 2 smal": _maybe_interval("Singlar 2", c_sing2, 0),
+                "Singlar total smal": _maybe_interval("Singlar total", c_singtot, 0),
+                "Singlar paket smal": _parts(_maybe_interval("Si1", c_sing1, 0), _maybe_interval("SiX", c_singx, 0), _maybe_interval("Si2", c_sing2, 0), _maybe_interval("Tot", c_singtot, 0)),
+                "Dubbletter 1 smal": _maybe_interval("Dubbletter 1", c_dub1, 0),
+                "Dubbletter X smal": _maybe_interval("Dubbletter X", c_dubx, 0),
+                "Dubbletter 2 smal": _maybe_interval("Dubbletter 2", c_dub2, 0),
+                "Dubbletter total smal": _maybe_interval("Dubbletter total", c_dubtot, 0),
+                "Dubbletter paket smal": _parts(_maybe_interval("D1", c_dub1, 0), _maybe_interval("DX", c_dubx, 0), _maybe_interval("D2", c_dub2, 0), _maybe_interval("Tot", c_dubtot, 0)),
+                "Tripplar 1 smal": _maybe_interval("Tripplar 1", c_trip1, 0),
+                "Tripplar X smal": _maybe_interval("Tripplar X", c_tripx, 0),
+                "Tripplar 2 smal": _maybe_interval("Tripplar 2", c_trip2, 0),
+                "Tripplar total smal": _maybe_interval("Tripplar total", c_triptot, 0),
+                "Tripplar paket smal": _parts(_maybe_interval("T1", c_trip1, 0), _maybe_interval("TX", c_tripx, 0), _maybe_interval("T2", c_trip2, 0), _maybe_interval("Tot", c_triptot, 0)),
+                "Uppkomster 1 smal": _maybe_interval("Uppkomster 1", c_occ1, 0),
+                "Uppkomster X smal": _maybe_interval("Uppkomster X", c_occx, 0),
+                "Uppkomster 2 smal": _maybe_interval("Uppkomster 2", c_occ2, 0),
+                "Uppkomster total smal": _maybe_interval("Uppkomster total", c_occtot, 0),
+                "Uppkomster paket smal": _parts(_maybe_interval("O1", c_occ1, 0), _maybe_interval("OX", c_occx, 0), _maybe_interval("O2", c_occ2, 0), _maybe_interval("Tot", c_occtot, 0)),
+                "Strukturpaket smal": "Minst ca 72% av aktiva strukturdelar: 1/X/2, sviter, luckor, singlar, dubbletter, tripplar och uppkomster",
+                "Super-Makro": f"Super-Makro: minst {slider_super_groups} av strukturgrupper inom breda intervall",
+            }
+            return rules.get(name, name)
+
+        def _base_gate_rule_rows():
+            rows = []
+            risk_parts = []
+            if cb_sft: risk_parts.append(_maybe_interval("SFT", h_sft, 1))
+            if cb_points: risk_parts.append(_maybe_interval("Poäng", h_points, 0))
+            if cb_100minus: risk_parts.append(_maybe_interval("100-minus", h_minus, 1))
+            if cb_log_surprise: risk_parts.append(_maybe_interval("Log", h_log_surprise, 0))
+            if cb_rank24: risk_parts.append(_maybe_interval("Rank", h_rank24, 1))
+            if cb_totaldiff: risk_parts.append(_maybe_interval("TotalDiff", h_totaldiff, 0))
+            if risk_parts:
+                rows.append({"Bas-gate": "Risk/värde bred", "Krav": f"Minst {_gate_req(len(risk_parts), 0.67)} av {len(risk_parts)} delar", "Intervall/regler": _parts(*risk_parts)})
+            if cb_fat:
+                rows.append({"Bas-gate": "FAT-profil bred", "Krav": "Alla FAT-delar inom intervall", "Intervall/regler": _parts(_maybe_interval("F", c_fatf, 0), _maybe_interval("A", c_fata, 0), _maybe_interval("T", c_fatt, 0), _maybe_interval("Summa", c_fatsum, 0))})
+            seq_parts = []
+            if cb_fat_sequences:
+                if fat_seq2_list: seq_parts.append(f"2-seq {fmt_interval(h_fat_seq2)}: {_short_join(fat_seq2_list, 4)}")
+                if fat_seq3_list: seq_parts.append(f"3-seq {fmt_interval(h_fat_seq3)}: {_short_join(fat_seq3_list, 4)}")
+                if fat_pair_list: seq_parts.append(f"dubbel {fmt_interval(h_fat_pairs)}: {_short_join(fat_pair_list, 4)}")
+            if seq_parts:
+                rows.append({"Bas-gate": "FAT-sekvenser bred", "Krav": f"Minst {max(1, min(2, len(seq_parts)))} av {len(seq_parts)} delar", "Intervall/regler": _parts(*seq_parts)})
+            struct_parts = []
+            if cb_base: struct_parts.append(_parts(_maybe_interval("1", c_ones, 0), _maybe_interval("X", c_draws, 0), _maybe_interval("2", c_twos, 0)))
+            if cb_streak: struct_parts.append(_parts(_maybe_interval("S1", c_s1, 0), _maybe_interval("SX", c_sx, 0), _maybe_interval("S2", c_s2, 0)))
+            if cb_gap: struct_parts.append(_parts(_maybe_interval("G1", c_g1, 0), _maybe_interval("GX", c_gx, 0), _maybe_interval("G2", c_g2, 0)))
+            if cb_single: struct_parts.append(_parts(_maybe_interval("SingTot", c_singtot, 0)))
+            if cb_doublet: struct_parts.append(_parts(_maybe_interval("DubTot", c_dubtot, 0)))
+            if cb_triplet: struct_parts.append(_parts(_maybe_interval("TripTot", c_triptot, 0)))
+            if cb_occur: struct_parts.append(_parts(_maybe_interval("OccTot", c_occtot, 0)))
+            if struct_parts:
+                rows.append({"Bas-gate": "Struktur bred", "Krav": f"Minst {_gate_req(len(struct_parts), 0.60)} av {len(struct_parts)} strukturgrupper", "Intervall/regler": _parts(*struct_parts)})
+            if cb_super_macro:
+                rows.append({"Bas-gate": "Super-Makro bred", "Krav": f"Minst {slider_super_groups} grupper", "Intervall/regler": "Breda strukturintervall från Super-Makro"})
+            fs_parts = []
+            if cb_u_favs: fs_parts.append(_maybe_interval(f"Topp {slider_u_count} fav", h_u, 0))
+            if cb_fav_pressure: fs_parts.append(_parts(_maybe_interval("F70", c_fav70, 0), _maybe_interval("F60", c_fav60, 0), _maybe_interval("F50", c_fav50, 0)))
+            if cb_shock_strength: fs_parts.append(_parts(_maybe_interval("U10", c_shock10, 0), _maybe_interval("U15", c_shock15, 0), _maybe_interval("U20", c_shock20, 0), _maybe_interval("Lägsta", c_shock_lowest, 1)))
+            if cb_fav_delta: fs_parts.append(_maybe_interval("Fav-delta", h_fav_delta, 2))
+            if fs_parts:
+                rows.append({"Bas-gate": "Favorit/skräll bred", "Krav": f"Minst {_gate_req(len(fs_parts), 0.50)} av {len(fs_parts)} delar", "Intervall/regler": _parts(*fs_parts)})
+            return rows
+
         selected_spets_names = []
         def spets_candidate_passes(tr, names=None):
             names = selected_spets_names if names is None else names
@@ -3191,6 +3339,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                 keep_pct_total = (keep_rows / total_candidates * 100) if total_candidates else 0.0
                 row = {
                     "Filter": name,
+                    "Intervall/regler": _spets_rule_text(name),
                     "Före rader": current_rows,
                     "Efter rader": keep_rows,
                     "Reducerar steg %": round(reduction_pct, 1),
@@ -3260,6 +3409,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                 "Typ": "Spetsfilter",
                 "Vald": "✅",
                 "Krav/filter": r["Filter"],
+                "Intervall/regler": r.get("Intervall/regler", _spets_rule_text(r["Filter"])),
                 "Historisk träff": f"{int(r['Historisk träff'])}/{hist_total_for_soft}",
                 "Historisk träff %": r["Historisk träff %"],
                 "Före rader": int(r["Före rader"]),
@@ -3272,6 +3422,7 @@ if st.session_state.get('har_kort_analys') and input_text:
                 "Typ": "Ej valt",
                 "Vald": "",
                 "Krav/filter": r["Filter"],
+                "Intervall/regler": r.get("Intervall/regler", _spets_rule_text(r["Filter"])),
                 "Historisk träff": f"{int(r['Historisk träff'])}/{hist_total_for_soft}",
                 "Historisk träff %": r["Historisk träff %"],
                 "Före rader": int(r["Före rader"]),
@@ -3710,6 +3861,29 @@ if st.session_state.get('har_kort_analys') and input_text:
                 "AutoHard Spetsfilter använder breda bas-gates och lägger bara till hårda spetsfilter som både klarar historikmålet och ger tydlig extra reducering."
             )
 
+            base_gate_rows = _base_gate_rule_rows()
+            if base_gate_rows:
+                with st.expander("Visa hårda basfilter och breda intervaller", expanded=False):
+                    st.caption(f"Basfiltret är ett N-av-M-krav: vald nivå **{selected_hard_req} av {hard_gate_total}**. En rad behöver alltså inte klara varje bas-gate, utan minst vald nivå.")
+                    st.dataframe(pd.DataFrame(base_gate_rows), use_container_width=True, hide_index=True)
+
+            if selected_spets_rows:
+                st.markdown("**Valda hårda spetsfilter och intervaller**")
+                selected_view_rows = []
+                for idx, r in enumerate(selected_spets_rows, start=1):
+                    selected_view_rows.append({
+                        "#": idx,
+                        "Filter": r["Filter"],
+                        "Intervall/regler": r.get("Intervall/regler", _spets_rule_text(r["Filter"])),
+                        "Historisk träff": f"{int(r['Historisk träff'])}/{hist_total_for_soft}",
+                        "Före": int(r["Före rader"]),
+                        "Efter": int(r["Efter rader"]),
+                        "Reducerar": f"{float(r['Reducerar steg %']):.1f}%",
+                    })
+                st.dataframe(pd.DataFrame(selected_view_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("Inga spetsfilter valdes. Basfiltret används ensamt eftersom inga spetsfilter klarade både historikmålet och minsta reducering.")
+
             if soft_req_decision_rows:
                 with st.expander("Visa hur AutoHard Spetsfilter valde filter", expanded=False):
                     st.dataframe(pd.DataFrame(soft_req_decision_rows), use_container_width=True, hide_index=True)
@@ -4073,6 +4247,10 @@ if st.session_state.get('har_kort_analys') and input_text:
                             f"Efter filter: {len(tm_filtered_rows)}",
                             f"Basfilter: {selected_hard_req} av {hard_gate_total}",
                             f"Spetsfilter: {', '.join(selected_spets_names) if selected_spets_names else 'Inga'}",
+                            "",
+                            "VALDA SPETSFILTER OCH INTERVALL",
+                            *[f"{idx}. {r['Filter']} | {r.get('Intervall/regler', _spets_rule_text(r['Filter']))} | {int(r['Före rader'])} -> {int(r['Efter rader'])} | hist {int(r['Historisk träff'])}/{hist_total_for_soft}" for idx, r in enumerate(selected_spets_rows, start=1)],
+                            "",
                             f"Efter TipsetMatrix: {len(tm_reduced_rows)}",
                             f"12+ garanti: {tm_gsum['12plus']:.2f}%",
                             f"13-chans oviktad: {tm_gsum['13_oviktad']:.2f}%",
