@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v11.1r – Teckenskydd ersätter filter & 13-chans"
+APP_VERSION = "v11.1s – Smartare spetsfilter-sökning"
 
 
 st.markdown("""
@@ -3610,56 +3610,130 @@ if st.session_state.get('har_kort_analys') and input_text:
             for name in all_spets_names:
                 cand_spets_map[name].append(bool(checks.get(name, False)))
 
-        min_spets_reduction_pct = 5.0
-        max_spets_filters = 10
+        # v11.1s: välj spetsfilter med en liten beam search i stället för enkel greedy.
+        # Greedy kunde fastna på 2-3 filter trots att en annan kombination av flera filter
+        # hade klarat mallträffen och reducerat mycket bättre. Här testas många delkombinationer
+        # men begränsas hårt för att inte göra sidan långsam.
+        min_spets_reduction_pct = 3.0
+        relaxed_spets_reduction_pct = 1.5
+        max_spets_filters = 14
+        beam_width = 32
+        desired_estimated_after_spets = min(int(tm_filter_limit), 1500) if 'tm_filter_limit' in locals() else 1500
+
         current_hist_mask = list(hard_only_hist_mask)
         current_cand_mask = list(hard_only_cand_mask)
         selected_spets_rows = []
         skipped_spets_rows = []
         available_spets = list(all_spets_names)
 
-        for _ in range(max_spets_filters):
-            current_rows = int(sum(current_cand_mask))
-            if current_rows <= 0:
+        # Gör snabba bool-arrayer. De används bara här i urvalet, inte i UI.
+        hist_np = {name: np.array(hist_spets_map.get(name, []), dtype=bool) for name in all_spets_names}
+        cand_np = {name: np.array(cand_spets_map.get(name, []), dtype=bool) for name in all_spets_names}
+        base_hist_arr = np.array(hard_only_hist_mask, dtype=bool)
+        base_cand_arr = np.array(hard_only_cand_mask, dtype=bool)
+
+        # Förhandsfiltrera kandidater som aldrig kan vara relevanta ens direkt efter basfilter.
+        initial_options = []
+        base_rows = int(base_cand_arr.sum())
+        for name in available_spets:
+            h_arr = base_hist_arr & hist_np[name]
+            c_arr = base_cand_arr & cand_np[name]
+            hist_hits = int(h_arr.sum())
+            keep_rows = int(c_arr.sum())
+            red_pct = ((base_rows - keep_rows) / base_rows * 100) if base_rows else 0.0
+            row = {
+                "Filter": name,
+                "Intervall/regler": _spets_rule_text(name),
+                "Före rader": base_rows,
+                "Efter rader": keep_rows,
+                "Reducerar steg %": round(red_pct, 1),
+                "Kvar total %": round((keep_rows / total_candidates * 100), 1) if total_candidates else 0.0,
+                "Historisk träff": hist_hits,
+                "Historisk träff %": round((hist_hits / hist_total_for_soft) * 100, 1) if hist_total_for_soft else 0.0,
+                "Godkänd historik": hist_hits >= target_soft_hits,
+                "Godkänd reduktion": red_pct >= relaxed_spets_reduction_pct,
+            }
+            if row["Godkänd historik"] and row["Godkänd reduktion"] and keep_rows > 0:
+                initial_options.append((name, keep_rows, red_pct, hist_hits))
+            else:
+                skipped_spets_rows.append(row)
+
+        # Behåll de mest intressanta filtren för kombinationssökningen.
+        # Sortering: få rader kvar, hög reducering, hög historisk träff.
+        candidate_filter_names = [x[0] for x in sorted(initial_options, key=lambda x: (x[1], -x[2], -x[3]))[:28]]
+
+        # state = (names_tuple, hist_arr, cand_arr, rows_detail_list)
+        beam = [(tuple(), base_hist_arr, base_cand_arr, [])]
+        best_state = beam[0]
+        all_examined_rows = []
+
+        for depth in range(max_spets_filters):
+            next_states = []
+            seen = set()
+            for names_tuple, hist_arr, cand_arr, rows_detail in beam:
+                current_rows = int(cand_arr.sum())
+                if current_rows <= 0:
+                    continue
+                # När vi redan är nere under målnivån kräver vi normal effekt; ovanför målnivån
+                # tillåts även mindre, men fortfarande mätbar, reducering för att komma vidare.
+                step_min_red = relaxed_spets_reduction_pct if current_rows > desired_estimated_after_spets else min_spets_reduction_pct
+                for name in candidate_filter_names:
+                    if name in names_tuple:
+                        continue
+                    new_hist_arr = hist_arr & hist_np[name]
+                    hist_hits = int(new_hist_arr.sum())
+                    if hist_hits < target_soft_hits:
+                        continue
+                    new_cand_arr = cand_arr & cand_np[name]
+                    keep_rows = int(new_cand_arr.sum())
+                    if keep_rows <= 0 or keep_rows >= current_rows:
+                        continue
+                    red_pct = ((current_rows - keep_rows) / current_rows * 100) if current_rows else 0.0
+                    if red_pct < step_min_red:
+                        continue
+                    new_names = tuple(list(names_tuple) + [name])
+                    sig = tuple(sorted(new_names))
+                    if sig in seen:
+                        continue
+                    seen.add(sig)
+                    detail_row = {
+                        "Filter": name,
+                        "Intervall/regler": _spets_rule_text(name),
+                        "Före rader": current_rows,
+                        "Efter rader": keep_rows,
+                        "Reducerar steg %": round(red_pct, 1),
+                        "Kvar total %": round((keep_rows / total_candidates * 100), 1) if total_candidates else 0.0,
+                        "Historisk träff": hist_hits,
+                        "Historisk träff %": round((hist_hits / hist_total_for_soft) * 100, 1) if hist_total_for_soft else 0.0,
+                        "Godkänd historik": True,
+                        "Godkänd reduktion": True,
+                    }
+                    all_examined_rows.append(detail_row)
+                    next_states.append((new_names, new_hist_arr, new_cand_arr, rows_detail + [detail_row]))
+            if not next_states:
                 break
-            options = []
-            for name in available_spets:
-                hist_vals = hist_spets_map.get(name, [])
-                cand_vals = cand_spets_map.get(name, [])
-                new_hist_mask = [a and b for a, b in zip(current_hist_mask, hist_vals)]
-                new_cand_mask = [a and b for a, b in zip(current_cand_mask, cand_vals)]
-                hist_hits = int(sum(new_hist_mask))
-                keep_rows = int(sum(new_cand_mask))
-                reduction_pct = ((current_rows - keep_rows) / current_rows * 100) if current_rows else 0.0
-                keep_pct_total = (keep_rows / total_candidates * 100) if total_candidates else 0.0
-                row = {
-                    "Filter": name,
-                    "Intervall/regler": _spets_rule_text(name),
-                    "Före rader": current_rows,
-                    "Efter rader": keep_rows,
-                    "Reducerar steg %": round(reduction_pct, 1),
-                    "Kvar total %": round(keep_pct_total, 1),
-                    "Historisk träff": hist_hits,
-                    "Historisk träff %": round((hist_hits / hist_total_for_soft) * 100, 1) if hist_total_for_soft else 0.0,
-                    "Godkänd historik": hist_hits >= target_soft_hits,
-                    "Godkänd reduktion": reduction_pct >= min_spets_reduction_pct,
-                }
-                options.append((row, new_hist_mask, new_cand_mask))
-            valid_options = [x for x in options if x[0]["Godkänd historik"] and x[0]["Godkänd reduktion"] and x[0]["Efter rader"] > 0]
-            for row, _, _ in options:
-                if not row["Godkänd historik"] or not row["Godkänd reduktion"]:
-                    skipped_spets_rows.append(row)
-            if not valid_options:
-                break
-            chosen_row, chosen_hist_mask, chosen_cand_mask = max(
-                valid_options,
-                key=lambda x: (x[0]["Reducerar steg %"], x[0]["Historisk träff"], -x[0]["Efter rader"])
-            )
-            selected_spets_names.append(chosen_row["Filter"])
-            selected_spets_rows.append(chosen_row)
-            current_hist_mask = chosen_hist_mask
-            current_cand_mask = chosen_cand_mask
-            available_spets = [name for name in available_spets if name != chosen_row["Filter"]]
+            # Håll bara de bästa grenarna. Prioritera lägst radantal, men straffa inte flera filter
+            # så länge historikmålet är uppfyllt; målet är hög reducering med bibehållen träffbild.
+            next_states = sorted(
+                next_states,
+                key=lambda stt: (int(stt[2].sum()), -int(stt[1].sum()), len(stt[0]))
+            )[:beam_width]
+            beam = next_states
+            candidate_best = beam[0]
+            if int(candidate_best[2].sum()) < int(best_state[2].sum()):
+                best_state = candidate_best
+            # Om vi är klart under målnivån och nästa steg inte förbättrar mycket stoppar sökningen senare via valid_options.
+
+        selected_spets_names = list(best_state[0])
+        selected_spets_rows = list(best_state[3])
+        current_hist_mask = list(np.array(best_state[1], dtype=bool))
+        current_cand_mask = list(np.array(best_state[2], dtype=bool))
+
+        # Visa även några bra men ej valda kandidater i beslutsloggen.
+        selected_set = set(selected_spets_names)
+        for r in all_examined_rows:
+            if r.get("Filter") not in selected_set:
+                skipped_spets_rows.append(r)
 
         mall_hits = int(sum(current_hist_mask)) if hist_total_for_soft else 0
         soft_hit_pct = (mall_hits / len(v_m) * 100) if len(v_m) else 0.0
@@ -3680,7 +3754,7 @@ if st.session_state.get('har_kort_analys') and input_text:
         )
         st.caption(
             "Soft som aktivt filtersteg används inte längre. Spetsfilter väljs bara om de klarar historikmålet "
-            f"och reducerar minst {min_spets_reduction_pct:.0f}% av kvarvarande radmassa. "
+            f"och kombinationssökningen använder ungefär {relaxed_spets_reduction_pct:.1f}–{min_spets_reduction_pct:.0f}% minsta stegreducering beroende på kvarvarande radmassa. "
             f"Estimat: efter basfilter {hard_stage_survivors}/{total_candidates} ({hard_stage_keep_pct:.1f}%), "
             f"efter bas+spets {combined_soft_survivors}/{total_candidates} ({combined_soft_keep_pct:.1f}%)."
         )
