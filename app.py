@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import re
 import os
+import html
 import itertools
 import bisect
 import matplotlib.pyplot as plt
@@ -10,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0g – Popover-info & tydlig träff"
+APP_VERSION = "v12.0h – Tydliga infosiffror"
 
 
 st.markdown("""
@@ -2022,6 +2023,11 @@ st.markdown("""
     .v12-muted {opacity:.75; font-size:.93rem;}
     .v12-card {border:1px solid rgba(120,120,120,.22); border-radius:16px; padding:14px 16px; margin:10px 0 14px 0; background:rgba(128,128,128,.035);} 
     .v12-pill {display:inline-block; padding:.18rem .56rem; border:1px solid rgba(120,120,120,.35); border-radius:999px; font-size:.82rem; margin-right:.28rem; margin-top:.25rem;}
+    .v12-info-grid {display:grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap:12px; margin:.65rem 0 1.1rem 0;}
+    .v12-info-card {border:1px solid rgba(120,120,120,.24); border-radius:14px; padding:12px 14px; background:rgba(128,128,128,.045); min-height:86px;}
+    .v12-info-label {font-size:.82rem; opacity:.86; font-weight:800; margin-bottom:.34rem;}
+    .v12-info-value {font-size:1.38rem; font-weight:850; line-height:1.15; white-space:normal; overflow-wrap:anywhere; word-break:break-word;}
+    .v12-info-sub {font-size:.82rem; opacity:.76; margin-top:.32rem; line-height:1.25;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -2463,6 +2469,21 @@ def _build_filter_summary_df(specs, settings, group_reqs, rows=None):
     return pd.DataFrame(data)
 
 
+
+def _render_info_cards(cards):
+    """Visar filterinfo som egna HTML-kort så långa intervall inte kapas med ellips."""
+    parts = ["<div class='v12-info-grid'>"]
+    for label, value, sub in cards:
+        parts.append(
+            "<div class='v12-info-card'>"
+            f"<div class='v12-info-label'>{html.escape(str(label))}</div>"
+            f"<div class='v12-info-value'>{html.escape(str(value))}</div>"
+            f"<div class='v12-info-sub'>{html.escape(str(sub))}</div>"
+            "</div>"
+        )
+    parts.append("</div>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
 def _render_inline_filter_info(spec, interval, frame_rows, frame, antal_matcher):
     """Renderar statistik för ett filter.
 
@@ -2491,15 +2512,23 @@ def _render_inline_filter_info(spec, interval, frame_rows, frame, antal_matcher)
     if spec.get('help'):
         st.caption(spec.get('help'))
 
-    a, b, c, d, e = st.columns(5)
-    a.metric("Rek. intervall", _display_interval(rec_interval, spec['decimals']))
-    b.metric("Rek. träff", f"{rhp}/{rht}", f"{rpct:.1f}%")
-    c.metric("Nu valt", _display_interval(interval, spec['decimals']))
-    d.metric("Nuvarande träff", f"{hp}/{ht}", f"{pct:.1f}%")
+    rec_txt = _display_interval(rec_interval, spec['decimals'])
+    cur_txt = _display_interval(interval, spec['decimals'])
     if row_values:
-        e.metric("Grundram → filter", f"{len(frame_rows):,} → {len(pass_rows):,}".replace(',', ' '), f"-{(100 - 100*len(pass_rows)/max(1,len(frame_rows))):.1f}%")
+        red_pct = 100 - 100 * len(pass_rows) / max(1, len(frame_rows))
+        frame_txt = f"{len(frame_rows):,} → {len(pass_rows):,}".replace(',', ' ')
+        frame_sub = f"Reducerar {red_pct:.1f}% av grundramen"
     else:
-        e.metric("Grundram → filter", "—")
+        frame_txt = "—"
+        frame_sub = "Spara grundram för exakt effekt"
+
+    _render_info_cards([
+        ("Rek. intervall", rec_txt, "Rekommenderat från historiken"),
+        ("Rek. träff", f"{rhp}/{rht}", f"{rpct:.1f}% av 30 liknande"),
+        ("Nu valt", cur_txt, "Dina aktuella sliders"),
+        ("Nuvarande träff", f"{hp}/{ht}", f"{pct:.1f}% av 30 liknande"),
+        ("Grundram → filter", frame_txt, frame_sub),
+    ])
 
     freq_df = _make_freq_df(spec['hist_values'], spec['decimals'])
     left, right = st.columns([1.0, 1.0])
