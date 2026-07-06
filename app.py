@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0b – Bugfix filtercentral"
+APP_VERSION = "v12.0c – Direktverkande filtercentral"
 
 
 st.markdown("""
@@ -2551,68 +2551,75 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         if s['category'] not in cats:
             cats.append(s['category'])
 
-    with st.form("v12_filter_form"):
-        new_settings = {}
-        for ci, cat in enumerate(cats):
-            with st.expander(f"📂 {cat}", expanded=(ci == 0)):
-                cat_specs = [s for s in specs if s['category'] == cat]
-                for spec in cat_specs:
-                    k = spec['key']
-                    default_mode = st.session_state.get(f'filter_mode_{k}', 'Av')
-                    default_interval = _current_interval_for_spec(spec)
-                    lo, hi = spec['bounds']
-                    dec = spec['decimals']
-                    try:
-                        val = (max(lo, default_interval[0]), min(hi, default_interval[1]))
-                    except Exception:
-                        val = spec['default_interval']
-                    c1, c2, c3 = st.columns([1.45, 1.05, 3.2])
-                    with c1:
-                        st.markdown(f"**{spec['name']}**")
-                        hp, ht, pct = _hist_pass_count(spec['hist_values'], spec['default_interval'])
-                        st.caption(f"Rek: {_display_interval(spec['default_interval'], dec)} · {hp}/{ht}")
-                    with c2:
-                        mode = st.selectbox("Läge", mode_options, index=mode_options.index(default_mode) if default_mode in mode_options else 0, key=f"tmp_mode_{k}", label_visibility="collapsed")
-                    with c3:
-                        step = 1 if dec == 0 else (0.01 if dec >= 2 else 0.1)
-                        if dec == 0:
-                            lo_i, hi_i = int(lo), int(hi)
-                            val_i = (int(round(val[0])), int(round(val[1])))
-                            rng = st.slider("Intervall", lo_i, hi_i, val_i, step=1, key=f"tmp_range_{k}", label_visibility="collapsed")
-                        else:
-                            rng = st.slider("Intervall", float(lo), float(hi), (float(val[0]), float(val[1])), step=step, key=f"tmp_range_{k}", label_visibility="collapsed")
-                    new_settings[k] = {'mode': mode, 'interval': rng}
-                    if spec.get('help'):
-                        st.caption(spec['help'])
-                    st.divider()
-        st.markdown("---")
-        st.markdown("**Gruppkrav**")
-        gc = st.columns(6)
-        new_group_reqs = {}
-        for i in range(1, 7):
-            gname = f'Grupp {i}'
-            with gc[i-1]:
-                new_group_reqs[gname] = st.number_input(gname, min_value=0, max_value=40, value=int(st.session_state.get(f'group_req_{i}', 0)), step=1, key=f"tmp_group_req_{i}", help="0 = gruppen påverkar inte. Exempel: Grupp 1 har 7 filter, krav 4 betyder minst 4 av 7.")
-        save_filters = st.form_submit_button("💾 Spara filtercentral", use_container_width=True)
-
-    if save_filters:
-        for k, val in new_settings.items():
-            st.session_state[f'filter_mode_{k}'] = val['mode']
-            st.session_state[f'filter_range_{k}'] = val['interval']
-        for i in range(1, 7):
-            st.session_state[f'group_req_{i}'] = int(new_group_reqs[f'Grupp {i}'])
-        st.session_state['v12_filter_saved'] = True
-        st.success("Filtercentral sparad.")
-
-    # Build current saved settings
     settings = {}
-    for spec in specs:
-        k = spec['key']
-        settings[k] = {
-            'mode': st.session_state.get(f'filter_mode_{k}', 'Av'),
-            'interval': st.session_state.get(f'filter_range_{k}', spec['default_interval'])
-        }
-    group_reqs = {f'Grupp {i}': int(st.session_state.get(f'group_req_{i}', 0)) for i in range(1, 7)}
+    for ci, cat in enumerate(cats):
+        with st.expander(f"📂 {cat}", expanded=(ci == 0)):
+            cat_specs = [s for s in specs if s['category'] == cat]
+            for spec in cat_specs:
+                k = spec['key']
+                mode_key = f'filter_mode_{k}'
+                range_key = f'filter_range_{k}'
+                default_mode = st.session_state.get(mode_key, 'Av')
+                lo, hi = spec['bounds']
+                dec = spec['decimals']
+                default_interval = _current_interval_for_spec(spec)
+                try:
+                    val = (max(lo, float(default_interval[0])), min(hi, float(default_interval[1])))
+                except Exception:
+                    val = spec['default_interval']
+                if range_key in st.session_state:
+                    try:
+                        cur = st.session_state[range_key]
+                        if float(cur[0]) < float(lo) or float(cur[1]) > float(hi):
+                            st.session_state[range_key] = val
+                    except Exception:
+                        st.session_state[range_key] = val
+                c1, c2, c3 = st.columns([1.45, 1.05, 3.2])
+                with c1:
+                    st.markdown(f"**{spec['name']}**")
+                    hp, ht, pct = _hist_pass_count(spec['hist_values'], spec['default_interval'])
+                    st.caption(f"Rek: {_display_interval(spec['default_interval'], dec)} · {hp}/{ht}")
+                with c2:
+                    mode = st.selectbox(
+                        "Läge",
+                        mode_options,
+                        index=mode_options.index(default_mode) if default_mode in mode_options else 0,
+                        key=mode_key,
+                        label_visibility="collapsed",
+                    )
+                with c3:
+                    step = 1 if dec == 0 else (0.01 if dec >= 2 else 0.1)
+                    if dec == 0:
+                        lo_i, hi_i = int(lo), int(hi)
+                        val_i = (int(round(val[0])), int(round(val[1])))
+                        rng = st.slider("Intervall", lo_i, hi_i, val_i, step=1, key=range_key, label_visibility="collapsed")
+                    else:
+                        rng = st.slider("Intervall", float(lo), float(hi), (float(val[0]), float(val[1])), step=step, key=range_key, label_visibility="collapsed")
+                settings[k] = {'mode': mode, 'interval': rng}
+                if spec.get('help'):
+                    st.caption(spec['help'])
+                st.divider()
+    st.markdown("---")
+    st.markdown("**Gruppkrav**")
+    gc = st.columns(6)
+    group_reqs = {}
+    for i in range(1, 7):
+        gname = f'Grupp {i}'
+        with gc[i-1]:
+            group_reqs[gname] = st.number_input(
+                gname,
+                min_value=0,
+                max_value=40,
+                value=int(st.session_state.get(f'group_req_{i}', 0)),
+                step=1,
+                key=f"group_req_{i}",
+                help="0 = gruppen påverkar inte. Exempel: Grupp 1 har 7 filter, krav 4 betyder minst 4 av 7.",
+            )
+    active_preview = sum(1 for v in settings.values() if v['mode'] != 'Av')
+    if active_preview > 0:
+        st.success(f"{active_preview} filter är aktiva direkt. Du behöver inte spara filtercentralen separat — körknappen använder nuvarande val.")
+    else:
+        st.info("Inga aktiva filter ännu. Välj Tvingat eller Grupp på filterraderna innan du kör filtrering.")
 
     active_count = sum(1 for v in settings.values() if v['mode'] != 'Av')
     forced_count = sum(1 for v in settings.values() if v['mode'] == 'Tvingat')
