@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0c – Direktverkande filtercentral"
+APP_VERSION = "v12.0d – Reducerbuggfix"
 
 
 st.markdown("""
@@ -735,6 +735,8 @@ def weighted_13_share(all_rows, selected_rows, prob_vector):
     """Viktad 13-chans inom filtrerad radmassa, baserad på dagens procentvektor."""
     if not all_rows or not selected_rows:
         return 0.0
+    all_rows = [normalize_single_row_text(r) for r in (all_rows or []) if normalize_single_row_text(r)]
+    selected_rows = [normalize_single_row_text(r) for r in (selected_rows or []) if normalize_single_row_text(r)]
     selected_set = set(selected_rows)
     logs = np.array([row_log_probability(r, prob_vector) for r in all_rows], dtype=float)
     mx = float(np.max(logs)) if len(logs) else 0.0
@@ -880,9 +882,18 @@ def tipsetmatrix12_reduce(rows, row_scores=None, mode="Balans", max_output_rows=
 
 
 def build_tipsetmatrix_guarantee_table(filtered_rows, reduced_rows, antal_matcher, prob_vector=None):
-    """Bygger garantitabell: varje filtrerad rad testas som möjlig facitrad."""
-    filtered_rows = list(dict.fromkeys(filtered_rows))
-    reduced_rows = list(dict.fromkeys(reduced_rows))
+    """Bygger garantitabell: varje filtrerad rad testas som möjlig facitrad.
+    Robust mot att rader råkar skickas in som list/tuple/metadata i stället för rena radsträngar.
+    """
+    antal_matcher = int(antal_matcher)
+    filtered_rows = list(dict.fromkeys([
+        normalize_single_row_text(r) for r in (filtered_rows or [])
+        if len(normalize_single_row_text(r)) == antal_matcher
+    ]))
+    reduced_rows = list(dict.fromkeys([
+        normalize_single_row_text(r) for r in (reduced_rows or [])
+        if len(normalize_single_row_text(r)) == antal_matcher
+    ]))
     n = len(filtered_rows)
     if n == 0 or not reduced_rows:
         table = pd.DataFrame([
@@ -2707,14 +2718,22 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     filtered_rows = clean_filtered_rows
                     st.session_state['v12_last_result']['filtered_rows'] = filtered_rows
                     scores = [row_log_probability(r, filter_vec) for r in filtered_rows]
-                    reduced_rows = tipsetmatrix12_reduce(filtered_rows, row_scores=scores, mode=reducer_mode, max_output_rows=None, seed=42)
+                    reduced_rows, tm_meta = tipsetmatrix12_reduce(filtered_rows, row_scores=scores, mode=reducer_mode, max_output_rows=None, seed=42)
                 st.session_state['v12_last_result']['reduced_rows'] = reduced_rows
+                st.session_state['v12_last_result']['tm_meta'] = tm_meta
                 st.success(f"TipsetMatrix klar: {len(filtered_rows):,} → {len(reduced_rows):,} rader.".replace(',', ' '))
+                if not tm_meta.get('complete', False):
+                    st.warning(f"TipsetMatrix täckte {tm_meta.get('covered_pct', 0)}% av filtermassan. Höj spärren eller filtrera hårdare om du vill kräva full 12-garanti.")
 
     res = st.session_state.get('v12_last_result')
     if res and res.get('filtered_rows') is not None:
         filtered_rows = res['filtered_rows']
         reduced_rows = res.get('reduced_rows') or []
+        # Skydd mot äldre session/resultat där reducerfunktionen felaktigt sparades som (rader, metadata).
+        if isinstance(reduced_rows, tuple) and len(reduced_rows) == 2 and isinstance(reduced_rows[0], list):
+            reduced_rows = reduced_rows[0]
+            st.session_state['v12_last_result']['reduced_rows'] = reduced_rows
+        reduced_rows = [normalize_single_row_text(r) for r in (reduced_rows or []) if len(normalize_single_row_text(r)) == int(antal_matcher)]
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Grundram", f"{len(frame_rows):,}".replace(',', ' '))
         c2.metric("Efter filter", f"{len(filtered_rows):,}".replace(',', ' '), f"-{(100-100*len(filtered_rows)/max(1,len(frame_rows))):.1f}%")
