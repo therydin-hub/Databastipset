@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0l – Sliderkey per träffmål"
+APP_VERSION = "v12.0m – Rekommenderade filterpaket"
 
 
 st.markdown("""
@@ -2609,6 +2609,165 @@ def _render_inline_filter_info(spec, interval, frame_rows, frame, antal_matcher)
             st.dataframe(build_sign_distribution_df(pass_rows, frame, antal_matcher), use_container_width=True, hide_index=True)
 
 
+def _rows_from_mask(rows, mask):
+    """Returnerar rader där mask är True. Separat helper för läsbarhet i paketoptimeringen."""
+    try:
+        return [r for r, ok in zip(rows, mask) if bool(ok)]
+    except Exception:
+        return []
+
+
+def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14):
+    """Bygger rekommenderade filterpaket per samlad historisk träffnivå.
+
+    Viktigt: detta ändrar inte användarens filterval. Det tar varje filters nuvarande
+    rekommenderade intervall (från träffmåls-slidern) och letar efter ett tvingat
+    filterpaket som reducerar den exakta sparade grundramen så mycket som möjligt
+    utan att samlad historisk träff går under respektive nivå.
+
+    Vi börjar med en enkel och transparent greedy: lägg till det filter som ger störst
+    faktisk ny reducering på grundramen, så länge paketet fortfarande klarar historikmål
+    och teckenskydd. Detta är medvetet begränsat, så sidan inte blir tung.
+    """
+    hist_rows = [normalize_single_row_text(r) for r in list(v_m['Correct_Row']) if len(normalize_single_row_text(r)) == int(antal_matcher)]
+    frame_rows = [normalize_single_row_text(r) for r in (frame_rows or []) if len(normalize_single_row_text(r)) == int(antal_matcher)]
+    htot = len(hist_rows)
+    ftot = len(frame_rows)
+    if htot == 0 or ftot == 0:
+        return []
+    if hit_levels is None:
+        hit_levels = [htot, max(0, htot-2), max(0, htot-4), max(0, htot-6), max(0, htot-8), max(0, htot-10)]
+    hit_levels = sorted({int(max(0, min(htot, h))) for h in hit_levels}, reverse=True)
+
+    candidates = []
+    for spec in specs:
+        interval = spec.get('default_interval')
+        try:
+            hist_mask = np.array([_spec_pass(r, spec, interval) for r in hist_rows], dtype=bool)
+            frame_mask = np.array([_spec_pass(r, spec, interval) for r in frame_rows], dtype=bool)
+        except Exception:
+            continue
+        hist_hit = int(hist_mask.sum())
+        frame_keep = int(frame_mask.sum())
+        red_pct = 100.0 - 100.0 * frame_keep / max(1, ftot)
+        if frame_keep >= ftot:
+            continue
+        candidates.append({
+            'key': spec['key'],
+            'name': spec['name'],
+            'category': spec.get('category', ''),
+            'interval': interval,
+            'interval_txt': _display_interval(interval, spec.get('decimals', 0)),
+            'hist_mask': hist_mask,
+            'frame_mask': frame_mask,
+            'hist_hit': hist_hit,
+            'frame_keep': frame_keep,
+            'red_pct': red_pct,
+        })
+
+    packages = []
+    min_step_reduction_pct = float(min_step_reduction_pct)
+    for target in hit_levels:
+        cur_hist = np.ones(htot, dtype=bool)
+        cur_frame = np.ones(ftot, dtype=bool)
+        chosen = []
+        unused = candidates.copy()
+        steps = []
+
+        while unused and len(chosen) < int(max_filters):
+            best = None
+            best_score = None
+            cur_frame_count = int(cur_frame.sum())
+            if cur_frame_count <= 0:
+                break
+            for cand in unused:
+                # Ett filter som inte ens ensamt når målet kan aldrig ingå i ett AND-paket
+                # som ska nå målet.
+                if cand['hist_hit'] < target:
+                    continue
+                new_hist = cur_hist & cand['hist_mask']
+                hist_hit = int(new_hist.sum())
+                if hist_hit < target:
+                    continue
+                new_frame = cur_frame & cand['frame_mask']
+                new_frame_count = int(new_frame.sum())
+                if new_frame_count >= cur_frame_count:
+                    continue
+                step_red_pct = 100.0 * (cur_frame_count - new_frame_count) / max(1, cur_frame_count)
+                if step_red_pct < min_step_reduction_pct:
+                    continue
+                # Teckenskydd: rekommenderat paket får inte nolla manuellt markerade tecken.
+                test_rows = _rows_from_mask(frame_rows, new_frame)
+                if selected_signs_missing(test_rows, frame, antal_matcher):
+                    continue
+                # Score: primärt faktisk ny reducering, sekundärt bibehållen historik.
+                score = (cur_frame_count - new_frame_count, hist_hit, cand['red_pct'])
+                if best is None or score > best_score:
+                    best = (cand, new_hist, new_frame, hist_hit, new_frame_count, step_red_pct)
+                    best_score = score
+            if best is None:
+                break
+            cand, cur_hist, cur_frame, hist_hit, new_frame_count, step_red_pct = best
+            chosen.append(cand)
+            steps.append({
+                'Filter': cand['name'],
+                'Kategori': cand['category'],
+                'Intervall': cand['interval_txt'],
+                'Stegreducering': f"{step_red_pct:.1f}%",
+                'Efter filter': int(new_frame_count),
+                'Samlad träff efter steg': f"{hist_hit}/{htot}",
+            })
+            unused = [u for u in unused if u['key'] != cand['key']]
+
+        final_hit = int(cur_hist.sum())
+        final_keep = int(cur_frame.sum())
+        packages.append({
+            'target': int(target),
+            'target_label': f"minst {int(target)}/{htot}",
+            'hist_hit': final_hit,
+            'hist_total': htot,
+            'frame_start': ftot,
+            'frame_after': final_keep,
+            'reduction_pct': 100.0 - 100.0 * final_keep / max(1, ftot),
+            'num_filters': len(chosen),
+            'filters': chosen,
+            'steps': steps,
+            'min_step_reduction_pct': min_step_reduction_pct,
+        })
+    return packages
+
+
+def _recommended_packages_summary_df(packages):
+    rows = []
+    for p in packages:
+        rows.append({
+            'Paketmål': p['target_label'],
+            'Samlad träff': f"{p['hist_hit']}/{p['hist_total']}",
+            'Grundram → filter': f"{p['frame_start']:,} → {p['frame_after']:,}".replace(',', ' '),
+            'Reducerar': f"{p['reduction_pct']:.1f}%",
+            'Tvingade filter': int(p['num_filters']),
+            'Min stegreducering': f"{p.get('min_step_reduction_pct', 0):.1f}%",
+        })
+    return pd.DataFrame(rows)
+
+
+def _apply_recommended_package_to_session(package, specs, filter_hist_target_pct, top_fav_count):
+    chosen_keys = {c['key'] for c in package.get('filters', [])}
+    chosen_by_key = {c['key']: c for c in package.get('filters', [])}
+    for spec in specs:
+        k = spec['key']
+        st.session_state[f'filter_mode_{k}'] = 'Tvingat' if k in chosen_keys else 'Av'
+        range_key = f'filter_range_{k}_h{int(filter_hist_target_pct)}_tf{int(top_fav_count)}'
+        if k in chosen_by_key:
+            st.session_state[range_key] = chosen_by_key[k]['interval']
+        else:
+            # Låt avstängda filter ligga på rekommenderat intervall för tydlighet.
+            st.session_state[range_key] = spec.get('default_interval')
+    for i in range(1, 7):
+        st.session_state[f'group_req_{i}'] = 0
+
+
+
 # Init state
 for k, v in {
     'v12_analysis_ready': False,
@@ -2625,7 +2784,7 @@ st.markdown(f"""
   <div class='v12-step'>Ren omstart</div>
   <div class='v12-title'>🎯 Tipset AI — Helgardering-lik filtercentral</div>
   <div class='v12-muted'>En grundram. Ett filter per rad. Av / Tvingat / Grupp. Statistik på varje filter när du öppnar info.</div>
-  <div><span class='v12-pill'>{APP_VERSION}</span><span class='v12-pill'>Manuell filtercentral</span><span class='v12-pill'>Filterkvalitet</span></div>
+  <div><span class='v12-pill'>{APP_VERSION}</span><span class='v12-pill'>Manuell filtercentral</span><span class='v12-pill'>Rekommenderade paket</span></div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -2786,6 +2945,48 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     specs = build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=top_fav_count, target_hist_pct=filter_hist_target_pct)
     st.session_state['v12_specs'] = specs
     st.caption("När du ändrar minsta historiska träff får varje filter nya slider-nycklar och startar på sitt rekommenderade intervall. 100% ska därför ge startintervall med 30/30 där det är möjligt.")
+
+    with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
+        st.caption("Testar tvingade filterpaket på din exakta grundram. Målet är bästa reducering inom varje samlad historisk träffnivå. Detta ändrar inget förrän du trycker Använd valt paket.")
+        rp_c1, rp_c2, rp_c3 = st.columns([1, 1, 1])
+        with rp_c1:
+            rec_min_step = st.number_input("Min stegreducering per filter", min_value=0.5, max_value=20.0, value=5.0, step=0.5, key="v12_rec_min_step")
+        with rp_c2:
+            rec_max_filters = st.number_input("Max filter i paket", min_value=1, max_value=25, value=14, step=1, key="v12_rec_max_filters")
+        with rp_c3:
+            build_recs = st.button("Beräkna paket", use_container_width=True, key="v12_build_recommended_packages")
+        if build_recs:
+            with st.spinner("Beräknar rekommenderade paket på exakt grundram..."):
+                packages = _build_recommended_filter_packages(
+                    v_m, specs, frame_rows, frame, antal_matcher,
+                    min_step_reduction_pct=float(rec_min_step),
+                    max_filters=int(rec_max_filters),
+                )
+            st.session_state['v12_recommended_packages'] = packages
+            st.session_state['v12_recommended_meta'] = {
+                'hist_target_pct': int(filter_hist_target_pct),
+                'top_fav_count': int(top_fav_count),
+                'frame_rows': int(len(frame_rows)),
+                'min_step': float(rec_min_step),
+                'max_filters': int(rec_max_filters),
+            }
+        packages = st.session_state.get('v12_recommended_packages') or []
+        if packages:
+            st.dataframe(_recommended_packages_summary_df(packages), use_container_width=True, hide_index=True)
+            labels = [f"{p['target_label']} · {p['frame_start']:,}→{p['frame_after']:,} · {p['reduction_pct']:.1f}% · {p['num_filters']} filter".replace(',', ' ') for p in packages]
+            pick_idx = st.selectbox("Välj paket att använda", list(range(len(packages))), format_func=lambda i: labels[i], key="v12_recommended_pick")
+            sel_pkg = packages[int(pick_idx)]
+            with st.expander("Visa filter i valt paket", expanded=False):
+                if sel_pkg.get('steps'):
+                    st.dataframe(pd.DataFrame(sel_pkg['steps']), use_container_width=True, hide_index=True)
+                else:
+                    st.info("Detta paket hittade inga filter som gav tillräcklig extra reducering inom träffmålet.")
+            if st.button("✅ Använd valt paket i filtercentralen", use_container_width=True, key="v12_apply_recommended_package"):
+                _apply_recommended_package_to_session(sel_pkg, specs, filter_hist_target_pct, top_fav_count)
+                st.success("Paketet har lagts in i filtercentralen.")
+                st.rerun()
+        else:
+            st.info("Inga rekommenderade paket beräknade ännu.")
 
     mode_options = ['Av', 'Tvingat'] + [f'Grupp {i}' for i in range(1, 7)]
     cats = []
