@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v11.1w – Alla poängfilter som spetsfilter"
+APP_VERSION = "v11.2a – Manuell filtercentral"
 
 
 st.markdown("""
@@ -2015,7 +2015,7 @@ if st.session_state['aktuell_spelform'] != spelform:
 # --- SIDEBAR (REN KONTROLLPANEL) ---
 with st.sidebar:
     st.header("🎛️ Kontrollpanel")
-    st.caption("Normal-läget styrs av utdelningsnivå och samlad mallträff. Appen väljer intervaller, basfilter, spetsfilter och TipsetMatrix-inställningar själv.")
+    st.caption("Manuell filtercentral: välj själv Av / Tvingat / Grupp. Appen visar historisk träff, intervall och reducering direkt från databasen.")
 
     if st.button("🧹 Töm minne / rensa cache", use_container_width=True):
         st.cache_data.clear()
@@ -2031,6 +2031,14 @@ with st.sidebar:
 
     st.markdown("---")
     expert_mode = st.toggle("🔧 Expertläge", value=False, help="Av = normalspel med en huvudkontroll. På = visa alla tekniska reglage.")
+    # v11.2a: standardflödet är manuell filtercentral, inte AutoHard som svart låda.
+    manual_filtercentral_enabled = True
+    if expert_mode:
+        manual_filtercentral_enabled = st.toggle(
+            "Använd manuell filtercentral",
+            value=True,
+            help="På = TipsetMatrix använder bara filter du själv satt som Tvingat/Grupp. Av = gamla AutoHard kan användas för jämförelse."
+        )
 
     # Standard: allt på. Expertläget kan användas för felsökning.
     cb_payout = True
@@ -2119,7 +2127,7 @@ with st.sidebar:
         cb_tm_backtest = False
 
         st.markdown("---")
-        st.success("Normal-läge: appen väljer bästa intervaller, hårda basfilter och hårda spetsfilter automatiskt utifrån träffbilden.")
+        st.success("Normal-läge: manuell filtercentral är aktiv. Du väljer själv filter som Av / Tvingat / Grupp; appen räknar statistik och reducering.")
 
     else:
         st.subheader("1) AutoFilter")
@@ -3938,6 +3946,158 @@ if st.session_state.get('har_kort_analys') and input_text:
             f"efter bas+spets {combined_soft_survivors}/{total_candidates} ({combined_soft_keep_pct:.1f}%)."
         )
 
+        # --- v11.2a MANUELL FILTERCENTRAL ---
+        # Detta är den nya Helgardering-lika vägen: appen visar statistik, men spelaren väljer själv
+        # Av / Tvingat / Grupp. AutoHard ovan finns kvar som jämförelse/expert men ska inte styra normalflödet.
+        manual_filter_config_df = pd.DataFrame()
+        manual_active_filter_names = []
+        manual_forced_names = []
+        manual_group_map = {}
+        manual_group_reqs = {}
+        manual_filtercentral_rows = []
+        manual_filtercentral_enabled = bool(globals().get('manual_filtercentral_enabled', True))
+
+        def _manual_pass_from_checks(checks, forced_names=None, group_map=None, group_reqs=None):
+            forced_names = forced_names or []
+            group_map = group_map or {}
+            group_reqs = group_reqs or {}
+            for _name in forced_names:
+                if not bool(checks.get(_name, False)):
+                    return False
+            for _grp, _names in group_map.items():
+                if not _names:
+                    continue
+                _req = int(group_reqs.get(_grp, len(_names)))
+                _hits = sum(1 for _name in _names if bool(checks.get(_name, False)))
+                if _hits < _req:
+                    return False
+            return True
+
+        def _manual_history_hits(forced_names=None, group_map=None, group_reqs=None):
+            _hits = 0
+            for _i in range(len(v_m)):
+                _checks = {name: bool(hist_spets_map.get(name, [False] * len(v_m))[_i]) for name in all_spets_names}
+                if _manual_pass_from_checks(_checks, forced_names, group_map, group_reqs):
+                    _hits += 1
+            return _hits
+
+        def _manual_candidate_keep(forced_names=None, group_map=None, group_reqs=None):
+            if not total_candidates:
+                return 0
+            _keep = 0
+            for _idx in range(total_candidates):
+                _checks = {name: bool(cand_spets_map.get(name, [False] * total_candidates)[_idx]) for name in all_spets_names}
+                if _manual_pass_from_checks(_checks, forced_names, group_map, group_reqs):
+                    _keep += 1
+            return _keep
+
+        if manual_filtercentral_enabled:
+            st.markdown("---")
+            st.subheader("🧰 Filtercentral · manuell Helgardering-modell")
+            st.caption(
+                "Välj själv vilka filter som ska vara Av, Tvingat eller ingå i en egen grupp. "
+                "TipsetMatrix använder dessa manuella filter, inte AutoHard, när filtercentralen är aktiv."
+            )
+
+            mode_options = ["Av", "Tvingat", "Grupp 1", "Grupp 2", "Grupp 3", "Grupp 4", "Grupp 5", "Grupp 6"]
+            saved_key = f"manual_filtercentral_saved_{spelform}_{antal_matcher}"
+            saved_df = st.session_state.get(saved_key)
+            saved_modes = {}
+            if isinstance(saved_df, pd.DataFrame) and not saved_df.empty and "Filter" in saved_df.columns:
+                saved_modes = dict(zip(saved_df["Filter"].astype(str), saved_df.get("Läge", "Av").astype(str)))
+
+            base_rows_fc = []
+            for _name in all_spets_names:
+                _hist_hits = int(sum(hist_spets_map.get(_name, [])))
+                _cand_keep = int(sum(cand_spets_map.get(_name, []))) if total_candidates else 0
+                _keep_pct = (_cand_keep / total_candidates * 100.0) if total_candidates else 0.0
+                _red_pct = 100.0 - _keep_pct
+                base_rows_fc.append({
+                    "Filter": _name,
+                    "Läge": saved_modes.get(_name, "Av") if saved_modes.get(_name, "Av") in mode_options else "Av",
+                    "Intervall/regler": _spets_rule_text(_name),
+                    "Hist träff": f"{_hist_hits}/{hist_total_for_soft}",
+                    "Hist %": round((_hist_hits / hist_total_for_soft * 100.0), 1) if hist_total_for_soft else 0.0,
+                    "Est kvar %": round(_keep_pct, 1),
+                    "Est reducerar %": round(_red_pct, 1),
+                })
+
+            manual_editor_df = pd.DataFrame(base_rows_fc)
+            with st.form(key=f"manual_filtercentral_form_{spelform}_{antal_matcher}"):
+                edited_fc_df = st.data_editor(
+                    manual_editor_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    num_rows="fixed",
+                    height=460,
+                    column_config={
+                        "Läge": st.column_config.SelectboxColumn("Läge", options=mode_options, required=True),
+                        "Filter": st.column_config.TextColumn("Filter", disabled=True),
+                        "Intervall/regler": st.column_config.TextColumn("Intervall/regler", disabled=True, width="large"),
+                        "Hist träff": st.column_config.TextColumn("Hist träff", disabled=True),
+                        "Hist %": st.column_config.NumberColumn("Hist %", disabled=True, format="%.1f"),
+                        "Est kvar %": st.column_config.NumberColumn("Est kvar %", disabled=True, format="%.1f"),
+                        "Est reducerar %": st.column_config.NumberColumn("Est reducerar %", disabled=True, format="%.1f"),
+                    },
+                    key=f"manual_filtercentral_editor_{spelform}_{antal_matcher}"
+                )
+                save_fc = st.form_submit_button("💾 Spara filtercentral", use_container_width=True)
+            if save_fc:
+                st.session_state[saved_key] = edited_fc_df.copy()
+                st.session_state['har_kort_analys'] = True
+                st.success("Filtercentralen är sparad. Kör/uppdatera systemet när du vill använda dessa filter.")
+
+            manual_filter_config_df = st.session_state.get(saved_key, edited_fc_df if isinstance(edited_fc_df, pd.DataFrame) else manual_editor_df).copy()
+            if "Läge" not in manual_filter_config_df.columns:
+                manual_filter_config_df["Läge"] = "Av"
+            manual_filter_config_df["Läge"] = manual_filter_config_df["Läge"].fillna("Av").astype(str)
+            manual_active_df = manual_filter_config_df[manual_filter_config_df["Läge"].isin([x for x in mode_options if x != "Av"])].copy()
+            manual_active_filter_names = manual_active_df["Filter"].astype(str).tolist() if not manual_active_df.empty else []
+            manual_forced_names = manual_active_df[manual_active_df["Läge"] == "Tvingat"]["Filter"].astype(str).tolist() if not manual_active_df.empty else []
+            for _grp in [f"Grupp {i}" for i in range(1, 7)]:
+                _names = manual_active_df[manual_active_df["Läge"] == _grp]["Filter"].astype(str).tolist() if not manual_active_df.empty else []
+                if _names:
+                    manual_group_map[_grp] = _names
+
+            if manual_active_filter_names:
+                req_cols = st.columns(min(3, max(1, len(manual_group_map)))) if manual_group_map else []
+                for _idx, (_grp, _names) in enumerate(manual_group_map.items()):
+                    _default_req = max(1, min(len(_names), int(np.ceil(len(_names) * 0.70))))
+                    _key = f"manual_filtercentral_req_{spelform}_{antal_matcher}_{_grp}"
+                    _col = req_cols[_idx % len(req_cols)] if req_cols else st
+                    _saved_req_val = int(st.session_state.get(_key, _default_req))
+                    _saved_req_val = max(1, min(len(_names), _saved_req_val))
+                    manual_group_reqs[_grp] = _col.slider(
+                        f"{_grp}: minst",
+                        1, len(_names),
+                        _saved_req_val,
+                        key=_key,
+                        help="Gruppkrav: minst så många av filtren i gruppen måste träffa."
+                    )
+
+                _manual_hist_hits = _manual_history_hits(manual_forced_names, manual_group_map, manual_group_reqs)
+                _manual_cand_keep = _manual_candidate_keep(manual_forced_names, manual_group_map, manual_group_reqs)
+                _manual_keep_pct = (_manual_cand_keep / total_candidates * 100.0) if total_candidates else 0.0
+                mfc1, mfc2, mfc3, mfc4 = st.columns(4)
+                mfc1.metric("Tvingade filter", len(manual_forced_names))
+                mfc2.metric("Gruppfilter", sum(len(v) for v in manual_group_map.values()))
+                mfc3.metric("Historisk träff", f"{_manual_hist_hits}/{hist_total_for_soft}")
+                mfc4.metric("Est kvar", f"{_manual_keep_pct:.1f}%")
+
+                with st.expander("Visa aktiva manuella filter och gruppkrav", expanded=False):
+                    _active_show = manual_active_df[["Filter", "Läge", "Intervall/regler", "Hist träff", "Hist %", "Est reducerar %"]].copy()
+                    st.dataframe(_active_show, use_container_width=True, hide_index=True)
+                    if manual_group_map:
+                        st.write("**Gruppkrav**")
+                        st.dataframe(pd.DataFrame([{"Grupp": g, "Krav": f"minst {manual_group_reqs.get(g, len(n))} av {len(n)}", "Filter": ", ".join(n)} for g, n in manual_group_map.items()]), use_container_width=True, hide_index=True)
+
+                if _manual_hist_hits < target_soft_hits:
+                    st.warning(f"Manuell filtercentral klarar just nu {_manual_hist_hits}/{hist_total_for_soft}, under mål {target_soft_hits}/{hist_total_for_soft}. Systemet kan ändå köras, men träffbilden är under ditt mål.")
+                else:
+                    st.success(f"Manuell filtercentral klarar målbilden: {_manual_hist_hits}/{hist_total_for_soft} mot mål {target_soft_hits}/{hist_total_for_soft}.")
+            else:
+                st.info("Inga manuella filter är aktiva ännu. Sätt filter som Tvingat eller Grupp och spara filtercentralen.")
+
         soft_req_decision_rows = []
         if hard_gate_decision_rows:
             for r in sorted(hard_gate_decision_rows, key=lambda x: (-x["Godkänd mot mål"], x["Kvar rader"], -x["Hårdkrav"]))[:20]:
@@ -4582,7 +4742,10 @@ if st.session_state.get('har_kort_analys') and input_text:
                 with ctm1:
                     st.metric("Grundram", f"{tm_base_count:,}".replace(',', ' '), tm_frame_note)
                 with ctm2:
-                    st.metric("Bas + Spets", f"{selected_hard_req}/{hard_gate_total} + {len(selected_spets_names)} spets")
+                    if bool(globals().get('manual_filtercentral_enabled', True)) and 'manual_active_filter_names' in locals() and manual_active_filter_names:
+                        st.metric("Filtercentral", f"{len(manual_forced_names)} tvingade + {sum(len(v) for v in manual_group_map.values())} grupp")
+                    else:
+                        st.metric("Bas + Spets", f"{selected_hard_req}/{hard_gate_total} + {len(selected_spets_names)} spets")
                 with ctm3:
                     st.metric("Motor", tm_mode)
                 with ctm4:
@@ -4935,13 +5098,77 @@ if st.session_state.get('har_kort_analys') and input_text:
                             pack = global_best[1]
                             return int(pack["hreq"]), list(pack["names"]), list(pack["rows"]), global_log, []
 
-                        tm_runtime_hard_req, tm_active_spets_names, tm_active_spets_rows, tm_exact_optimizer_log, tm_exact_optimizer_fallback = _optimize_exact_manual_filters()
-                        tm_sign_guard_lowered_hard = int(tm_runtime_hard_req) < int(selected_hard_req)
-                        tm_sign_guard_removed_spets = [n for n in tm_prelim_spets_names if n not in set(tm_active_spets_names)]
-                        tm_sign_guard_added_spets_rows = [r for r in tm_active_spets_rows if r.get("Filter") not in set(tm_prelim_spets_names)]
+                        if manual_filtercentral_enabled and manual_active_filter_names:
+                            # v11.2a: Manuell filtercentral styr filtreringen exakt på din sparade grundram.
+                            # AutoHard används då inte som aktiv filtrering.
+                            tm_runtime_hard_req = 0
+                            tm_active_spets_names = list(manual_active_filter_names)
+                            tm_exact_optimizer_log = []
+                            tm_exact_optimizer_fallback = []
+                            tm_sign_guard_lowered_hard = False
+                            tm_sign_guard_removed_spets = []
+                            tm_sign_guard_added_spets_rows = []
+                            tm_hard_scored = list(tm_scored)
 
-                        tm_hard_scored, tm_filtered_scored = _runtime_filter_rows(tm_runtime_hard_req, tm_active_spets_names)
-                        tm_sign_guard_missing_after_filter = selected_signs_missing([x[0] for x in tm_filtered_scored], tm_frame, antal_matcher)
+                            def _manual_row_ok(_row):
+                                return _manual_pass_from_checks(
+                                    _spets_candidate_checks(_row),
+                                    manual_forced_names,
+                                    manual_group_map,
+                                    manual_group_reqs
+                                )
+
+                            # Bygg en tydlig steglogg: först varje tvingat filter, sedan varje gruppkrav.
+                            tm_active_spets_rows = []
+                            _current_rows = list(tm_scored)
+                            _cum_forced = []
+                            _cum_groups = {}
+                            _cum_reqs = {}
+                            for _name in manual_forced_names:
+                                _before = len(_current_rows)
+                                _cum_forced.append(_name)
+                                _current_rows = [x for x in _current_rows if bool(_spets_candidate_checks(x[0]).get(_name, False))]
+                                _after = len(_current_rows)
+                                _hist_hits = _manual_history_hits(_cum_forced, _cum_groups, _cum_reqs)
+                                tm_active_spets_rows.append({
+                                    "Filter": _name,
+                                    "Intervall/regler": _spets_rule_text(_name),
+                                    "Före rader": _before,
+                                    "Efter rader": _after,
+                                    "Reducerar steg %": round(((_before - _after) / _before * 100.0), 2) if _before else 0.0,
+                                    "Historisk träff": _hist_hits,
+                                    "Historisk träff %": round((_hist_hits / hist_total_for_soft * 100.0), 1) if hist_total_for_soft else 0.0,
+                                })
+                            for _grp, _names in manual_group_map.items():
+                                _before = len(_current_rows)
+                                _req = int(manual_group_reqs.get(_grp, len(_names)))
+                                _cum_groups[_grp] = list(_names)
+                                _cum_reqs[_grp] = _req
+                                _current_rows = [
+                                    x for x in _current_rows
+                                    if sum(1 for _name in _names if bool(_spets_candidate_checks(x[0]).get(_name, False))) >= _req
+                                ]
+                                _after = len(_current_rows)
+                                _hist_hits = _manual_history_hits(_cum_forced, _cum_groups, _cum_reqs)
+                                tm_active_spets_rows.append({
+                                    "Filter": _grp,
+                                    "Intervall/regler": f"Minst {_req} av {len(_names)}: " + ", ".join(_names),
+                                    "Före rader": _before,
+                                    "Efter rader": _after,
+                                    "Reducerar steg %": round(((_before - _after) / _before * 100.0), 2) if _before else 0.0,
+                                    "Historisk träff": _hist_hits,
+                                    "Historisk träff %": round((_hist_hits / hist_total_for_soft * 100.0), 1) if hist_total_for_soft else 0.0,
+                                })
+                            tm_filtered_scored = _current_rows
+                            tm_sign_guard_missing_after_filter = selected_signs_missing([x[0] for x in tm_filtered_scored], tm_frame, antal_matcher)
+                        else:
+                            tm_runtime_hard_req, tm_active_spets_names, tm_active_spets_rows, tm_exact_optimizer_log, tm_exact_optimizer_fallback = _optimize_exact_manual_filters()
+                            tm_sign_guard_lowered_hard = int(tm_runtime_hard_req) < int(selected_hard_req)
+                            tm_sign_guard_removed_spets = [n for n in tm_prelim_spets_names if n not in set(tm_active_spets_names)]
+                            tm_sign_guard_added_spets_rows = [r for r in tm_active_spets_rows if r.get("Filter") not in set(tm_prelim_spets_names)]
+
+                            tm_hard_scored, tm_filtered_scored = _runtime_filter_rows(tm_runtime_hard_req, tm_active_spets_names)
+                            tm_sign_guard_missing_after_filter = selected_signs_missing([x[0] for x in tm_filtered_scored], tm_frame, antal_matcher)
 
                         truncated = False
                         if len(tm_filtered_scored) > int(tm_filter_limit):
@@ -5028,7 +5255,8 @@ if st.session_state.get('har_kort_analys') and input_text:
 
                         ctm5, ctm6, ctm7, ctm8 = st.columns(4)
                         with ctm5:
-                            st.metric("Efter bas → spets", f"{len(tm_hard_scored):,} → {len(tm_filtered_rows):,}".replace(',', ' '))
+                            _filter_metric_label = "Efter grundram → filter" if (manual_filtercentral_enabled and manual_active_filter_names) else "Efter bas → spets"
+                            st.metric(_filter_metric_label, f"{len(tm_hard_scored):,} → {len(tm_filtered_rows):,}".replace(',', ' '))
                         with ctm6:
                             st.metric("Efter TipsetMatrix", f"{len(tm_reduced_rows):,}".replace(',', ' '), f"-{tm_gsum['reduceringsgrad']:.1f}%")
                         with ctm7:
@@ -5037,8 +5265,10 @@ if st.session_state.get('har_kort_analys') and input_text:
                             st.metric("13-chans", f"{tm_gsum['13_oviktad']:.2f}%", f"viktad {tm_gsum['13_viktad']:.2f}%")
                         st.caption(f"Mål för 13-chans: minst {float(tm_min_13_chance_pct):.0f}% i normal/expert-inställningen. Om målet är högre än grundreduceringen läggs extra högst rankade rader till från filtermassan.")
 
-                        if True:
-                            st.caption("v11.1u: Bas + spets som används i TipsetMatrix är nu omoptimerat exakt på den sparade manuella grundramen, inte bara på kandidat-estimatet.")
+                        if manual_filtercentral_enabled and manual_active_filter_names:
+                            st.caption("v11.2a: TipsetMatrix använder den manuella filtercentralen: Av / Tvingat / Grupp. AutoHard styr inte dessa rader.")
+                        else:
+                            st.caption("AutoHard-läge: Bas + spets som används i TipsetMatrix är omoptimerat exakt på den sparade manuella grundramen.")
 
                         if tm_active_spets_names != selected_spets_names:
                             st.markdown("**Faktiskt använda spetsfilter efter exakt optimering / teckenskydd**")
