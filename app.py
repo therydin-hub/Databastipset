@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v11.2a – Manuell filtercentral"
+APP_VERSION = "v11.2b – Ren filtercentral"
 
 
 st.markdown("""
@@ -2269,7 +2269,7 @@ st.markdown(
     <div class="tm-hero">
         <div class="tm-step">Steg 2 · Manuell grundram</div>
         <div class="tm-title">Klicka i tecknen du själv vill spela</div>
-        <div class="tm-muted">Grundramen är din kupong. AutoFilter och TipsetMatrix arbetar sedan bara på rader som ryms i din ram.</div>
+        <div class="tm-muted">Grundramen är din kupong. Filtercentralen och TipsetMatrix arbetar sedan bara på rader som ryms i din ram.</div>
     </div>
     """,
     unsafe_allow_html=True
@@ -2293,7 +2293,7 @@ if 'cb_tipsetmatrix' in globals() and cb_tipsetmatrix:
             tm_click_frame = saved_frame
             st.markdown("**Manuell teckenram** — ändra tecken och tryck sedan **Spara grundram**.")
             st.caption(
-                "Tecknen ligger nu i ett formulär. Appen kör inte om AutoFilter/TipsetMatrix för varje klick på 1/X/2, "
+                "Tecknen ligger nu i ett formulär. Appen kör inte om filter eller TipsetMatrix för varje klick på 1/X/2, "
                 "utan först när du sparar ramen och sedan trycker Kör."
             )
 
@@ -2336,8 +2336,9 @@ if 'cb_tipsetmatrix' in globals() and cb_tipsetmatrix:
                 else:
                     st.session_state[frame_state_key] = draft_frame
                     tm_click_frame = draft_frame
-                    st.session_state['har_kort_analys'] = False
-                    st.success("Grundramen är sparad. Tryck Kör AutoFilter + TipsetMatrix när du vill räkna om systemet.")
+                    st.session_state['har_kort_analys'] = (_input_count == krav_odds)
+                    st.session_state['kor_tipsetmatrix'] = False
+                    st.success("Grundramen är sparad. Filtercentralen visas när kupongdata är komplett. Kör TipsetMatrix först när filtren är valda.")
 
             empty_matches = [i + 1 for i, signs in enumerate(tm_click_frame) if len(signs) == 0]
             tm_manual_rows = frame_row_count(tm_click_frame)
@@ -2367,24 +2368,38 @@ if 'cb_tipsetmatrix' in globals() and cb_tipsetmatrix:
 
 if 'har_kort_analys' not in st.session_state:
     st.session_state['har_kort_analys'] = False
+if 'kor_tipsetmatrix' not in st.session_state:
+    st.session_state['kor_tipsetmatrix'] = False
 
 st.markdown(
     """
     <div class="tm-hero">
-        <div class="tm-step">Steg 3 · Kör</div>
-        <div class="tm-title">Bygg mall, filtrera och reducera</div>
-        <div class="tm-muted">När kupongdata och grundram är klara kör appen hela kedjan: liknande historik → AutoTrim → filterrevision → TipsetMatrix.</div>
+        <div class="tm-step">Steg 3 · Filtercentral</div>
+        <div class="tm-title">Välj filter manuellt, kör reducering när du är klar</div>
+        <div class="tm-muted">Efter sparad grundram visas filtercentralen. TipsetMatrix körs bara när du själv trycker på körknappen.</div>
     </div>
     """,
     unsafe_allow_html=True
 )
-if st.button("🚀 Kör AutoFilter + TipsetMatrix", use_container_width=True):
-    if not input_text:
-        st.error("⚠️ Klistra in procentvärden först.")
-    elif _input_count != krav_odds:
-        st.error(f"⚠️ Fel antal värden: {_input_count} av {krav_odds}. Klistra in komplett kupongdata.")
-    else:
-        st.session_state['har_kort_analys'] = True
+_col_run1, _col_run2 = st.columns(2)
+with _col_run1:
+    if st.button("📊 Visa / uppdatera filtercentral", use_container_width=True):
+        if not input_text:
+            st.error("⚠️ Klistra in procentvärden först.")
+        elif _input_count != krav_odds:
+            st.error(f"⚠️ Fel antal värden: {_input_count} av {krav_odds}. Klistra in komplett kupongdata.")
+        else:
+            st.session_state['har_kort_analys'] = True
+            st.session_state['kor_tipsetmatrix'] = False
+with _col_run2:
+    if st.button("🧮 Kör filtrering + TipsetMatrix", use_container_width=True):
+        if not input_text:
+            st.error("⚠️ Klistra in procentvärden först.")
+        elif _input_count != krav_odds:
+            st.error(f"⚠️ Fel antal värden: {_input_count} av {krav_odds}. Klistra in komplett kupongdata.")
+        else:
+            st.session_state['har_kort_analys'] = True
+            st.session_state['kor_tipsetmatrix'] = True
 
 # ==========================================
 # RESULTAT-VISNING (Laddas från Cache-Motorn)
@@ -2729,101 +2744,8 @@ if st.session_state.get('har_kort_analys') and input_text:
         n_rows = len(v_m)
         sm_bounds, sm_prob = get_super_macro_bounds(n_rows, slider_macro_target, slider_super_groups)
 
-        st.markdown("---")
-        st.header(f"📋 VECKANS MALL ({spelform}) – snabb inmatning")
-        
-        def _show_value_interval(label, key, interval, decimals=0, suffix=""):
-            st.write(f"**{label}:** {fmt_interval(interval, decimals)}{suffix}")
-            meta = autotrim_meta.get(key)
-            note = autotrim_caption(meta, decimals)
-            if note and (cb_autotrim or key in autotrim_meta):
-                st.caption(note)
-
-        col_v, col_s = st.columns(2)
-        with col_v:
-            st.subheader(f"💰 VÄRDE & SVÅRIGHET ({c_v}%)")
-            if cb_payout: st.write(f"**Utdelning:** {v_m['Payout'].min():.0f} - {v_m['Payout'].max():.0f} kr")
-            _show_value_interval("Delta (Avvikelse)", "Delta", c_delta, 1)
-            if cb_aimatrix: st.write(f"**{ai_txt}:** {active_ai_min:.0f} - {active_ai_max:.0f}")
-            if cb_totaldiff: _show_value_interval("Total Diff", "Total Diff", c_totaldiff, 0)
-            if cb_rank24: _show_value_interval("Rank Summa", "Rank Summa", c_rank24, 1)
-            if cb_100minus: _show_value_interval("100-minus Summa", "100-minus Summa", c_minus, 1)
-            if cb_log_surprise: _show_value_interval("Skrälltryck Log Summa", "Skrälltryck Log Summa", c_log_surprise, 0)
-            if cb_sft: _show_value_interval("SFT Summa", "SFT Summa", c_sft, 1)
-            if cb_points: _show_value_interval("Poängfilter", "Poängfilter", c_points, 0)
-            if cb_fat: st.write(f"**FAT (Standard):** F:{c_fatf[0]}-{c_fatf[1]} | A:{c_fata[0]}-{c_fata[1]} | T:{c_fatt[0]}-{c_fatt[1]} (Summa: {c_fatsum[0]}-{c_fatsum[1]})")
-            if cb_fat_sequences:
-                st.markdown("**FAT-sekvenser (aktivt reduceringsfilter):**")
-                st.caption(f"2-seq {', '.join(fat_seq2_list) if fat_seq2_list else '-'} · krav {fmt_interval(c_fat_seq2)} av 5 | 3-seq {', '.join(fat_seq3_list) if fat_seq3_list else '-'} · krav {fmt_interval(c_fat_seq3)} av 5 | dubbelchans {fmt_interval(c_fat_pairs)} av 5 | gruppkrav {fat_sequence_group_req} av {fat_sequence_active_parts}")
-            if cb_u_favs: _show_value_interval(f"Topp {slider_u_count} Favoriter", f"Topp {slider_u_count} favoriter", c_u, 0, " st vinner")
-            if cb_fav_pressure: st.write(f"**Favorittryck:** ≥70% {fmt_interval(c_fav70)} av {todays_fav_counts.get(70,0)} | ≥60% {fmt_interval(c_fav60)} av {todays_fav_counts.get(60,0)} | ≥50% {fmt_interval(c_fav50)} av {todays_fav_counts.get(50,0)}")
-            if cb_shock_strength: st.write(f"**Skrällstyrka:** <10% {fmt_interval(c_shock10)} | <15% {fmt_interval(c_shock15)} | <20% {fmt_interval(c_shock20)} | Lägsta vinnande % {fmt_interval(c_shock_lowest, 1)}")
-            if cb_fav_delta: _show_value_interval("Favorit-delta", "Favorit-delta", c_fav_delta, 2)
-
-        with col_s:
-            st.subheader(f"⚽ STRUKTUR ({c_s}%)")
-            if cb_base: st.write(f"**1X2:** 1: {c_ones[0]}-{c_ones[1]} | X: {c_draws[0]}-{c_draws[1]} | 2: {c_twos[0]}-{c_twos[1]}")
-            if cb_streak: st.write(f"**Sviter:** 1: {c_s1[0]}-{c_s1[1]} | X: {c_sx[0]}-{c_sx[1]} | 2: {c_s2[0]}-{c_s2[1]}")
-            if cb_gap: st.write(f"**Luckor:** 1: {c_g1[0]}-{c_g1[1]} | X: {c_gx[0]}-{c_gx[1]} | 2: {c_g2[0]}-{c_g2[1]}")
-            if cb_single: st.write(f"**Singlar:** 1: {c_sing1[0]}-{c_sing1[1]} | X: {c_singx[0]}-{c_singx[1]} | 2: {c_sing2[0]}-{c_sing2[1]} | Tot: {c_singtot[0]}-{c_singtot[1]}")
-            if cb_doublet: st.write(f"**Dubbletter:** 1: {c_dub1[0]}-{c_dub1[1]} | X: {c_dubx[0]}-{c_dubx[1]} | 2: {c_dub2[0]}-{c_dub2[1]} | Tot: {c_dubtot[0]}-{c_dubtot[1]}")
-            if cb_triplet: st.write(f"**Tripplar:** 1: {c_trip1[0]}-{c_trip1[1]} | X: {c_tripx[0]}-{c_tripx[1]} | 2: {c_trip2[0]}-{c_trip2[1]} | Tot: {c_triptot[0]}-{c_triptot[1]}")
-            if cb_occur: st.write(f"**Uppkomster:** 1: {c_occ1[0]}-{c_occ1[1]} | X: {c_occx[0]}-{c_occx[1]} | 2: {c_occ2[0]}-{c_occ2[1]} | Tot: {c_occtot[0]}-{c_occtot[1]}")
-            
-            st.markdown("---")
-            st.subheader(f"🧩 SUPER-MAKRO (Krav: Minst {slider_super_groups} av 8 grupper)")
-            st.markdown(f"*Minst 2 av 3 interna tecken i en grupp måste sitta för att gruppen ska räknas som 'träffad'. Överlever historiskt **{sm_prob:.1f}%**. Super-Makro används som stödfilter och bedöms i Filterrevisionen.*")
-            if cb_super_macro:
-                b = sm_bounds
-                st.write(f"⚽ **Grp 1 (1X2):** 1: {b['1'][0]}-{b['1'][1]} | X: {b['X'][0]}-{b['X'][1]} | 2: {b['2'][0]}-{b['2'][1]}")
-                st.write(f"🔥 **Grp 2 (Sviter):** 1: {b['s1'][0]}-{b['s1'][1]} | X: {b['sx'][0]}-{b['sx'][1]} | 2: {b['s2'][0]}-{b['s2'][1]}")
-                st.write(f"🕳️ **Grp 3 (Luckor):** 1: {b['g1'][0]}-{b['g1'][1]} | X: {b['gx'][0]}-{b['gx'][1]} | 2: {b['g2'][0]}-{b['g2'][1]}")
-                st.write(f"🎯 **Grp 4 (Singlar):** 1: {b['si1'][0]}-{b['si1'][1]} | X: {b['six'][0]}-{b['six'][1]} | 2: {b['si2'][0]}-{b['si2'][1]}")
-                st.write(f"👯 **Grp 5 (Dubbletter):** 1: {b['d1'][0]}-{b['d1'][1]} | X: {b['dx'][0]}-{b['dx'][1]} | 2: {b['d2'][0]}-{b['d2'][1]}")
-                st.write(f"📐 **Grp 6 (Tripplar):** 1: {b['t1'][0]}-{b['t1'][1]} | X: {b['tx'][0]}-{b['tx'][1]} | 2: {b['t2'][0]}-{b['t2'][1]}")
-                st.write(f"💥 **Grp 7 (Uppkomster):** 1: {b['o1'][0]}-{b['o1'][1]} | X: {b['ox'][0]}-{b['ox'][1]} | 2: {b['o2'][0]}-{b['o2'][1]}")
-                st.write(f"🧬 **Grp 8 (FAT):** F: {b['f'][0]}-{b['f'][1]} | A: {b['a'][0]}-{b['a'][1]} | T: {b['t'][0]}-{b['t'][1]}")
-                
-                if antal_matcher == 8:
-                    test_rows = [''.join(tup) for tup in itertools.product(['1','X','2'], repeat=8)]
-                    total_test = 6561
-                    is_exact = True
-                else:
-                    mc_matrix = np.random.choice(['1', 'X', '2'], size=(10000, 13))
-                    test_rows = [''.join(row) for row in mc_matrix]
-                    total_test = 10000
-                    is_exact = False
-                    
-                sm_survivors = 0
-                for tr in test_rows:
-                    g_pass = 0
-                    c1, cx, c2 = tr.count('1'), tr.count('X'), tr.count('2')
-                    s1_c, sx_c, s2_c, _ = get_streaks(tr)
-                    g1_c, gx_c, g2_c, _ = get_gaps(tr)
-                    si1_c, six_c, si2_c, _, _ = get_singles(tr)
-                    d1_c, dx_c, d2_c, _, _ = get_doublets(tr)
-                    t1_c, tx_c, t2_c, _, _ = get_triplets(tr)
-                    o1_c, ox_c, o2_c, _, _ = get_occurrences(tr)
-                    f_c, a_c, t_c, _ = get_fat(tr, filter_vec)
-                    
-                    if sum([b['1'][0] <= c1 <= b['1'][1], b['X'][0] <= cx <= b['X'][1], b['2'][0] <= c2 <= b['2'][1]]) >= 2: g_pass += 1
-                    if sum([b['s1'][0] <= s1_c <= b['s1'][1], b['sx'][0] <= sx_c <= b['sx'][1], b['s2'][0] <= s2_c <= b['s2'][1]]) >= 2: g_pass += 1
-                    if sum([b['g1'][0] <= g1_c <= b['g1'][1], b['gx'][0] <= gx_c <= b['gx'][1], b['g2'][0] <= g2_c <= b['g2'][1]]) >= 2: g_pass += 1
-                    if sum([b['si1'][0] <= si1_c <= b['si1'][1], b['six'][0] <= six_c <= b['six'][1], b['si2'][0] <= si2_c <= b['si2'][1]]) >= 2: g_pass += 1
-                    if sum([b['d1'][0] <= d1_c <= b['d1'][1], b['dx'][0] <= dx_c <= b['dx'][1], b['d2'][0] <= d2_c <= b['d2'][1]]) >= 2: g_pass += 1
-                    if sum([b['t1'][0] <= t1_c <= b['t1'][1], b['tx'][0] <= tx_c <= b['tx'][1], b['t2'][0] <= t2_c <= b['t2'][1]]) >= 2: g_pass += 1
-                    if sum([b['o1'][0] <= o1_c <= b['o1'][1], b['ox'][0] <= ox_c <= b['ox'][1], b['o2'][0] <= o2_c <= b['o2'][1]]) >= 2: g_pass += 1
-                    if sum([b['f'][0] <= f_c <= b['f'][1], b['a'][0] <= a_c <= b['a'][1], b['t'][0] <= t_c <= b['t'][1]]) >= 2: g_pass += 1
-                    
-                    if g_pass >= slider_super_groups:
-                        sm_survivors += 1
-                        
-                red_pct = 100 - ((sm_survivors / total_test) * 100)
-                if is_exact:
-                    st.success(f"✂️ **Omedelbar effekt:** Bara detta Super-Makro ensamt slaktar bort **{red_pct:.1f}%** av de matematiska raderna! (Kvar: {sm_survivors} av 6 561)")
-                else:
-                    est_rader = int(1594323 * (sm_survivors / total_test))
-                    st.success(f"✂️ **Omedelbar effekt (AI-Estimat):** Bara detta Super-Makro ensamt slaktar bort ca **{red_pct:.1f}%** av de matematiska raderna! (Kvar: ca {est_rader:,} av 1 594 323 rader)".replace(',', ' '))
+        # v11.2b: VECKANS MALL visas inte längre som egen sida.
+        # Intervall, FAT-sekvenser, datadistribution och byggklossar visas i Filtercentralens info-ruta per filter.
 
         # --- AUTOHARD: breda hårda basfilter ---
         # Hårda filter använder säkerhetsintervall/breda intervall. De ska inte vara knivskarpa,
@@ -3932,19 +3854,17 @@ if st.session_state.get('har_kort_analys') and input_text:
         hard_all_pct = (hard_all_hits / len(v_m) * 100) if len(v_m) else 0.0
         spets_status = "✅ Godkänd" if mall_hits >= target_soft_hits else "⚠️ Under mål"
 
-        st.info(
-            f"📈 **AUTOHARD EXAKT SPETSFILTER:** {spets_status}. "
-            f"Valt basfilter **{selected_hard_req} av {hard_gate_total}** breda gates. "
-            f"Valda spetsfilter: **{len(selected_spets_names)}**. "
-            f"Historiskt klarar {mall_hits} av {len(v_m)} rader ({soft_hit_pct:.1f}%). "
-            f"Mål: minst {target_soft_hits} av {len(v_m)} ({float(slider_combined_min_hist_pct):.0f}%)."
-        )
-        st.caption(
-            "Soft som aktivt filtersteg används inte längre. Spetsfilter väljs bara om de klarar historikmålet "
-            f"och Exakt filteroptimering väljer spetsfilter på den faktiska manuella grundramen och behåller bara filter som minskar exakt radmassa minst 5% utan att bryta mallträff/teckenskydd. Alla poäng-/värdefilter från VECKANS MALL testas som spetskandidater. "
-            f"Estimat: efter basfilter {hard_stage_survivors}/{total_candidates} ({hard_stage_keep_pct:.1f}%), "
-            f"efter bas+spets {combined_soft_survivors}/{total_candidates} ({combined_soft_keep_pct:.1f}%)."
-        )
+        if expert_mode and not bool(globals().get('manual_filtercentral_enabled', True)):
+            st.info(
+                f"📈 **AUTOHARD EXAKT SPETSFILTER:** {spets_status}. "
+                f"Valt basfilter **{selected_hard_req} av {hard_gate_total}** breda gates. "
+                f"Valda spetsfilter: **{len(selected_spets_names)}**. "
+                f"Historiskt klarar {mall_hits} av {len(v_m)} rader ({soft_hit_pct:.1f}%). "
+                f"Mål: minst {target_soft_hits} av {len(v_m)} ({float(slider_combined_min_hist_pct):.0f}%)."
+            )
+            st.caption(
+                "AutoHard visas bara i expertläge. Normalflödet styrs av den manuella filtercentralen."
+            )
 
         # --- v11.2a MANUELL FILTERCENTRAL ---
         # Detta är den nya Helgardering-lika vägen: appen visar statistik, men spelaren väljer själv
@@ -4023,6 +3943,39 @@ if st.session_state.get('har_kort_analys') and input_text:
                 })
 
             manual_editor_df = pd.DataFrame(base_rows_fc)
+
+            st.markdown("**Filterinfo**")
+            st.caption("Välj ett filter här för att se rekommenderad regel, frekvens på de liknande omgångarna och möjlig reducering med nuvarande intervall.")
+            _info_filter = st.selectbox(
+                "ℹ️ Visa statistik för filter",
+                options=all_spets_names,
+                key=f"manual_filtercentral_info_{spelform}_{antal_matcher}"
+            ) if all_spets_names else None
+            if _info_filter:
+                _hist_hits_info = int(sum(hist_spets_map.get(_info_filter, [])))
+                _hist_miss_info = max(0, int(hist_total_for_soft) - _hist_hits_info)
+                _cand_keep_info = int(sum(cand_spets_map.get(_info_filter, []))) if total_candidates else 0
+                _keep_pct_info = (_cand_keep_info / total_candidates * 100.0) if total_candidates else 0.0
+                _red_pct_info = 100.0 - _keep_pct_info
+                _fi1, _fi2, _fi3, _fi4 = st.columns(4)
+                _fi1.metric("Historisk träff", f"{_hist_hits_info}/{hist_total_for_soft}")
+                _fi2.metric("Reducerar est.", f"{_red_pct_info:.1f}%")
+                _fi3.metric("Kvar est.", f"{_keep_pct_info:.1f}%")
+                _fi4.metric("Regeltyp", "FAT" if "FAT" in _info_filter else "Intervall")
+                st.code(_spets_rule_text(_info_filter), language="text")
+                st.dataframe(pd.DataFrame([
+                    {"Utfall": "Klarar filtret", "Omgångar": _hist_hits_info, "Andel": f"{(_hist_hits_info / hist_total_for_soft * 100.0):.1f}%" if hist_total_for_soft else "-"},
+                    {"Utfall": "Missar filtret", "Omgångar": _hist_miss_info, "Andel": f"{(_hist_miss_info / hist_total_for_soft * 100.0):.1f}%" if hist_total_for_soft else "-"},
+                ]), use_container_width=True, hide_index=True)
+                if "FAT 2" in _info_filter or "FAT 3" in _info_filter or "dubbel" in _info_filter.lower():
+                    with st.expander("FAT-sekvenser / byggklossar för detta filter", expanded=True):
+                        st.write("**2-sekvenser:** " + (", ".join(fat_seq2_list) if fat_seq2_list else "-"))
+                        st.write("**3-sekvenser:** " + (", ".join(fat_seq3_list) if fat_seq3_list else "-"))
+                        st.write("**Dubbelchans-par:** " + (", ".join([f"{a}/{b}" for a, b in fat_pair_list]) if 'fat_pair_list' in locals() and fat_pair_list else "-"))
+                with st.expander("Datadistribution för valt filter", expanded=False):
+                    st.caption("Första versionen visar pass/miss-frekvens. Nästa steg kan lägga till histogram för varje numeriskt filter.")
+                    st.bar_chart(pd.DataFrame({"Antal": [_hist_hits_info, _hist_miss_info]}, index=["Klarar", "Missar"]))
+
             with st.form(key=f"manual_filtercentral_form_{spelform}_{antal_matcher}"):
                 edited_fc_df = st.data_editor(
                     manual_editor_df,
@@ -4045,7 +3998,8 @@ if st.session_state.get('har_kort_analys') and input_text:
             if save_fc:
                 st.session_state[saved_key] = edited_fc_df.copy()
                 st.session_state['har_kort_analys'] = True
-                st.success("Filtercentralen är sparad. Kör/uppdatera systemet när du vill använda dessa filter.")
+                st.session_state['kor_tipsetmatrix'] = False
+                st.success("Filtercentralen är sparad. Tryck Kör filtrering + TipsetMatrix när du vill reducera.")
 
             manual_filter_config_df = st.session_state.get(saved_key, edited_fc_df if isinstance(edited_fc_df, pd.DataFrame) else manual_editor_df).copy()
             if "Läge" not in manual_filter_config_df.columns:
@@ -4446,94 +4400,23 @@ if st.session_state.get('har_kort_analys') and input_text:
 
         pro_groups_df = pd.DataFrame(pro_group_rows)
 
-        st.markdown("---")
-        st.subheader("🧪 Filterdiagnos")
-        st.caption("Här visas bara värderingen av filtren. Själva inmatningsmallen ligger ovanför i VECKANS MALL.")
-
-        if cb_pro_groups and not pro_groups_df.empty:
-            st.markdown("### 🧩 Pro-grupper")
-            st.caption(
-                "V9 testar tightare interna intervall och flera gruppkrav. "
-                "Målet är hög reducering ihop med hög historisk träffsäkerhet, utan att grupperna blir 6 av 6."
-            )
-            show_group_cols = [
-                "Grupp", "Krav", "Tighthet %", "Historisk träff %", "Kvar rad %", "Reducerar %",
-                "Rationell faktor", "Klass", "Filterintervall"
-            ]
-            show_group_cols = [c for c in show_group_cols if c in pro_groups_df.columns]
-            st.dataframe(pro_groups_df[show_group_cols], use_container_width=True, hide_index=True)
-
-            with st.expander("Visa pro-grupper med exakta filterintervall"):
-                for _, gr in pro_groups_df.iterrows():
-                    st.markdown(f"**{gr['Grupp']} – krav {gr['Krav']}**")
-                    st.text(gr.get('Helgardering-detaljer', ''))
-
-            with st.expander("Visa testade gruppkrav"):
-                for gname, gdf in pro_group_detail_tables.items():
-                    st.markdown(f"**{gname}**")
-                    cols = ["Krav", "Tighthet %", "Historisk träff %", "Kvar rad %", "Reducerar %", "Rationell faktor", "Klass"]
-                    cols = [c for c in cols if c in gdf.columns]
-                    st.dataframe(gdf[cols], use_container_width=True, hide_index=True)
-
+        # v11.2b: den gamla Filterdiagnos/Pro-grupper/AutoHard-panelen är borttagen ur normalflödet.
+        # Filterrevision får finnas kvar som sammanfattning, men filtervalet sker i Filtercentralen.
         if not filter_rules_df.empty:
             diag_df = filter_rules_df.copy()
             if 'Rationell faktor' in diag_df.columns:
                 diag_df = diag_df.sort_values('Rationell faktor', ascending=False, na_position='last')
 
-            numeric_lift = pd.to_numeric(diag_df['Rationell faktor'], errors='coerce')
-            numeric_keep = pd.to_numeric(diag_df['Kvar rad %'], errors='coerce')
-            numeric_red = pd.to_numeric(diag_df['Reducerar %'], errors='coerce')
-
-            if cb_filter_revision:
-                st.markdown("### 🧪 Filterrevision")
-                st.caption(
-                    "Målet här är att rensa: hitta vilka filter som ska användas, vilka som bara ska vara diagnos, "
-                    "och vilka som dubblerar varandra. Rangordningen bygger på historisk träff jämfört med kvarvarande radmassa."
-                )
+            with st.expander("🧪 Filterrevision / sammanfattning", expanded=False):
+                st.caption("Översikt över filterstyrka. Den styr inte systemet automatiskt; dina val i Filtercentralen gäller.")
                 revision_df = build_filter_revision_df(diag_df)
-                family_df = build_family_summary(revision_df)
-                starter_df = build_starter_package(revision_df, max_filters=6)
-
                 if not revision_df.empty:
                     rev_cols = [
-                        "Beslut", "Filterfamilj", "Filter", "Klass", "Historisk träff %",
+                        "Filterfamilj", "Filter", "Klass", "Historisk träff %",
                         "Kvar rad %", "Reducerar %", "Rationell faktor", "Dubblett-/risknotis"
                     ]
                     rev_cols = [c for c in rev_cols if c in revision_df.columns]
-
-                    cfr1, cfr2, cfr3, cfr4 = st.columns(4)
-                    with cfr1:
-                        st.metric("Använd", int((revision_df["Beslut"] == "Använd").sum()))
-                    with cfr2:
-                        st.metric("Reserv", int((revision_df["Beslut"] == "Reserv").sum()))
-                    with cfr3:
-                        st.metric("Diagnos", int((revision_df["Beslut"] == "Diagnos").sum()))
-                    with cfr4:
-                        st.metric("Pausa", int((revision_df["Beslut"] == "Pausa").sum()))
-
-                    st.markdown("**Filter att prioritera / rensa**")
-                    decision_order = ["Använd", "Reserv", "Diagnos", "Pausa", "Info"]
-                    for decision in decision_order:
-                        sub = revision_df[revision_df["Beslut"] == decision]
-                        if len(sub) == 0:
-                            continue
-                        with st.expander(f"{decision} ({len(sub)} filter)", expanded=(decision in ["Använd", "Pausa"])):
-                            st.dataframe(sub[rev_cols], use_container_width=True, hide_index=True)
-
-                    if not family_df.empty:
-                        st.markdown("**Filterfamiljer – vad ska vi göra med varje grupp?**")
-                        st.dataframe(family_df, use_container_width=True, hide_index=True)
-
-                    if not starter_df.empty:
-                        st.markdown("**Föreslaget startpaket denna körning**")
-                        st.caption(
-                            "Detta är inte en slutlig systemmall. Det är en rensad startlista: få filter, hög RF, mindre dubblering. "
-                            "Pro-grupperna bör fortfarande vara huvudvägen när de är starkare än enskilda filter."
-                        )
-                        pkg_cols = ["Filterfamilj", "Filter", "Klass", "Historisk träff %", "Kvar rad %", "Rationell faktor", "Helgardering-rad"]
-                        pkg_cols = [c for c in pkg_cols if c in starter_df.columns]
-                        st.dataframe(starter_df[pkg_cols], use_container_width=True, hide_index=True)
-
+                    st.dataframe(revision_df[rev_cols], use_container_width=True, hide_index=True)
                     tm_download_button(
                         "⬇️ Ladda ner filterrevision CSV",
                         revision_df.to_csv(index=False, sep=';').encode('utf-8-sig'),
@@ -4541,176 +4424,24 @@ if st.session_state.get('har_kort_analys') and input_text:
                         mime="text/csv"
                     )
 
-            st.markdown("**Sammanlagd mallträff**")
-            csum1, csum2, csum3, csum4, csum5 = st.columns(5)
-            with csum1:
-                st.metric("Mål", f"{target_soft_hits}/{len(v_m)}", f"{float(slider_combined_min_hist_pct):.0f}%")
-            with csum2:
-                st.metric("Historisk totalträff", f"{soft_hit_pct:.1f}%", f"{mall_hits}/{len(v_m)}")
-            with csum3:
-                st.metric("Historisk hård träff", f"{hard_all_pct:.1f}%", f"{hard_all_hits}/{len(v_m)}")
-            with csum4:
-                st.metric(f"Kvar efter bas+spets ({combined_est_label})", f"{combined_soft_keep_pct:.1f}%", f"{combined_soft_survivors}/{total_candidates}")
-            with csum5:
-                st.metric(f"Kvar rader hårt ({combined_est_label})", f"{combined_hard_keep_pct:.1f}%", f"{combined_hard_survivors}/{total_candidates}")
-
-            if mall_hits >= target_soft_hits:
-                st.success(
-                    f"AutoHard Spetsfilter valde **{selected_hard_req} av {hard_gate_total}** hårda bas-gates och **{len(selected_spets_names)}** spetsfilter eftersom paketet klarar minst "
-                    f"{target_soft_hits} av {len(v_m)} historiska omgångar."
-                )
-            else:
-                st.warning(
-                    f"Inget bas+spets-paket klarade målet {target_soft_hits}/{len(v_m)} fullt ut. Appen använder basfilter och du bör bredda intervall/filter."
-                )
-
-            st.caption(
-                "Individuella filter kan vara starka var för sig men tillsammans bli för hårda. "
-                "AutoHard Spetsfilter använder breda bas-gates och lägger bara till hårda spetsfilter som både klarar historikmålet och ger tydlig extra reducering."
-            )
-
-            base_gate_rows = _base_gate_rule_rows()
-            if base_gate_rows:
-                with st.expander("Visa hårda basfilter och breda intervaller", expanded=False):
-                    st.caption(f"Basfiltret är ett N-av-M-krav: vald nivå **{selected_hard_req} av {hard_gate_total}**. En rad behöver alltså inte klara varje bas-gate, utan minst vald nivå.")
-                    st.dataframe(pd.DataFrame(base_gate_rows), use_container_width=True, hide_index=True)
-
-            if selected_spets_rows:
-                st.markdown("**Valda hårda spetsfilter och intervaller**")
-                selected_view_rows = []
-                for idx, r in enumerate(selected_spets_rows, start=1):
-                    selected_view_rows.append({
-                        "#": idx,
-                        "Filter": r["Filter"],
-                        "Intervall/regler": r.get("Intervall/regler", _spets_rule_text(r["Filter"])),
-                        "Historisk träff": f"{int(r['Historisk träff'])}/{hist_total_for_soft}",
-                        "Före": int(r["Före rader"]),
-                        "Efter": int(r["Efter rader"]),
-                        "Reducerar": f"{float(r['Reducerar steg %']):.1f}%",
-                    })
-                st.dataframe(pd.DataFrame(selected_view_rows), use_container_width=True, hide_index=True)
-            else:
-                st.info("Inga spetsfilter valdes. Basfiltret används ensamt eftersom inga spetsfilter klarade både historikmålet och minsta reducering.")
-
-            if soft_req_decision_rows:
-                with st.expander("Visa hur AutoHard Spetsfilter valde filter", expanded=False):
-                    st.dataframe(pd.DataFrame(soft_req_decision_rows), use_container_width=True, hide_index=True)
-
-            cdiag1, cdiag2, cdiag3, cdiag4 = st.columns(4)
-            with cdiag1:
-                st.metric("Aktiva filter", len(diag_df))
-            with cdiag2:
-                st.metric("Snitt reducering/filter", f"{numeric_red.mean():.1f}%" if numeric_red.notna().any() else "-")
-            with cdiag3:
-                st.metric("Snitt rationell faktor", f"{numeric_lift.mean():+.1f}" if numeric_lift.notna().any() else "-")
-            with cdiag4:
-                strong_count = int(diag_df['Klass'].isin(['Mycket stark', 'Stark']).sum())
-                st.metric("Starka filter", strong_count)
-
-            ctop, cweak = st.columns(2)
-            with ctop:
-                st.markdown("**Bäst filter just nu**")
-                top_cols = ['Filter', 'Klass', 'Rationell faktor', 'Kvar rad %', 'Reducerar %']
-                st.dataframe(diag_df[top_cols].head(6), use_container_width=True, hide_index=True)
-            with cweak:
-                st.markdown("**Filter att granska**")
-                weak = diag_df[diag_df['Klass'].isin(['Svag', 'Irrationell'])]
-                if len(weak) > 0:
-                    st.dataframe(weak[['Filter', 'Klass', 'Rationell faktor', 'Kvar rad %']].head(8), use_container_width=True, hide_index=True)
-                else:
-                    st.success("Inga filter är klassade som svaga/irrationella i denna körning.")
-
-            with st.expander("Visa full filterdiagnos och exakta regelrader"):
-                st.markdown("**Diagnoskolumner**")
-                metric_cols = [
-                    'Filter', 'Grupp', 'Helgardering-modul', 'Historisk träff %',
-                    'Kvar rad %', 'Reducerar %', 'Rationell faktor', 'Klass'
-                ]
-                metric_cols = [c for c in metric_cols if c in diag_df.columns]
-                st.dataframe(diag_df[metric_cols], use_container_width=True, hide_index=True)
-
-                st.markdown("**Poängfördelning historiskt**")
-                score_dist = pd.DataFrame([
-                    {
-                        "Antal träffade filter": score,
-                        "Historiska rader": history_filter_scores.count(score),
-                        "Historisk %": round((history_filter_scores.count(score) / len(history_filter_scores)) * 100, 1) if history_filter_scores else 0.0
-                    }
-                    for score in range(total_active, -1, -1)
-                    if history_filter_scores.count(score) > 0
-                ])
-                st.dataframe(score_dist, use_container_width=True, hide_index=True)
-
-                st.markdown("**Poängfördelning radmassa**")
-                cand_score_dist = pd.DataFrame([
-                    {
-                        "Antal träffade filter": score,
-                        "Rader": count,
-                        "Rad %": round((count / total_candidates) * 100, 2) if total_candidates else 0.0
-                    }
-                    for score, count in sorted(combined_score_counts.items(), reverse=True)
-                ])
-                st.dataframe(cand_score_dist, use_container_width=True, hide_index=True)
-
-                st.markdown("**Exakta regelrader / Helgardering-text**")
-                st.dataframe(
-                    diag_df[['Filter', 'Intervall', 'Helgardering-modul', 'Helgardering-rad']],
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-            helg_lines = [
-                f"HELGARDERING-EXPORT - {spelform}",
-                f"Skapad: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-                f"Historiska omgångar: {len(v_m)} | Basfilter: {selected_hard_req} av {hard_gate_total} | Spetsfilter: {len(selected_spets_names)}",
-                "",
-                "GRUNDRAMSFILTER / TABELLFILTER"
-            ]
-            for _, rr in filter_rules_df.iterrows():
-                if rr['Helgardering-modul'] not in ['Föranalys', 'Gruppmodul']:
-                    keep_txt = '-' if pd.isna(rr['Kvar rad %']) else f"{rr['Kvar rad %']:.1f}%"
-                    helg_lines.append(f"- {rr['Helgardering-rad']}  [{rr['Klass']}, hist {rr['Historisk träff %']:.1f}%, kvar {keep_txt}]")
-            helg_lines += ["", "GRUPPER / SUPER-MAKRO"]
-            if cb_super_macro:
-                b = sm_bounds
-                helg_lines.append(f"- Super-Makro: minst {slider_super_groups} av 8 grupper")
-                helg_lines.append(f"  Grp 1 Tecken: 1 {fmt_interval(b['1'])}, X {fmt_interval(b['X'])}, 2 {fmt_interval(b['2'])}")
-                helg_lines.append(f"  Grp 2 Sviter: 1 {fmt_interval(b['s1'])}, X {fmt_interval(b['sx'])}, 2 {fmt_interval(b['s2'])}")
-                helg_lines.append(f"  Grp 3 Luckor: 1 {fmt_interval(b['g1'])}, X {fmt_interval(b['gx'])}, 2 {fmt_interval(b['g2'])}")
-                helg_lines.append(f"  Grp 4 Singlar: 1 {fmt_interval(b['si1'])}, X {fmt_interval(b['six'])}, 2 {fmt_interval(b['si2'])}")
-                helg_lines.append(f"  Grp 5 Dubbletter: 1 {fmt_interval(b['d1'])}, X {fmt_interval(b['dx'])}, 2 {fmt_interval(b['d2'])}")
-                helg_lines.append(f"  Grp 6 Tripplar: 1 {fmt_interval(b['t1'])}, X {fmt_interval(b['tx'])}, 2 {fmt_interval(b['t2'])}")
-                helg_lines.append(f"  Grp 7 Uppkomster: 1 {fmt_interval(b['o1'])}, X {fmt_interval(b['ox'])}, 2 {fmt_interval(b['o2'])}")
-                helg_lines.append(f"  Grp 8 FAT: F {fmt_interval(b['f'])}, A {fmt_interval(b['a'])}, T {fmt_interval(b['t'])}")
-            if cb_pro_groups and not pro_groups_df.empty:
-                helg_lines += ["", "PRO-GRUPPER / REKOMMENDERADE GRUPPKRAV"]
-                for _, gr in pro_groups_df.iterrows():
-                    helg_lines.append(f"- {gr['Helgardering-rad']}  [{gr['Klass']}, hist {gr['Historisk träff %']:.1f}%, kvar {gr['Kvar rad %']:.1f}%]")
-                    helg_lines.append("  Intervall/filter som ska ingå i gruppen:")
-                    for line in str(gr.get('Helgardering-detaljer', '')).splitlines():
-                        helg_lines.append(f"  {line}")
-            helg_text = "\n".join(helg_lines)
-
-            col_dl1, col_dl2, col_dl3 = st.columns(3)
-            with col_dl1:
-                tm_download_button("⬇️ Ladda ner filterregler CSV", filter_rules_df.to_csv(index=False, sep=';').encode('utf-8-sig'), file_name=f"filterregler_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
-            with col_dl2:
-                tm_download_button("⬇️ Ladda ner Helgardering TXT", helg_text.encode('utf-8'), file_name=f"helgardering_export_{spelform.lower()}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt", mime="text/plain")
-            with col_dl3:
-                if st.button("💾 Spara analys lokalt"):
-                    outdir = Path("analysis_exports")
-                    outdir.mkdir(exist_ok=True)
-                    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    filter_rules_df.to_csv(outdir / f"filterregler_{spelform}_{stamp}.csv", index=False, sep=';', encoding='utf-8-sig')
-                    (outdir / f"helgardering_export_{spelform}_{stamp}.txt").write_text(helg_text, encoding='utf-8')
-                    st.success(f"Sparat i {outdir.resolve()}")
+            if manual_filtercentral_enabled and manual_active_filter_names:
+                st.markdown("### Sammanlagd mallträff – valda manuella filter")
+                _manual_hist_hits_sum = _manual_history_hits(manual_forced_names, manual_group_map, manual_group_reqs)
+                _manual_cand_keep_sum = _manual_candidate_keep(manual_forced_names, manual_group_map, manual_group_reqs)
+                _manual_keep_pct_sum = (_manual_cand_keep_sum / total_candidates * 100.0) if total_candidates else 0.0
+                _sm1, _sm2, _sm3 = st.columns(3)
+                _sm1.metric("Mål", f"{target_soft_hits}/{len(v_m)}", f"{float(slider_combined_min_hist_pct):.0f}%")
+                _sm2.metric("Manuell träff", f"{_manual_hist_hits_sum}/{len(v_m)}")
+                _sm3.metric("Est kvar", f"{_manual_keep_pct_sum:.1f}%", f"{_manual_cand_keep_sum}/{total_candidates}")
+            elif manual_filtercentral_enabled:
+                st.info("Välj filter i Filtercentralen. Inga filter körs automatiskt.")
 
         # --- TIPSETMATRIX 12 ---
-        if cb_tipsetmatrix:
+        if cb_tipsetmatrix and st.session_state.get('kor_tipsetmatrix', False):
             st.markdown("---")
             st.subheader("🧮 TipsetMatrix 12-rätts reducering")
             st.caption(
-                "Motorn reducerar din exakta manuella grundram efter hårda basfilter och valda spetsfilter och bygger garantitabell mot den filtrerade radmassan. "
+                "Motorn reducerar din exakta manuella grundram efter de filter du själv valt i Filtercentralen och bygger garantitabell mot den filtrerade radmassan. "
                 "Garantin gäller bara om 13-rättsraden finns kvar efter grundram och filter."
             )
 
@@ -5587,289 +5318,5 @@ if st.session_state.get('har_kort_analys') and input_text:
                 mime="text/plain"
             )
 
-        st.markdown("---")
-        st.subheader("🧬 Dagens Bästa FAT-Sekvenser (Byggklossar)")
-        st.markdown("Här analyserar AI:n vilka specifika mönster (1=Fav, 2=Andrahand, 3=Skräll) som bäst täcker in **exakt denna typ av omgång**. Statistiken visar hur många av de 5 sekvenserna som brukar dyka upp i en och samma vinnarrad.")
-        st.success("FAT-sekvenser används nu som aktivt mjukt reduceringsfilter och syns i Filterrevisionen. Urvalet prioriterar positiv lift och rationell effekt.")
-
-        fat_strings = [get_fat_string(row['Correct_Row'], row['Prob_Vector']) for _, row in v_m.iterrows() if len(row['Correct_Row']) == antal_matcher]
-        base_fat_strings = [get_fat_string(row['Correct_Row'], row['Prob_Vector']) for _, row in db_full.iterrows() if len(str(row['Correct_Row'])) == antal_matcher]
-        total_twins = len(fat_strings)
-        total_base_fat = len(base_fat_strings)
-        
-        if total_twins > 0:
-            col_seq2, col_seq3, col_combo = st.columns(3)
-            
-            def calculate_top_seqs(fat_list, length, top_n=5):
-                seqs = [''.join(p) for p in itertools.product('123', repeat=length)]
-                counts = {s: sum(1 for r in fat_list if s in r) for s in seqs}
-                return sorted(counts.items(), key=lambda x: x[1], reverse=True)[:top_n]
-
-            with col_seq2:
-                st.markdown("**Två i rad (Längd 2)**")
-                top2 = calculate_top_seqs(fat_strings, 2)
-                for seq, count in top2:
-                    chans = (count/total_twins)*100
-                    base_pct = (sum(1 for r in base_fat_strings if seq in r) / total_base_fat) * 100 if total_base_fat else 0
-                    st.write(f"**{seq}** ➡️ **{chans:.1f}%** ({count} st) | Bas {base_pct:.1f}% | Lift {chans-base_pct:+.1f}")
-                
-                if top2:
-                    top2_seqs = [x[0] for x in top2]
-                    hits2 = [sum(1 for seq in top2_seqs if seq in r) for r in fat_strings]
-                    st.markdown("---")
-                    st.markdown(get_stat_strings(hits2, len(top2_seqs)))
-                    
-            with col_seq3:
-                st.markdown("**Tre i rad (Längd 3)**")
-                top3 = calculate_top_seqs(fat_strings, 3)
-                for seq, count in top3:
-                    chans = (count/total_twins)*100
-                    base_pct = (sum(1 for r in base_fat_strings if seq in r) / total_base_fat) * 100 if total_base_fat else 0
-                    st.write(f"**{seq}** ➡️ **{chans:.1f}%** ({count} st) | Bas {base_pct:.1f}% | Lift {chans-base_pct:+.1f}")
-                
-                if top3:
-                    top3_seqs = [x[0] for x in top3]
-                    hits3 = [sum(1 for seq in top3_seqs if seq in r) for r in fat_strings]
-                    st.markdown("---")
-                    st.markdown(get_stat_strings(hits3, len(top3_seqs)))
-                    
-            with col_combo:
-                st.markdown("**Dubbelchans (Minst 1 av 2)**")
-                st.caption("Kombinationer av Längd 3")
-                
-                seqs3 = [''.join(p) for p in itertools.product('123', repeat=3)]
-                pair_counts = []
-                for s1, s2 in itertools.combinations(seqs3, 2):
-                    covered = sum(1 for r in fat_strings if s1 in r or s2 in r)
-                    pair_counts.append(((s1, s2), covered))
-                
-                best_pairs = sorted(pair_counts, key=lambda x: x[1], reverse=True)[:5]
-                for (s1, s2), count in best_pairs:
-                    chans = (count/total_twins)*100
-                    base_pct = (sum(1 for r in base_fat_strings if s1 in r or s2 in r) / total_base_fat) * 100 if total_base_fat else 0
-                    st.write(f"**{s1}** / **{s2}** ➡️ **{chans:.1f}%** ({count} st) | Bas {base_pct:.1f}% | Lift {chans-base_pct:+.1f}")
-                
-                if best_pairs:
-                    # En Dubbelchans räknas som "satt" om minst en av de två sekvenserna finns i raden
-                    hits_pairs = [sum(1 for pair in best_pairs if pair[0][0] in r or pair[0][1] in r) for r in fat_strings]
-                    st.markdown("---")
-                    st.markdown(get_stat_strings(hits_pairs, len(best_pairs)))
-                    
-        st.markdown("---")
-        st.subheader("🧠 AI:ns Strategiska Byggklossar (För reducering)")
-        
-        match_data = []
-        for m in range(antal_matcher):
-            hist_outcomes = [row['Correct_Row'][m] for _, row in v_m.iterrows() if len(row['Correct_Row']) == antal_matcher]
-            if not hist_outcomes: continue
-                
-            tot = len(hist_outcomes)
-            c1, cx, c2 = hist_outcomes.count('1'), hist_outcomes.count('X'), hist_outcomes.count('2')
-            p1, px, p2 = (c1/tot)*100, (cx/tot)*100, (c2/tot)*100
-            utfall = [('1', p1), ('X', px), ('2', p2)]
-            utfall.sort(key=lambda x: x[1], reverse=True)
-            
-            odds_idag = {'1': input_vec[m*3], 'X': input_vec[m*3+1], '2': input_vec[m*3+2]}
-            
-            best_single = utfall[0]
-            value_single = best_single[1] - odds_idag[best_single[0]]
-            
-            best_double_signs = sorted([utfall[0][0], utfall[1][0]])
-            best_double_str = "1X" if best_double_signs==['1','X'] else "12" if best_double_signs==['1','2'] else "X2"
-            best_double_pct = utfall[0][1] + utfall[1][1]
-            
-            skrällar = []
-            for sign, hist_pct in utfall:
-                if odds_idag[sign] < 20:
-                    skrällar.append({
-                        'match': m+1, 'sign': sign, 'hist_pct': hist_pct, 'odds_idag': odds_idag[sign]
-                    })
-                    
-            match_data.append({
-                'match': m+1,
-                'odds_idag': odds_idag,
-                'best_single_sign': best_single[0],
-                'best_single_pct': best_single[1],
-                'value_single': value_single,
-                'best_double_str': best_double_str,
-                'best_double_pct': best_double_pct,
-                'skrällar': skrällar
-            })
-
-        spikar_sorted = sorted(match_data, key=lambda x: (x['best_single_pct'], x['value_single']), reverse=True)
-        top_5_spikar = spikar_sorted[:5]
-        
-        las_sorted = sorted(match_data, key=lambda x: x['best_double_pct'], reverse=True)
-        top_5_las = las_sorted[:5]
-        
-        all_skrallar = []
-        for md in match_data:
-            all_skrallar.extend(md['skrällar'])
-        top_5_skrallar = sorted(all_skrallar, key=lambda x: x['hist_pct'], reverse=True)[:5]
-        
-        # --- BERÄKNA HISTORISKT UTFALL FÖR BYGGKLOSSARNA ---
-        spik_hits, las_hits, skrall_hits = [], [], []
-        valid_rows_for_stats = [row['Correct_Row'] for _, row in v_m.iterrows() if len(row['Correct_Row']) == antal_matcher]
-        
-        for r_str in valid_rows_for_stats:
-            spik_hits.append(sum(1 for s in top_5_spikar if r_str[s['match']-1] == s['best_single_sign']))
-            las_hits.append(sum(1 for l in top_5_las if r_str[l['match']-1] in l['best_double_str']))
-            skrall_hits.append(sum(1 for sk in top_5_skrallar if r_str[sk['match']-1] == sk['sign']))
-
-        # --- RITA UPP BYGGKLOSSARNA ---
-        col_spik, col_las, col_skrall = st.columns(3)
-        
-        with col_spik:
-            st.markdown("🔥 **Topp 5 Spikarna**")
-            for s in top_5_spikar:
-                st.write(f"**M{s['match']}: {s['best_single_sign']}** (Vinner {s['best_single_pct']:.0f}%, Streck {s['odds_idag'][s['best_single_sign']]:.0f}%)")
-            st.markdown("---")
-            st.markdown(get_stat_strings(spik_hits, len(top_5_spikar)))
-
-        with col_las:
-            st.markdown("🔒 **Topp 5 Låsen**")
-            for l in top_5_las:
-                st.write(f"**M{l['match']}: {l['best_double_str']}** (Täcker {l['best_double_pct']:.0f}%)")
-            st.markdown("---")
-            st.markdown(get_stat_strings(las_hits, len(top_5_las)))
-
-        with col_skrall:
-            st.markdown("💣 **Topp 5 Skrälldrag (<20%)**")
-            if not top_5_skrallar:
-                st.write("Hittade inga skrällar under 20% idag.")
-            else:
-                for sk in top_5_skrallar:
-                    st.write(f"**M{sk['match']}: {sk['sign']}** (Vinner {sk['hist_pct']:.0f}%, Streck {sk['odds_idag']:.0f}%)")
-                st.markdown("---")
-                st.markdown(get_stat_strings(skrall_hits, len(top_5_skrallar)))
-
-        if antal_matcher == 8:
-            st.markdown("---")
-            st.subheader("🎲 EXAKT UTRÄKNING (6 561 rader)")
-            all_possible_rows = [''.join(tup) for tup in itertools.product(['1','X','2'], repeat=8)]
-            ai_matrix, ai_scores_asc, ai_tot = calculate_ai_matrix_from_values(filter_vec)
-            
-            valid_exact_rows = [] 
-            match_odds_input = [filter_vec[j:j+3] for j in range(0, len(filter_vec), 3)]
-            
-            for tr in all_possible_rows:
-                pts = 0
-                c1, cx, c2 = tr.count('1'), tr.count('X'), tr.count('2')
-                s1_c, sx_c, s2_c, _ = get_streaks(tr)
-                g1_c, gx_c, g2_c, _ = get_gaps(tr)
-                si1_c, six_c, si2_c, singtot_c, _ = get_singles(tr)
-                d1_c, dx_c, d2_c, dubtot_c, _ = get_doublets(tr)
-                t1_c, tx_c, t2_c, triptot_c, _ = get_triplets(tr)
-                o1_c, ox_c, o2_c, occtot_c, _ = get_occurrences(tr)
-                f_c, a_c, t_c, fsum_c = get_fat(tr, filter_vec)
-                
-                if cb_base and (c_ones[0] <= c1 <= c_ones[1] and c_draws[0] <= cx <= c_draws[1] and c_twos[0] <= c2 <= c_twos[1]): pts += 1
-                if cb_streak and (c_s1[0] <= s1_c <= c_s1[1] and c_sx[0] <= sx_c <= c_sx[1] and c_s2[0] <= s2_c <= c_s2[1]): pts += 1
-                if cb_gap and (c_g1[0] <= g1_c <= c_g1[1] and c_gx[0] <= gx_c <= c_gx[1] and c_g2[0] <= g2_c <= c_g2[1]): pts += 1
-                if cb_single and (c_sing1[0] <= si1_c <= c_sing1[1] and c_singx[0] <= six_c <= c_singx[1] and c_sing2[0] <= si2_c <= c_sing2[1] and c_singtot[0] <= singtot_c <= c_singtot[1]): pts += 1
-                if cb_doublet and (c_dub1[0] <= d1_c <= c_dub1[1] and c_dubx[0] <= dx_c <= c_dubx[1] and c_dub2[0] <= d2_c <= c_dub2[1] and c_dubtot[0] <= dubtot_c <= c_dubtot[1]): pts += 1
-                if cb_triplet and (c_trip1[0] <= t1_c <= c_trip1[1] and c_tripx[0] <= tx_c <= c_tripx[1] and c_trip2[0] <= t2_c <= c_trip2[1] and c_triptot[0] <= triptot_c <= c_triptot[1]): pts += 1
-                if cb_occur and (c_occ1[0] <= o1_c <= c_occ1[1] and c_occx[0] <= ox_c <= c_occx[1] and c_occ2[0] <= o2_c <= c_occ2[1] and c_occtot[0] <= occtot_c <= c_occtot[1]): pts += 1
-                
-                if cb_super_macro:
-                    g_pass = 0
-                    b = sm_bounds
-                    if sum([b['1'][0] <= c1 <= b['1'][1], b['X'][0] <= cx <= b['X'][1], b['2'][0] <= c2 <= b['2'][1]]) >= 2: g_pass += 1
-                    if sum([b['s1'][0] <= s1_c <= b['s1'][1], b['sx'][0] <= sx_c <= b['sx'][1], b['s2'][0] <= s2_c <= b['s2'][1]]) >= 2: g_pass += 1
-                    if sum([b['g1'][0] <= g1_c <= b['g1'][1], b['gx'][0] <= gx_c <= b['gx'][1], b['g2'][0] <= g2_c <= b['g2'][1]]) >= 2: g_pass += 1
-                    if sum([b['si1'][0] <= si1_c <= b['si1'][1], b['six'][0] <= six_c <= b['six'][1], b['si2'][0] <= si2_c <= b['si2'][1]]) >= 2: g_pass += 1
-                    if sum([b['d1'][0] <= d1_c <= b['d1'][1], b['dx'][0] <= dx_c <= b['dx'][1], b['d2'][0] <= d2_c <= b['d2'][1]]) >= 2: g_pass += 1
-                    if sum([b['t1'][0] <= t1_c <= b['t1'][1], b['tx'][0] <= tx_c <= b['tx'][1], b['t2'][0] <= t2_c <= b['t2'][1]]) >= 2: g_pass += 1
-                    if sum([b['o1'][0] <= o1_c <= b['o1'][1], b['ox'][0] <= ox_c <= b['ox'][1], b['o2'][0] <= o2_c <= b['o2'][1]]) >= 2: g_pass += 1
-                    if sum([b['f'][0] <= f_c <= b['f'][1], b['a'][0] <= a_c <= b['a'][1], b['t'][0] <= t_c <= b['t'][1]]) >= 2: g_pass += 1
-                    if g_pass >= slider_super_groups: pts += 1
-
-                if cb_fat and (c_fatf[0] <= f_c <= c_fatf[1] and c_fata[0] <= a_c <= c_fata[1] and c_fatt[0] <= t_c <= c_fatt[1] and c_fatsum[0] <= fsum_c <= c_fatsum[1]): pts += 1
-                if cb_u_favs and (c_u[0] <= get_top_n_favs_wins(tr, filter_vec, slider_u_count) <= c_u[1]): pts += 1
-                if cb_sft and (c_sft[0] <= get_sft_sum(tr, filter_vec) <= c_sft[1]): pts += 1
-                if cb_points and (c_points[0] <= get_rank_points(tr, filter_vec) <= c_points[1]): pts += 1
-                if cb_100minus and (c_minus[0] <= get_100_minus_sum(tr, filter_vec) <= c_minus[1]): pts += 1
-                if cb_log_surprise and in_range(get_log_surprise_sum(tr, filter_vec), c_log_surprise): pts += 1
-                if cb_rank24 and (c_rank24[0] <= get_rank_sum(tr, filter_vec) <= c_rank24[1]): pts += 1
-                if cb_totaldiff:
-                    td_c = calculate_total_diff(match_odds_input, list(tr))
-                    if (c_totaldiff[0] <= td_c <= c_totaldiff[1]): pts += 1
-                if cb_fav_pressure:
-                    fp_c = get_favorite_pressure(tr, filter_vec)
-                    if in_range(fp_c['F70_Wins'], c_fav70) and in_range(fp_c['F60_Wins'], c_fav60) and in_range(fp_c['F50_Wins'], c_fav50): pts += 1
-                if cb_shock_strength:
-                    sh_c = get_shock_strength(tr, filter_vec)
-                    if in_range(sh_c['U10_Wins'], c_shock10) and in_range(sh_c['U15_Wins'], c_shock15) and in_range(sh_c['U20_Wins'], c_shock20) and in_range(sh_c['Lowest_Win_Pct'], c_shock_lowest): pts += 1
-                if cb_fav_delta and in_range(get_favorite_delta(tr, filter_vec), c_fav_delta): pts += 1
-                if cb_aimatrix:
-                    rank_c, _ = get_exact_rank(tr, ai_matrix, ai_scores_asc, ai_tot)
-                    if (active_ai_min <= rank_c <= active_ai_max): pts += 1
-                
-                if pts >= slider_pass_req: 
-                    valid_exact_rows.append(tr)
-            
-            sim_hits = len(valid_exact_rows)
-            st.success(f"🎯 **EXAKT KVARVARANDE RADANTAL:** {sim_hits} st (Skurit bort {100 - ((sim_hits / 6561) * 100):.2f}%) med Soft Filtering.")
-            
-            if sim_hits > 0:
-                st.markdown("### 📊 Frekvenstabell (Mallen)")
-                freq_data = []
-                for m in range(antal_matcher):
-                    c1 = sum(1 for r in valid_exact_rows if r[m] == '1')
-                    cx = sum(1 for r in valid_exact_rows if r[m] == 'X')
-                    c2 = sum(1 for r in valid_exact_rows if r[m] == '2')
-                    freq_data.append({
-                        "Match": f"M{m+1}",
-                        "1 (%)": f"{(c1/sim_hits)*100:.1f} %",
-                        "X (%)": f"{(cx/sim_hits)*100:.1f} %",
-                        "2 (%)": f"{(c2/sim_hits)*100:.1f} %"
-                    })
-                st.dataframe(pd.DataFrame(freq_data).set_index("Match"), use_container_width=True)
-
-        else:
-            st.info("💡 Exakt uträkning är avstängd för 13 matcher (för snabbhetens skull). Mallen är dock helt redo för reducering!")
-
-        st.markdown("---")
-        st.subheader("📊 Datadistribution")
-        fig = plt.figure(figsize=(18, 16)) 
-        def smart_plot(data_list, col_idx, color, title, xlabel, is_active, val_min, val_max, meta_key=None):
-            plt.subplot(3, 3, col_idx) 
-            valid_data = [d for d in data_list if not pd.isna(d)]
-            if not valid_data: plt.text(0.5, 0.5, 'Ingen data', ha='center', va='center'); plt.title(title); return
-            d_min, d_max = min(valid_data), max(valid_data)
-            d_range = d_max - d_min
-            bins = np.arange(np.floor(d_min)-0.5, np.ceil(d_max)+1.5, 1) if d_range <= 40 else int(d_range) if d_range <= 150 else 25
-            plt.hist(valid_data, bins=bins, color=color, edgecolor='black', alpha=0.8)
-            plt.title(title, fontweight='bold'); plt.xlabel(xlabel); plt.ylabel('Antal')
-            
-            if d_range == 0: ticks = [d_min]
-            elif d_range <= 20: ticks = np.arange(np.floor(d_min), np.ceil(d_max) + 1, 1)
-            elif d_range <= 60: ticks = np.arange(np.floor(d_min), np.ceil(d_max) + 2, 2)
-            elif d_range <= 150: ticks = np.arange(np.floor(d_min), np.ceil(d_max) + 5, 5)
-            elif d_range <= 400: ticks = np.arange(np.floor(d_min), np.ceil(d_max) + 10, 10)
-            else: ticks = np.linspace(d_min, d_max, 10).astype(int)
-            
-            plt.xticks(ticks, rotation=45); plt.grid(axis='y', linestyle='--', alpha=0.5)
-            if is_active:
-                if meta_key and meta_key in autotrim_meta:
-                    safe = autotrim_meta[meta_key].get('Säkerhetsintervall')
-                    if safe is not None and tuple(safe) != (val_min, val_max):
-                        plt.axvline(safe[0], color='orange', linestyle='dotted', linewidth=1.5, label='Säkerhet Min')
-                        plt.axvline(safe[1], color='orange', linestyle='dotted', linewidth=1.5, label='Säkerhet Max')
-                plt.axvline(val_min, color='red', linestyle='dashed', linewidth=2, label='Rek Min')
-                plt.axvline(val_max, color='darkred', linestyle='dashed', linewidth=2, label='Rek Max')
-                plt.legend()
-
-        smart_plot([r for r in ai_ranks if r > 0], 1, 'skyblue', 'AI-Rank', 'AI-Rank', cb_aimatrix, active_ai_min, active_ai_max)
-        smart_plot(sft_sums, 2, 'coral', 'SFT Summa', 'SFT Summa', cb_sft, c_sft[0], c_sft[1], 'SFT Summa')
-        smart_plot(fat_sums, 3, 'gold', 'FAT Summa', 'FAT Summa', cb_fat, c_fatsum[0], c_fatsum[1]) 
-        smart_plot(points_vals, 4, 'mediumpurple', 'Poängfilter', 'Poäng', cb_points, c_points[0], c_points[1], 'Poängfilter')
-        smart_plot(minus_sums, 5, 'tan', '100-minus Summa', '100-minus', cb_100minus, c_minus[0], c_minus[1], '100-minus Summa')
-        smart_plot(rank24_sums, 6, 'lightpink', 'Rank Summa', 'Rank Summa', cb_rank24, c_rank24[0], c_rank24[1], 'Rank Summa')
-        smart_plot(total_diff_vals, 7, 'lightgreen', 'Total Diff (T1-T2)', 'Differens', cb_totaldiff, c_totaldiff[0], c_totaldiff[1], 'Total Diff')
-        smart_plot(list(v_m['Delta']), 8, 'lightblue', 'Delta (Avvikelse)', 'Delta Poäng', True, c_delta[0], c_delta[1], 'Delta')
-        
-        plt.tight_layout(pad=2.0, h_pad=2.0)
-        
-        st.pyplot(fig)
-        plt.close(fig)
+        # v11.2b: gamla fristående byggklossar och datadistribution är borttagna.
+        # Statistik visas per valt filter i Filtercentralen.
