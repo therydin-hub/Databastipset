@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0 – Ren Helgardering-filtercentral"
+APP_VERSION = "v12.0b – Bugfix filtercentral"
 
 
 st.markdown("""
@@ -710,13 +710,23 @@ def generate_rows_from_frame(frame, max_rows=50000):
 
 
 def row_log_probability(row_str, prob_vector):
-    """Log-sannolikhet enligt dagens procent. Används bara som vikt, inte som facit."""
+    """Log-sannolikhet enligt dagens procent. Robust mot felaktig/lös rad eller kort procentvektor."""
+    if isinstance(row_str, (list, tuple)):
+        row_str = ''.join(map(str, row_str))
+    row_str = str(row_str).strip().upper()
+    prob_vector = list(prob_vector or [])
     total = 0.0
     for i, c in enumerate(row_str):
         idx = i * 3
-        if c == '1': p = prob_vector[idx]
-        elif c == 'X': p = prob_vector[idx + 1]
-        else: p = prob_vector[idx + 2]
+        if idx + 2 >= len(prob_vector):
+            # Säker fallback i stället för krasch om kupongvektorn/raden är osynkad.
+            p = 33.333
+        elif c == '1':
+            p = prob_vector[idx]
+        elif c == 'X':
+            p = prob_vector[idx + 1]
+        else:
+            p = prob_vector[idx + 2]
         total += np.log(max(float(p), 0.05) / 100.0)
     return float(total)
 
@@ -2157,14 +2167,14 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3):
     cur_matrix, cur_scores_asc, cur_tot = calculate_ai_matrix_from_values(filter_vec)
     specs = []
 
-    def add_interval(name, category, values, getter, decimals=0, coverage=85, hard_min=None, hard_max=None, help_text=""):
+    def add_interval(name, category, values, getter, decimals=0, coverage=85, hard_min=None, hard_max=None, help_text="", key_override=None):
         vals = [v for v in values if not pd.isna(v)]
         if not vals:
             return
         default_interval = get_best_interval(vals, coverage)
         bounds = _bounds_from_values(vals, default_interval, decimals=decimals, hard_min=hard_min, hard_max=hard_max)
         hist_pass, hist_total, hist_pct = _hist_pass_count(vals, default_interval)
-        key_base = _slug(name)
+        key_base = key_override or _slug(name)
         # Undvik nyckelkrockar om ett namn återkommer.
         key = key_base
         i = 2
@@ -2269,7 +2279,7 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3):
         add_interval('FAT dubbelchans', 'FAT-sekvenser', vals, lambda r, prs=pairs: count_fat_pair_hits(get_fat_string(r, filter_vec), prs), 0, 85, 0, len(pairs), f"Par: {', '.join([str(p) for p in pairs])}")
 
     # Favorit / skräll
-    add_interval(f'Topp {slider_u_count} favoriter', 'Favorit & skräll', fav_top_vals, lambda r: get_top_n_favs_wins(r, filter_vec, slider_u_count), 0, 90, 0, slider_u_count)
+    add_interval(f'Topp {slider_u_count} favoriter', 'Favorit & skräll', fav_top_vals, lambda r: get_top_n_favs_wins(r, filter_vec, slider_u_count), 0, 90, 0, slider_u_count, key_override='topp_favoriter')
     add_interval('Favorittryck ≥70%', 'Favorit & skräll', fav70, lambda r: get_favorite_pressure(r, filter_vec)['F70_Wins'], 0, 85, 0, get_favorite_threshold_counts(filter_vec).get(70, 0))
     add_interval('Favorittryck ≥60%', 'Favorit & skräll', fav60, lambda r: get_favorite_pressure(r, filter_vec)['F60_Wins'], 0, 85, 0, get_favorite_threshold_counts(filter_vec).get(60, 0))
     add_interval('Favorittryck ≥50%', 'Favorit & skräll', fav50, lambda r: get_favorite_pressure(r, filter_vec)['F50_Wins'], 0, 85, 0, get_favorite_threshold_counts(filter_vec).get(50, 0))
@@ -2406,14 +2416,14 @@ st.markdown(f"""
   <div class='v12-step'>Ren omstart</div>
   <div class='v12-title'>🎯 Tipset AI — Helgardering-lik filtercentral</div>
   <div class='v12-muted'>En grundram. Ett filter per rad. Av / Tvingat / Grupp. Statistik på varje filter när du öppnar info.</div>
-  <div><span class='v12-pill'>{APP_VERSION}</span><span class='v12-pill'>Ingen AutoHard</span><span class='v12-pill'>Ingen expertmeny</span></div>
+  <div><span class='v12-pill'>{APP_VERSION}</span><span class='v12-pill'>Manuell filtercentral</span><span class='v12-pill'>Snabbare bas</span></div>
 </div>
 """, unsafe_allow_html=True)
 
 # Sidebar deliberately minimal
 with st.sidebar:
     st.header("Kontroll")
-    st.caption("Sidan är rensad. Inga expertreglage och ingen automatisk filteroptimering.")
+    st.caption("Sidan är rensad. Filter och grupper styrs manuellt.")
     if st.button("🧹 Rensa cache", use_container_width=True):
         st.cache_data.clear()
         st.success("Cache tömd.")
@@ -2520,13 +2530,20 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     v_m = st.session_state['v12_v_m']
     filter_vec = st.session_state['v12_filter_vec']
     frame = st.session_state['v12_saved_frame']
-    frame_rows = _cached_rows_from_frame(_frame_cache_tuple(frame), antal_matcher, max_rows=75000)
-    specs = build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=min(3, antal_matcher))
+    frame_rows, frame_n_rows, frame_ok, frame_msg = _cached_rows_from_frame(_frame_cache_tuple(frame), antal_matcher, max_rows=75000)
+    if not frame_ok:
+        st.error(frame_msg)
+        st.stop()
+
+    top_fav_count = int(st.session_state.get('v12_top_fav_count', 3))
+    top_fav_count = max(1, min(6, top_fav_count))
+    specs = build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=top_fav_count)
     st.session_state['v12_specs'] = specs
 
     st.markdown("<div class='v12-card'>", unsafe_allow_html=True)
     st.markdown("<div class='v12-step'>Steg 3</div><div class='v12-title'>Filtercentral</div>", unsafe_allow_html=True)
     st.caption("Ett filter finns bara en gång. Välj Av, Tvingat eller Grupp. Du styr intervallen själv med sliders.")
+    st.number_input("Toppfavoriter-filter: antal favoriter", min_value=1, max_value=6, value=top_fav_count, step=1, key="v12_top_fav_count", help="Styr filtret Topp N favoriter. Du kan välja 1–6.")
 
     mode_options = ['Av', 'Tvingat'] + [f'Grupp {i}' for i in range(1, 7)]
     cats = []
@@ -2535,15 +2552,14 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             cats.append(s['category'])
 
     with st.form("v12_filter_form"):
-        tabs = st.tabs(cats)
         new_settings = {}
-        for tab, cat in zip(tabs, cats):
-            with tab:
+        for ci, cat in enumerate(cats):
+            with st.expander(f"📂 {cat}", expanded=(ci == 0)):
                 cat_specs = [s for s in specs if s['category'] == cat]
                 for spec in cat_specs:
                     k = spec['key']
                     default_mode = st.session_state.get(f'filter_mode_{k}', 'Av')
-                    default_interval = st.session_state.get(f'filter_range_{k}', spec['default_interval'])
+                    default_interval = _current_interval_for_spec(spec)
                     lo, hi = spec['bounds']
                     dec = spec['decimals']
                     try:
@@ -2568,6 +2584,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     new_settings[k] = {'mode': mode, 'interval': rng}
                     if spec.get('help'):
                         st.caption(spec['help'])
+                    st.divider()
         st.markdown("---")
         st.markdown("**Gruppkrav**")
         gc = st.columns(6)
@@ -2675,6 +2692,13 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 st.warning(f"Filtermassan är {len(filtered_rows):,} rader, över spärren {int(matrix_limit):,}. Höj spärren eller filtrera hårdare innan TipsetMatrix.".replace(',', ' '))
             else:
                 with st.spinner("Kör TipsetMatrix 12-garanti..."):
+                    if len(filter_vec) < antal_matcher * 3:
+                        st.warning("Kupongvektorn är kortare än antal matcher. TipsetMatrix körs med neutral viktning för att undvika krasch.")
+                    clean_filtered_rows = [str(r).strip().upper() for r in filtered_rows if isinstance(r, str) and len(str(r).strip()) == antal_matcher]
+                    if len(clean_filtered_rows) != len(filtered_rows):
+                        st.warning("Några felaktiga radobjekt sorterades bort före TipsetMatrix.")
+                    filtered_rows = clean_filtered_rows
+                    st.session_state['v12_last_result']['filtered_rows'] = filtered_rows
                     scores = [row_log_probability(r, filter_vec) for r in filtered_rows]
                     reduced_rows = tipsetmatrix12_reduce(filtered_rows, row_scores=scores, mode=reducer_mode, max_output_rows=None, seed=42)
                 st.session_state['v12_last_result']['reduced_rows'] = reduced_rows
