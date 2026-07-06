@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0h – Tydliga infosiffror"
+APP_VERSION = "v12.0i – Filterkvalitet 90% & samlad träff"
 
 
 st.markdown("""
@@ -2442,6 +2442,50 @@ def _hist_package_passes(v_m, specs, settings, group_reqs):
     return len(_apply_manual_filters(rows, specs, settings, group_reqs)), len(rows)
 
 
+
+
+def _forced_quality_rows(specs, settings, rows=None, min_hit_pct=90.0, min_reduction_pct=5.0):
+    """Returnerar kvalitetsrad per tvingat filter.
+
+    Detta ändrar inte användarens filterval. Det ger bara tydlig kontroll:
+    - individuell historisk träff på de valda liknande omgångarna
+    - faktisk ensamseffekt på sparad grundram
+    - om filtret ligger under rekommenderad spärr
+    """
+    out = []
+    for spec in specs:
+        setting = settings.get(spec['key'], {})
+        if setting.get('mode') != 'Tvingat':
+            continue
+        interval = setting.get('interval', spec['default_interval'])
+        hp, ht, pct = _hist_pass_count(spec.get('hist_values', []), interval)
+        kept = None
+        red_pct = None
+        if rows is not None and len(rows) <= 30000:
+            try:
+                kept = sum(1 for r in rows if _spec_pass(r, spec, interval))
+                red_pct = 100.0 - 100.0 * kept / max(1, len(rows))
+            except Exception:
+                kept = None
+                red_pct = None
+        issues = []
+        if pct < float(min_hit_pct):
+            issues.append(f"träff {pct:.1f}% < {float(min_hit_pct):.0f}%")
+        if red_pct is not None and red_pct < float(min_reduction_pct):
+            issues.append(f"reducering {red_pct:.1f}% < {float(min_reduction_pct):.1f}%")
+        out.append({
+            'Filter': spec['name'],
+            'Kategori': spec.get('category', ''),
+            'Intervall/krav': _display_interval(interval, spec.get('decimals', 0)),
+            'Hist träff': f"{hp}/{ht} ({pct:.1f}%)",
+            'Reducerar ensamt': ('—' if red_pct is None else f"{red_pct:.1f}%"),
+            'Kvalitet': 'OK' if not issues else '⚠️ ' + '; '.join(issues),
+            '_pct': pct,
+            '_red_pct': (-1 if red_pct is None else red_pct),
+            '_ok': not issues,
+        })
+    return out
+
 def _build_filter_summary_df(specs, settings, group_reqs, rows=None):
     data = []
     for spec in specs:
@@ -2571,7 +2615,7 @@ st.markdown(f"""
   <div class='v12-step'>Ren omstart</div>
   <div class='v12-title'>🎯 Tipset AI — Helgardering-lik filtercentral</div>
   <div class='v12-muted'>En grundram. Ett filter per rad. Av / Tvingat / Grupp. Statistik på varje filter när du öppnar info.</div>
-  <div><span class='v12-pill'>{APP_VERSION}</span><span class='v12-pill'>Manuell filtercentral</span><span class='v12-pill'>Snabbare bas</span></div>
+  <div><span class='v12-pill'>{APP_VERSION}</span><span class='v12-pill'>Manuell filtercentral</span><span class='v12-pill'>Filterkvalitet</span></div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -2592,7 +2636,7 @@ with col_a:
 antal_matcher = 13 if spelform in ["Stryktips", "Europatips"] else 8
 krav_odds = antal_matcher * 3
 with col_b:
-    top_n = st.number_input("Liknande omgångar", min_value=5, max_value=100, value=30, step=5, key="v12_top_n")
+    top_n = st.number_input("Historikbas – liknande omgångar", min_value=20, max_value=100, value=30, step=5, key="v12_top_n", help="Rekommenderat: 30. 20 kan testas, men 30 ger stabilare filterstatistik.")
 with col_c:
     pay_min = st.number_input("Min utdelning i historik", min_value=0, max_value=10000000, value=100000, step=50000, key="v12_pay_min")
 
@@ -2698,6 +2742,46 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     st.markdown("<div class='v12-card'>", unsafe_allow_html=True)
     st.markdown("<div class='v12-step'>Steg 3</div><div class='v12-title'>Filtercentral</div>", unsafe_allow_html=True)
     st.caption("Ett filter finns bara en gång. Välj Av, Tvingat eller Grupp. Du styr intervallen själv med sliders.")
+    qc1, qc2, qc3, qc4 = st.columns([1.15, 1.15, 1.15, 1.35])
+    with qc1:
+        min_forced_hit_pct = st.slider(
+            "Min träff för tvingat filter",
+            min_value=50,
+            max_value=100,
+            value=int(st.session_state.get('v12_min_forced_hit_pct', 90)),
+            step=1,
+            key="v12_min_forced_hit_pct",
+            help="Kvalitetskontroll. Rekommenderat 90%, dvs 27/30 om historikbasen är 30.",
+        )
+    with qc2:
+        min_forced_reduction_pct = st.slider(
+            "Min reducering för tvingat filter",
+            min_value=0.0,
+            max_value=30.0,
+            value=float(st.session_state.get('v12_min_forced_reduction_pct', 5.0)),
+            step=0.5,
+            key="v12_min_forced_reduction_pct",
+            help="Varnar om ett tvingat filter knappt reducerar grundramen ensamt.",
+        )
+    with qc3:
+        default_pkg_target = min(20, max(0, len(v_m)))
+        min_package_hits = st.number_input(
+            "Min samlad träff",
+            min_value=0,
+            max_value=max(1, len(v_m)),
+            value=int(st.session_state.get('v12_min_package_hits', default_pkg_target)),
+            step=1,
+            key="v12_min_package_hits",
+            help="Kontroll för hela filterpaketet: tvingade filter + gruppkrav tillsammans.",
+        )
+    with qc4:
+        stop_on_quality = st.toggle(
+            "Stoppa vid varning",
+            value=bool(st.session_state.get('v12_stop_on_quality', False)),
+            key="v12_stop_on_quality",
+            help="Av = du kan testa fritt. På = körningen stoppas om tvingade filter/samlad träff bryter kvalitetskraven.",
+        )
+
     st.number_input("Toppfavoriter-filter: antal favoriter", min_value=1, max_value=6, value=top_fav_count, step=1, key="v12_top_fav_count", help="Styr filtret Topp N favoriter. Du kan välja 1–6.")
 
     mode_options = ['Av', 'Tvingat'] + [f'Grupp {i}' for i in range(1, 7)]
@@ -2788,11 +2872,25 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     forced_count = sum(1 for v in settings.values() if v['mode'] == 'Tvingat')
     group_count = active_count - forced_count
     hpkg, htot = _hist_package_passes(v_m, specs, settings, group_reqs)
-    m1, m2, m3, m4 = st.columns(4)
+    forced_quality = _forced_quality_rows(specs, settings, rows=frame_rows, min_hit_pct=float(min_forced_hit_pct), min_reduction_pct=float(min_forced_reduction_pct))
+    forced_bad = [r for r in forced_quality if not r.get('_ok', False)]
+    package_ok = hpkg >= int(min_package_hits)
+
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Aktiva filter", active_count)
     m2.metric("Tvingade", forced_count)
     m3.metric("Gruppfilter", group_count)
-    m4.metric("Samlad historikträff", f"{hpkg}/{htot}")
+    m4.metric("Samlad historikträff", f"{hpkg}/{htot}", f"mål {int(min_package_hits)}/{htot}")
+    m5.metric("Tvingade under spärr", len(forced_bad))
+
+    if not package_ok:
+        st.warning(f"Samlad historikträff är {hpkg}/{htot}, under ditt mål {int(min_package_hits)}/{htot}. Lägg fler filter i grupp eller bredda intervall om du vill nå målet.")
+    if forced_bad:
+        st.warning(f"{len(forced_bad)} tvingade filter ligger under kvalitetskravet: minst {float(min_forced_hit_pct):.0f}% träff och minst {float(min_forced_reduction_pct):.1f}% ensamseffekt.")
+        bad_df = pd.DataFrame([{k:v for k,v in r.items() if not k.startswith('_')} for r in forced_bad])
+        st.dataframe(bad_df, use_container_width=True, hide_index=True)
+    elif forced_count:
+        st.success("Alla tvingade filter klarar kvalitetskravet individuellt.")
 
     with st.expander("📋 Filteröversikt", expanded=False):
         st.dataframe(_build_filter_summary_df(specs, settings, group_reqs, rows=frame_rows), use_container_width=True, hide_index=True)
@@ -2813,8 +2911,12 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     go = st.button("🚀 Kör filtrering + reducering", use_container_width=True)
 
     if go:
-        with st.spinner("Filtrerar exakt grundram..."):
-            filtered_rows = _apply_manual_filters(frame_rows, specs, settings, group_reqs)
+        if bool(stop_on_quality) and (forced_bad or not package_ok):
+            st.error("Körningen stoppades av kvalitetskontrollen. Stäng av 'Stoppa vid varning' om du bara vill testa, eller justera filter/grupper/intervall.")
+            st.stop()
+        else:
+            with st.spinner("Filtrerar exakt grundram..."):
+                filtered_rows = _apply_manual_filters(frame_rows, specs, settings, group_reqs)
         st.session_state['v12_last_result'] = {'filtered_rows': filtered_rows, 'reduced_rows': [], 'settings': settings, 'group_reqs': group_reqs}
         st.success(f"Filtrering klar: {len(frame_rows):,} → {len(filtered_rows):,} rader.".replace(',', ' '))
         miss = selected_signs_missing(filtered_rows, frame, antal_matcher)
