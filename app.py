@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0k – Filterträff synkar sliders"
+APP_VERSION = "v12.0l – Sliderkey per träffmål"
 
 
 st.markdown("""
@@ -2769,9 +2769,9 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     filter_hist_target_pct = int(max(50, min(100, filter_hist_target_pct)))
     top_fav_count = int(max(1, min(6, top_fav_count)))
 
-    # Viktigt: kontrollen ovan måste läsas INNAN specs/sliders byggs. Om målet
-    # ändras ska gamla intervallsliders kastas och sidan rerunnas så varje filter
-    # verkligen startar på nytt rekommenderat intervall (t.ex. 100% = 30/30).
+    # Viktigt: kontrollen ovan måste läsas INNAN specs/sliders byggs.
+    # Dessutom har varje intervallslider en nyckel som innehåller träffmålet.
+    # Annars återanvänder Streamlit gamla slider-värden och ignorerar nya defaultintervall.
     prev_target = st.session_state.get('v12_filter_hist_target_prev')
     prev_topfav = st.session_state.get('v12_top_fav_count_prev')
     if prev_target != filter_hist_target_pct or prev_topfav != top_fav_count:
@@ -2785,7 +2785,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
 
     specs = build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=top_fav_count, target_hist_pct=filter_hist_target_pct)
     st.session_state['v12_specs'] = specs
-    st.caption("När du ändrar minsta historiska träff räknas rekommenderat intervall och filter-sliders om direkt. 100% ska därför ge startintervall med 30/30 där det är möjligt.")
+    st.caption("När du ändrar minsta historiska träff får varje filter nya slider-nycklar och startar på sitt rekommenderade intervall. 100% ska därför ge startintervall med 30/30 där det är möjligt.")
 
     mode_options = ['Av', 'Tvingat'] + [f'Grupp {i}' for i in range(1, 7)]
     cats = []
@@ -2800,7 +2800,10 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             for spec in cat_specs:
                 k = spec['key']
                 mode_key = f'filter_mode_{k}'
-                range_key = f'filter_range_{k}'
+                # Viktigt: range_key innehåller träffmål/toppfavoritval.
+                # Streamlit återanvänder annars gamla slider-värden från session_state och ignorerar nytt default-value.
+                # Det var därför "Rek. intervall" kunde vara 95/100%, medan "Nu valt" låg kvar på gammalt 90%-intervall.
+                range_key = f'filter_range_{k}_h{filter_hist_target_pct}_tf{top_fav_count}'
                 default_mode = st.session_state.get(mode_key, 'Av')
                 lo, hi = spec['bounds']
                 dec = spec['decimals']
