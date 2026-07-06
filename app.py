@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0f – Frekvenstabell fix"
+APP_VERSION = "v12.0g – Popover-info & tydlig träff"
 
 
 st.markdown("""
@@ -2464,8 +2464,16 @@ def _build_filter_summary_df(specs, settings, group_reqs, rows=None):
 
 
 def _render_inline_filter_info(spec, interval, frame_rows, frame, antal_matcher):
-    """Renderar statistik direkt under valt filter. Körs bara för det filter användaren öppnat."""
+    """Renderar statistik för ett filter.
+
+    Viktigt: historisk träff i rutan gäller alltid 30 liknande omgångar.
+    Vi visar både rekommenderat intervall/träff och nuvarande slider/träff så att
+    det blir tydligt om användaren ändrat intervallet.
+    """
+    rec_interval = spec['default_interval']
+    rhp, rht, rpct = _hist_pass_count(spec['hist_values'], rec_interval)
     hp, ht, pct = _hist_pass_count(spec['hist_values'], interval)
+
     row_values = []
     pass_rows = []
     if frame_rows is not None and len(frame_rows) <= 30000:
@@ -2478,27 +2486,29 @@ def _render_inline_filter_info(spec, interval, frame_rows, frame, antal_matcher)
             except Exception:
                 pass
 
-    st.markdown("<div style='border:1px solid rgba(120,120,120,.28); border-radius:12px; padding:10px 12px; margin:.35rem 0 .7rem 0; background:rgba(128,128,128,.045);'>", unsafe_allow_html=True)
     st.markdown(f"**ℹ️ {spec['name']} — statistik**")
+    st.caption("Historisk träff räknas på de 30 mest liknande omgångarna efter valt utdelningskrav. Rek. träff gäller rekommenderat intervall; nuvarande träff gäller dina sliders.")
     if spec.get('help'):
         st.caption(spec.get('help'))
-    a, b, c, d = st.columns(4)
-    a.metric("Rekommenderat", _display_interval(spec['default_interval'], spec['decimals']))
-    b.metric("Nu valt", _display_interval(interval, spec['decimals']))
-    c.metric("Historisk träff", f"{hp}/{ht}", f"{pct:.1f}%")
+
+    a, b, c, d, e = st.columns(5)
+    a.metric("Rek. intervall", _display_interval(rec_interval, spec['decimals']))
+    b.metric("Rek. träff", f"{rhp}/{rht}", f"{rpct:.1f}%")
+    c.metric("Nu valt", _display_interval(interval, spec['decimals']))
+    d.metric("Nuvarande träff", f"{hp}/{ht}", f"{pct:.1f}%")
     if row_values:
-        d.metric("Grundram → filter", f"{len(frame_rows):,} → {len(pass_rows):,}".replace(',', ' '), f"-{(100 - 100*len(pass_rows)/max(1,len(frame_rows))):.1f}%")
+        e.metric("Grundram → filter", f"{len(frame_rows):,} → {len(pass_rows):,}".replace(',', ' '), f"-{(100 - 100*len(pass_rows)/max(1,len(frame_rows))):.1f}%")
     else:
-        d.metric("Grundram → filter", "—")
+        e.metric("Grundram → filter", "—")
 
     freq_df = _make_freq_df(spec['hist_values'], spec['decimals'])
-    left, right = st.columns([1.05, 1])
+    left, right = st.columns([1.0, 1.0])
     with left:
         st.markdown("**Frekvenstabell, 30 liknande omgångar**")
         if not freq_df.empty:
             table_df = freq_df.drop(columns=['_sort'], errors='ignore')
             st.dataframe(table_df, use_container_width=True, hide_index=True, height=230)
-            st.caption("Sorterad från lägsta till högsta värde. Andel avser de 30 liknande omgångarna.")
+            st.caption("Sorterad numeriskt från lägsta till högsta värde. Andel avser de 30 liknande omgångarna.")
         else:
             st.info("Ingen frekvensdata hittades för detta filter.")
     with right:
@@ -2510,10 +2520,10 @@ def _render_inline_filter_info(spec, interval, frame_rows, frame, antal_matcher)
                 st.bar_chart(chart_df, x='Värde / intervall', y='Antal', use_container_width=True)
             except Exception:
                 st.bar_chart(chart_df.set_index('Värde / intervall')['Antal'])
-        if pass_rows:
-            with st.expander("Teckenfördelning efter detta filter", expanded=False):
-                st.dataframe(build_sign_distribution_df(pass_rows, frame, antal_matcher), use_container_width=True, hide_index=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+
+    if pass_rows:
+        with st.expander("Teckenfördelning efter detta filter", expanded=False):
+            st.dataframe(build_sign_distribution_df(pass_rows, frame, antal_matcher), use_container_width=True, hide_index=True)
 
 
 # Init state
@@ -2712,12 +2722,16 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     else:
                         rng = st.slider("Intervall", float(lo), float(hi), (float(val[0]), float(val[1])), step=step, key=range_key, label_visibility="collapsed")
                 with c4:
-                    if st.button("ℹ️", key=f"filter_info_btn_{k}", help="Visa frekvenstabell och reducering för detta filter"):
-                        current_open = st.session_state.get('v12_open_filter_info')
-                        st.session_state['v12_open_filter_info'] = None if current_open == k else k
+                    # Popover öppnas/stängs i klienten och triggar normalt inte en full sidkörning,
+                    # till skillnad från en vanlig knapp. Statistik visas därmed nära filtret utan
+                    # separat scrollsektion och utan att Auto/TipsetMatrix körs om.
+                    if hasattr(st, "popover"):
+                        with st.popover("ℹ️", help="Visa frekvenstabell, träff och reducering för detta filter"):
+                            _render_inline_filter_info(spec, rng, frame_rows, frame, antal_matcher)
+                    else:
+                        with st.expander("ℹ️", expanded=False):
+                            _render_inline_filter_info(spec, rng, frame_rows, frame, antal_matcher)
                 settings[k] = {'mode': mode, 'interval': rng}
-                if st.session_state.get('v12_open_filter_info') == k:
-                    _render_inline_filter_info(spec, rng, frame_rows, frame, antal_matcher)
                 st.divider()
     st.markdown("---")
     st.markdown("**Gruppkrav**")
@@ -2754,7 +2768,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     with st.expander("📋 Filteröversikt", expanded=False):
         st.dataframe(_build_filter_summary_df(specs, settings, group_reqs, rows=frame_rows), use_container_width=True, hide_index=True)
 
-    # Filterinfo visas nu direkt under respektive filter via ℹ️-knappen.
+    # Filterinfo visas nu i popover direkt på respektive filter. Att öppna/stänga popover triggar normalt inte rerun.
     st.markdown("</div>", unsafe_allow_html=True)
 
     # Step 4 – run filters + TipsetMatrix
