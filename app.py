@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0n – Pareto filterpaket 15/30"
+APP_VERSION = "v12.0p – Kandidatanalys poängfilter"
 
 
 st.markdown("""
@@ -2822,7 +2822,56 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             'min_hit_count': min_hit_count,
         })
 
-    return _pareto_reduce_packages(packages)
+    final_packages = _pareto_reduce_packages(packages)
+
+    # Kandidatanalys: visa att alla filter faktiskt testades, även om de inte hamnade
+    # i ett Pareto-paket. Särskilt viktigt för värde-/poängfilter som ofta överlappar
+    # andra filter och därför kan bli utkonkurrerade i greedy-urvalet.
+    selected_by_key = {}
+    for pi, pkg in enumerate(final_packages, 1):
+        for c in pkg.get('filters', []) or []:
+            selected_by_key.setdefault(c.get('key'), []).append(f"P{pi}")
+
+    candidates_by_key = {}
+    for c in candidates:
+        candidates_by_key.setdefault(c.get('key'), []).append(c)
+
+    audit_rows = []
+    for spec in specs:
+        key = spec.get('key')
+        cand_list = candidates_by_key.get(key, [])
+        if not cand_list:
+            audit_rows.append({
+                'Kategori': spec.get('category', ''),
+                'Filter': spec.get('name', ''),
+                'Bästa intervall': '-',
+                'Bästa individuell träff': '-',
+                'Reducerar ensam': '-',
+                'Valt i paket': 'Nej',
+                'Kommentar': 'Ingen kandidat gav reducering på grundramen eller kunde inte testas.',
+            })
+            continue
+
+        # Visa bästa enskilda variant som paketmotorn såg. Prioritera faktisk reducering,
+        # men markera fortfarande historisk träff så man ser varför den kan väljas bort.
+        best = max(cand_list, key=lambda c: (float(c.get('red_pct', 0.0)), int(c.get('hist_hit', 0)), -int(c.get('frame_keep', 10**9))))
+        selected = selected_by_key.get(key, [])
+        if selected:
+            comment = 'Valt i ' + ', '.join(selected)
+        else:
+            comment = 'Testat men ej valt: gav inte bästa Pareto-paketet. Ofta beror detta på överlapp med andra filter eller för låg extra reducering efter tidigare filter.'
+        audit_rows.append({
+            'Kategori': best.get('category', spec.get('category', '')),
+            'Filter': best.get('name', spec.get('name', '')),
+            'Bästa intervall': best.get('interval_txt', '-'),
+            'Bästa individuell träff': f"{int(best.get('hist_hit', 0))}/{htot}",
+            'Reducerar ensam': f"{float(best.get('red_pct', 0.0)):.1f}%",
+            'Valt i paket': ', '.join(selected) if selected else 'Nej',
+            'Kommentar': comment,
+        })
+
+    audit_df = pd.DataFrame(audit_rows)
+    return final_packages, audit_df
 
 def _recommended_packages_summary_df(packages):
     rows = []
@@ -3055,13 +3104,18 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             build_recs = st.button("Beräkna paket", use_container_width=True, key="v12_build_recommended_packages")
         if build_recs:
             with st.spinner("Beräknar Pareto-paket på exakt grundram..."):
-                packages = _build_recommended_filter_packages(
+                rec_result = _build_recommended_filter_packages(
                     v_m, specs, frame_rows, frame, antal_matcher,
                     min_step_reduction_pct=float(rec_min_step),
                     max_filters=int(rec_max_filters),
                     min_hit_count=int(rec_min_hit),
                 )
+                if isinstance(rec_result, tuple):
+                    packages, candidate_audit = rec_result
+                else:
+                    packages, candidate_audit = rec_result, pd.DataFrame()
             st.session_state['v12_recommended_packages'] = packages
+            st.session_state['v12_recommended_candidate_audit'] = candidate_audit
             st.session_state['v12_recommended_meta'] = {
                 'package_engine': 'pareto_multi_interval',
                 'manual_hist_target_pct': int(filter_hist_target_pct),
@@ -3074,6 +3128,11 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         packages = st.session_state.get('v12_recommended_packages') or []
         if packages:
             st.dataframe(_recommended_packages_summary_df(packages), use_container_width=True, hide_index=True)
+            candidate_audit = st.session_state.get('v12_recommended_candidate_audit')
+            if isinstance(candidate_audit, pd.DataFrame) and not candidate_audit.empty:
+                with st.expander('Visa kandidatanalys – alla filter som paketmotorn testade', expanded=False):
+                    st.caption('Här kan du se om t.ex. Poängfilter faktiskt testades. Om det inte valdes beror det normalt på att ett annat filter gav bättre Pareto-paket eller att det överlappade med redan valda filter.')
+                    st.dataframe(candidate_audit, use_container_width=True, hide_index=True)
             labels = [f"{p['hist_hit']}/{p['hist_total']} · {p['frame_start']:,}→{p['frame_after']:,} · {p['reduction_pct']:.1f}% · {p['num_filters']} filter".replace(',', ' ') for p in packages]
             pick_idx = st.selectbox("Välj paket att använda", list(range(len(packages))), format_func=lambda i: labels[i], key="v12_recommended_pick")
             sel_pkg = packages[int(pick_idx)]
