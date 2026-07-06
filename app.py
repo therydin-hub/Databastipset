@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0i – Filterkvalitet 90% & samlad träff"
+APP_VERSION = "v12.0j – Filterträff styr intervall"
 
 
 st.markdown("""
@@ -2228,18 +2228,28 @@ def _frame_cache_tuple(frame):
     return tuple(tuple(x) for x in frame)
 
 
-def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3):
-    """Bygger exakt en spec per filter. Inga AutoHard-varianter/dubbletter."""
+def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, target_hist_pct=90):
+    """Bygger exakt en spec per filter. Inga AutoHard-varianter/dubbletter.
+
+    target_hist_pct styr rekommenderat intervall/startvärde för varje filter.
+    Exempel: 90% på 30 liknande omgångar ger normalt minst 27/30 i rek. träff.
+    """
     rows = list(v_m['Correct_Row'])
     probs = list(v_m['Prob_Vector'])
     match_odds_filter = [filter_vec[j:j+3] for j in range(0, len(filter_vec), 3)]
     cur_matrix, cur_scores_asc, cur_tot = calculate_ai_matrix_from_values(filter_vec)
     specs = []
 
+    target_hist_pct = int(max(50, min(100, target_hist_pct)))
+
     def add_interval(name, category, values, getter, decimals=0, coverage=85, hard_min=None, hard_max=None, help_text="", key_override=None):
         vals = [v for v in values if not pd.isna(v)]
         if not vals:
             return
+        # I v12.0j styr användaren själv minsta historiska träff för rekommenderat
+        # intervall/startvärde. Tidigare låg olika filter på 85/90/100, vilket gjorde
+        # att vissa filter fortfarande kunde visa t.ex. 26/30 trots att användaren ville ha 100%.
+        coverage = target_hist_pct
         default_interval = get_best_interval(vals, coverage)
         bounds = _bounds_from_values(vals, default_interval, decimals=decimals, hard_min=hard_min, hard_max=hard_max)
         hist_pass, hist_total, hist_pct = _hist_pass_count(vals, default_interval)
@@ -2736,53 +2746,39 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
 
     top_fav_count = int(st.session_state.get('v12_top_fav_count', 3))
     top_fav_count = max(1, min(6, top_fav_count))
-    specs = build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=top_fav_count)
+    filter_hist_target_pct = int(st.session_state.get('v12_filter_hist_target_pct', 90))
+    filter_hist_target_pct = max(50, min(100, filter_hist_target_pct))
+
+    # Om användaren ändrar träffmål ska filterintervallen få nya startvärden.
+    # Annars kan gamla sliderintervall ligga kvar från tidigare mål och ge t.ex. 26/30.
+    prev_target = st.session_state.get('v12_filter_hist_target_prev')
+    if prev_target != filter_hist_target_pct:
+        for _k in list(st.session_state.keys()):
+            if str(_k).startswith('filter_range_'):
+                del st.session_state[_k]
+        st.session_state['v12_filter_hist_target_prev'] = filter_hist_target_pct
+
+    specs = build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=top_fav_count, target_hist_pct=filter_hist_target_pct)
     st.session_state['v12_specs'] = specs
 
     st.markdown("<div class='v12-card'>", unsafe_allow_html=True)
     st.markdown("<div class='v12-step'>Steg 3</div><div class='v12-title'>Filtercentral</div>", unsafe_allow_html=True)
     st.caption("Ett filter finns bara en gång. Välj Av, Tvingat eller Grupp. Du styr intervallen själv med sliders.")
-    qc1, qc2, qc3, qc4 = st.columns([1.15, 1.15, 1.15, 1.35])
-    with qc1:
-        min_forced_hit_pct = st.slider(
-            "Min träff för tvingat filter",
+
+    ctrl_a, ctrl_b = st.columns([1.2, 1.0])
+    with ctrl_a:
+        filter_hist_target_pct = st.slider(
+            "Minsta historiska träff på filterintervall",
             min_value=50,
             max_value=100,
-            value=int(st.session_state.get('v12_min_forced_hit_pct', 90)),
+            value=filter_hist_target_pct,
             step=1,
-            key="v12_min_forced_hit_pct",
-            help="Kvalitetskontroll. Rekommenderat 90%, dvs 27/30 om historikbasen är 30.",
+            key="v12_filter_hist_target_pct",
+            help="Styr rekommenderat intervall och startvärde för varje filter. 90% = ungefär 27/30 vid 30 historiska omgångar. 100% = intervallet täcker alla 30.",
         )
-    with qc2:
-        min_forced_reduction_pct = st.slider(
-            "Min reducering för tvingat filter",
-            min_value=0.0,
-            max_value=30.0,
-            value=float(st.session_state.get('v12_min_forced_reduction_pct', 5.0)),
-            step=0.5,
-            key="v12_min_forced_reduction_pct",
-            help="Varnar om ett tvingat filter knappt reducerar grundramen ensamt.",
-        )
-    with qc3:
-        default_pkg_target = min(20, max(0, len(v_m)))
-        min_package_hits = st.number_input(
-            "Min samlad träff",
-            min_value=0,
-            max_value=max(1, len(v_m)),
-            value=int(st.session_state.get('v12_min_package_hits', default_pkg_target)),
-            step=1,
-            key="v12_min_package_hits",
-            help="Kontroll för hela filterpaketet: tvingade filter + gruppkrav tillsammans.",
-        )
-    with qc4:
-        stop_on_quality = st.toggle(
-            "Stoppa vid varning",
-            value=bool(st.session_state.get('v12_stop_on_quality', False)),
-            key="v12_stop_on_quality",
-            help="Av = du kan testa fritt. På = körningen stoppas om tvingade filter/samlad träff bryter kvalitetskraven.",
-        )
-
-    st.number_input("Toppfavoriter-filter: antal favoriter", min_value=1, max_value=6, value=top_fav_count, step=1, key="v12_top_fav_count", help="Styr filtret Topp N favoriter. Du kan välja 1–6.")
+    with ctrl_b:
+        st.number_input("Toppfavoriter-filter: antal favoriter", min_value=1, max_value=6, value=top_fav_count, step=1, key="v12_top_fav_count", help="Styr filtret Topp N favoriter. Du kan välja 1–6.")
+    st.caption("Kvalitet bedöms nu i filterraden: rek. träff och nuvarande träff visas per filter. Ingen separat stopp-/varningskontroll används.")
 
     mode_options = ['Av', 'Tvingat'] + [f'Grupp {i}' for i in range(1, 7)]
     cats = []
@@ -2872,25 +2868,15 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     forced_count = sum(1 for v in settings.values() if v['mode'] == 'Tvingat')
     group_count = active_count - forced_count
     hpkg, htot = _hist_package_passes(v_m, specs, settings, group_reqs)
-    forced_quality = _forced_quality_rows(specs, settings, rows=frame_rows, min_hit_pct=float(min_forced_hit_pct), min_reduction_pct=float(min_forced_reduction_pct))
-    forced_bad = [r for r in forced_quality if not r.get('_ok', False)]
-    package_ok = hpkg >= int(min_package_hits)
 
-    m1, m2, m3, m4, m5 = st.columns(5)
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("Aktiva filter", active_count)
     m2.metric("Tvingade", forced_count)
     m3.metric("Gruppfilter", group_count)
-    m4.metric("Samlad historikträff", f"{hpkg}/{htot}", f"mål {int(min_package_hits)}/{htot}")
-    m5.metric("Tvingade under spärr", len(forced_bad))
+    m4.metric("Samlad historikträff", f"{hpkg}/{htot}")
 
-    if not package_ok:
-        st.warning(f"Samlad historikträff är {hpkg}/{htot}, under ditt mål {int(min_package_hits)}/{htot}. Lägg fler filter i grupp eller bredda intervall om du vill nå målet.")
-    if forced_bad:
-        st.warning(f"{len(forced_bad)} tvingade filter ligger under kvalitetskravet: minst {float(min_forced_hit_pct):.0f}% träff och minst {float(min_forced_reduction_pct):.1f}% ensamseffekt.")
-        bad_df = pd.DataFrame([{k:v for k,v in r.items() if not k.startswith('_')} for r in forced_bad])
-        st.dataframe(bad_df, use_container_width=True, hide_index=True)
-    elif forced_count:
-        st.success("Alla tvingade filter klarar kvalitetskravet individuellt.")
+    if active_count and hpkg <= max(3, int(0.25 * max(1, htot))):
+        st.warning("Samlad historikträff är mycket låg. Det betyder oftast att för många filter är Tvingade samtidigt. Lägg över närliggande filter i Grupp eller bredda intervallen.")
 
     with st.expander("📋 Filteröversikt", expanded=False):
         st.dataframe(_build_filter_summary_df(specs, settings, group_reqs, rows=frame_rows), use_container_width=True, hide_index=True)
@@ -2911,12 +2897,8 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     go = st.button("🚀 Kör filtrering + reducering", use_container_width=True)
 
     if go:
-        if bool(stop_on_quality) and (forced_bad or not package_ok):
-            st.error("Körningen stoppades av kvalitetskontrollen. Stäng av 'Stoppa vid varning' om du bara vill testa, eller justera filter/grupper/intervall.")
-            st.stop()
-        else:
-            with st.spinner("Filtrerar exakt grundram..."):
-                filtered_rows = _apply_manual_filters(frame_rows, specs, settings, group_reqs)
+        with st.spinner("Filtrerar exakt grundram..."):
+            filtered_rows = _apply_manual_filters(frame_rows, specs, settings, group_reqs)
         st.session_state['v12_last_result'] = {'filtered_rows': filtered_rows, 'reduced_rows': [], 'settings': settings, 'group_reqs': group_reqs}
         st.success(f"Filtrering klar: {len(frame_rows):,} → {len(filtered_rows):,} rader.".replace(',', ' '))
         miss = selected_signs_missing(filtered_rows, frame, antal_matcher)
