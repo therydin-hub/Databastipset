@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0j – Filterträff styr intervall"
+APP_VERSION = "v12.0k – Filterträff synkar sliders"
 
 
 st.markdown("""
@@ -2749,18 +2749,6 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     filter_hist_target_pct = int(st.session_state.get('v12_filter_hist_target_pct', 90))
     filter_hist_target_pct = max(50, min(100, filter_hist_target_pct))
 
-    # Om användaren ändrar träffmål ska filterintervallen få nya startvärden.
-    # Annars kan gamla sliderintervall ligga kvar från tidigare mål och ge t.ex. 26/30.
-    prev_target = st.session_state.get('v12_filter_hist_target_prev')
-    if prev_target != filter_hist_target_pct:
-        for _k in list(st.session_state.keys()):
-            if str(_k).startswith('filter_range_'):
-                del st.session_state[_k]
-        st.session_state['v12_filter_hist_target_prev'] = filter_hist_target_pct
-
-    specs = build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=top_fav_count, target_hist_pct=filter_hist_target_pct)
-    st.session_state['v12_specs'] = specs
-
     st.markdown("<div class='v12-card'>", unsafe_allow_html=True)
     st.markdown("<div class='v12-step'>Steg 3</div><div class='v12-title'>Filtercentral</div>", unsafe_allow_html=True)
     st.caption("Ett filter finns bara en gång. Välj Av, Tvingat eller Grupp. Du styr intervallen själv med sliders.")
@@ -2777,8 +2765,27 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             help="Styr rekommenderat intervall och startvärde för varje filter. 90% = ungefär 27/30 vid 30 historiska omgångar. 100% = intervallet täcker alla 30.",
         )
     with ctrl_b:
-        st.number_input("Toppfavoriter-filter: antal favoriter", min_value=1, max_value=6, value=top_fav_count, step=1, key="v12_top_fav_count", help="Styr filtret Topp N favoriter. Du kan välja 1–6.")
-    st.caption("Kvalitet bedöms nu i filterraden: rek. träff och nuvarande träff visas per filter. Ingen separat stopp-/varningskontroll används.")
+        top_fav_count = st.number_input("Toppfavoriter-filter: antal favoriter", min_value=1, max_value=6, value=top_fav_count, step=1, key="v12_top_fav_count", help="Styr filtret Topp N favoriter. Du kan välja 1–6.")
+    filter_hist_target_pct = int(max(50, min(100, filter_hist_target_pct)))
+    top_fav_count = int(max(1, min(6, top_fav_count)))
+
+    # Viktigt: kontrollen ovan måste läsas INNAN specs/sliders byggs. Om målet
+    # ändras ska gamla intervallsliders kastas och sidan rerunnas så varje filter
+    # verkligen startar på nytt rekommenderat intervall (t.ex. 100% = 30/30).
+    prev_target = st.session_state.get('v12_filter_hist_target_prev')
+    prev_topfav = st.session_state.get('v12_top_fav_count_prev')
+    if prev_target != filter_hist_target_pct or prev_topfav != top_fav_count:
+        for _k in list(st.session_state.keys()):
+            if str(_k).startswith('filter_range_'):
+                del st.session_state[_k]
+        st.session_state['v12_filter_hist_target_prev'] = filter_hist_target_pct
+        st.session_state['v12_top_fav_count_prev'] = top_fav_count
+        st.info("Filterintervallen uppdateras efter nytt träffmål/toppfavoritval…")
+        st.rerun()
+
+    specs = build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=top_fav_count, target_hist_pct=filter_hist_target_pct)
+    st.session_state['v12_specs'] = specs
+    st.caption("När du ändrar minsta historiska träff räknas rekommenderat intervall och filter-sliders om direkt. 100% ska därför ge startintervall med 30/30 där det är möjligt.")
 
     mode_options = ['Av', 'Tvingat'] + [f'Grupp {i}' for i in range(1, 7)]
     cats = []
