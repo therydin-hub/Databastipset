@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0d – Reducerbuggfix"
+APP_VERSION = "v12.0e – Info per filter"
 
 
 st.markdown("""
@@ -2411,6 +2411,49 @@ def _build_filter_summary_df(specs, settings, group_reqs, rows=None):
     return pd.DataFrame(data)
 
 
+def _render_inline_filter_info(spec, interval, frame_rows, frame, antal_matcher):
+    """Renderar statistik direkt under valt filter. Körs bara för det filter användaren öppnat."""
+    hp, ht, pct = _hist_pass_count(spec['hist_values'], interval)
+    row_values = []
+    pass_rows = []
+    if frame_rows is not None and len(frame_rows) <= 30000:
+        for r in frame_rows:
+            try:
+                val = _spec_value(r, spec)
+                row_values.append(val)
+                if in_range(val, interval):
+                    pass_rows.append(r)
+            except Exception:
+                pass
+
+    st.markdown("<div style='border:1px solid rgba(120,120,120,.28); border-radius:12px; padding:10px 12px; margin:.35rem 0 .7rem 0; background:rgba(128,128,128,.045);'>", unsafe_allow_html=True)
+    st.markdown(f"**ℹ️ {spec['name']} — statistik**")
+    if spec.get('help'):
+        st.caption(spec.get('help'))
+    a, b, c, d = st.columns(4)
+    a.metric("Rekommenderat", _display_interval(spec['default_interval'], spec['decimals']))
+    b.metric("Nu valt", _display_interval(interval, spec['decimals']))
+    c.metric("Historisk träff", f"{hp}/{ht}", f"{pct:.1f}%")
+    if row_values:
+        d.metric("Grundram → filter", f"{len(frame_rows):,} → {len(pass_rows):,}".replace(',', ' '), f"-{(100 - 100*len(pass_rows)/max(1,len(frame_rows))):.1f}%")
+    else:
+        d.metric("Grundram → filter", "—")
+
+    freq_df = _make_freq_df(spec['hist_values'], spec['decimals'])
+    left, right = st.columns([1.05, 1])
+    with left:
+        st.markdown("**Frekvenstabell, 30 liknande omgångar**")
+        st.dataframe(freq_df, use_container_width=True, hide_index=True, height=230)
+    with right:
+        st.markdown("**Fördelning**")
+        if not freq_df.empty:
+            st.bar_chart(freq_df.set_index('Intervall/Värde')['Antal'])
+        if pass_rows:
+            with st.expander("Teckenfördelning efter detta filter", expanded=False):
+                st.dataframe(build_sign_distribution_df(pass_rows, frame, antal_matcher), use_container_width=True, hide_index=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 # Init state
 for k, v in {
     'v12_analysis_ready': False,
@@ -2585,7 +2628,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                             st.session_state[range_key] = val
                     except Exception:
                         st.session_state[range_key] = val
-                c1, c2, c3 = st.columns([1.45, 1.05, 3.2])
+                c1, c2, c3, c4 = st.columns([1.35, 1.0, 3.0, 0.45])
                 with c1:
                     st.markdown(f"**{spec['name']}**")
                     hp, ht, pct = _hist_pass_count(spec['hist_values'], spec['default_interval'])
@@ -2606,9 +2649,13 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                         rng = st.slider("Intervall", lo_i, hi_i, val_i, step=1, key=range_key, label_visibility="collapsed")
                     else:
                         rng = st.slider("Intervall", float(lo), float(hi), (float(val[0]), float(val[1])), step=step, key=range_key, label_visibility="collapsed")
+                with c4:
+                    if st.button("ℹ️", key=f"filter_info_btn_{k}", help="Visa frekvenstabell och reducering för detta filter"):
+                        current_open = st.session_state.get('v12_open_filter_info')
+                        st.session_state['v12_open_filter_info'] = None if current_open == k else k
                 settings[k] = {'mode': mode, 'interval': rng}
-                if spec.get('help'):
-                    st.caption(spec['help'])
+                if st.session_state.get('v12_open_filter_info') == k:
+                    _render_inline_filter_info(spec, rng, frame_rows, frame, antal_matcher)
                 st.divider()
     st.markdown("---")
     st.markdown("**Gruppkrav**")
@@ -2645,42 +2692,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     with st.expander("📋 Filteröversikt", expanded=False):
         st.dataframe(_build_filter_summary_df(specs, settings, group_reqs, rows=frame_rows), use_container_width=True, hide_index=True)
 
-    st.markdown("### 🔎 Filterinfo / frekvenstabell")
-    info_name = st.selectbox("Välj filter att granska", [s['name'] for s in specs], key="v12_info_filter")
-    info_spec = next(s for s in specs if s['name'] == info_name)
-    info_interval = settings[info_spec['key']]['interval']
-    hp, ht, pct = _hist_pass_count(info_spec['hist_values'], info_interval)
-    row_values = []
-    pass_rows = []
-    if len(frame_rows) <= 30000:
-        for r in frame_rows:
-            try:
-                val = _spec_value(r, info_spec)
-                row_values.append(val)
-                if in_range(val, info_interval):
-                    pass_rows.append(r)
-            except Exception:
-                pass
-    cinfo1, cinfo2, cinfo3, cinfo4 = st.columns(4)
-    cinfo1.metric("Nu valt", _display_interval(info_interval, info_spec['decimals']))
-    cinfo2.metric("Historisk träff", f"{hp}/{ht}", f"{pct:.1f}%")
-    if row_values:
-        cinfo3.metric("Grundram → filter", f"{len(frame_rows):,} → {len(pass_rows):,}".replace(',', ' '))
-        cinfo4.metric("Reducerar ensamt", f"{(100 - 100*len(pass_rows)/max(1,len(frame_rows))):.1f}%")
-    else:
-        cinfo3.metric("Grundram → filter", "—")
-        cinfo4.metric("Reducerar ensamt", "—")
-    freq_df = _make_freq_df(info_spec['hist_values'], info_spec['decimals'])
-    cc1, cc2 = st.columns([1.05, 1])
-    with cc1:
-        st.dataframe(freq_df, use_container_width=True, hide_index=True)
-    with cc2:
-        if not freq_df.empty:
-            st.bar_chart(freq_df.set_index('Intervall/Värde')['Antal'])
-    if pass_rows:
-        with st.expander("Teckenfördelning efter detta filter"):
-            st.dataframe(build_sign_distribution_df(pass_rows, frame, antal_matcher), use_container_width=True, hide_index=True)
-
+    # Filterinfo visas nu direkt under respektive filter via ℹ️-knappen.
     st.markdown("</div>", unsafe_allow_html=True)
 
     # Step 4 – run filters + TipsetMatrix
