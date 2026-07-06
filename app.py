@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0e – Info per filter"
+APP_VERSION = "v12.0f – Frekvenstabell fix"
 
 
 st.markdown("""
@@ -2097,21 +2097,73 @@ def _spec_pass(row, spec, interval=None):
 
 
 def _make_freq_df(values, decimals=0):
-    vals = pd.Series([v for v in values if not pd.isna(v)])
+    """Bygger en frekvenstabell som alltid är numeriskt sorterad.
+
+    Tidigare användes strängar som index i diagrammet. Då kunde negativa tal
+    visas i lexikografisk ordning, t.ex. -13 före -83. Tabellen returnerar
+    därför även en intern numerisk sorteringskolumn.
+    """
+    clean_vals = []
+    for v in values:
+        if pd.isna(v):
+            continue
+        try:
+            clean_vals.append(float(v))
+        except Exception:
+            continue
+    vals = pd.Series(clean_vals, dtype='float64')
     if vals.empty:
-        return pd.DataFrame({'Intervall/Värde': [], 'Antal': []})
-    unique_count = vals.nunique()
-    if decimals == 0 and unique_count <= 30:
-        vc = vals.astype(int).value_counts().sort_index()
-        return pd.DataFrame({'Intervall/Värde': [str(i) for i in vc.index], 'Antal': vc.values})
-    bins = min(8, max(3, unique_count))
+        return pd.DataFrame({'Intervall/Värde': [], 'Antal': [], 'Andel': [], '_sort': []})
+
+    total = max(1, len(vals))
+    unique_count = int(vals.nunique())
+
+    # Exakta värden när det är få historiska observationer, vilket det oftast är
+    # för 30 liknande omgångar. Detta gör tabellen lätt att läsa.
+    if unique_count <= 30:
+        rounded = vals.round(decimals)
+        if decimals == 0:
+            rounded = rounded.astype(int)
+        vc = rounded.value_counts().reset_index()
+        vc.columns = ['_value', 'Antal']
+        vc = vc.sort_values('_value', ascending=True).reset_index(drop=True)
+        def fmt_value(x):
+            try:
+                if decimals == 0:
+                    return str(int(x))
+                return f"{float(x):.{decimals}f}"
+            except Exception:
+                return str(x)
+        vc['Intervall/Värde'] = vc['_value'].map(fmt_value)
+        vc['_sort'] = vc['_value'].astype(float)
+        vc['Andel'] = vc['Antal'].map(lambda n: f"{100*n/total:.1f}%")
+        return vc[['Intervall/Värde', 'Antal', 'Andel', '_sort']]
+
+    # Om det skulle finnas fler värden än 30 grupperas de i numeriskt sorterade intervall.
+    bins = min(10, max(5, int(np.sqrt(unique_count))))
     try:
         cats = pd.cut(vals, bins=bins, include_lowest=True)
-        vc = cats.value_counts().sort_index()
-        return pd.DataFrame({'Intervall/Värde': [str(x) for x in vc.index], 'Antal': vc.values})
+        vc = cats.value_counts().sort_index().reset_index()
+        vc.columns = ['_bin', 'Antal']
+        def fmt_bin(iv):
+            left = float(iv.left); right = float(iv.right)
+            if decimals == 0:
+                return f"{int(np.floor(left))} – {int(np.ceil(right))}"
+            return f"{left:.{decimals}f} – {right:.{decimals}f}"
+        vc['Intervall/Värde'] = vc['_bin'].map(fmt_bin)
+        vc['_sort'] = vc['_bin'].map(lambda iv: float(iv.left))
+        vc['Andel'] = vc['Antal'].map(lambda n: f"{100*n/total:.1f}%")
+        vc = vc.sort_values('_sort', ascending=True).reset_index(drop=True)
+        return vc[['Intervall/Värde', 'Antal', 'Andel', '_sort']]
     except Exception:
-        vc = vals.round(decimals).value_counts().sort_index()
-        return pd.DataFrame({'Intervall/Värde': [str(i) for i in vc.index], 'Antal': vc.values})
+        rounded = vals.round(decimals)
+        vc = rounded.value_counts().reset_index()
+        vc.columns = ['_value', 'Antal']
+        vc = vc.sort_values('_value', ascending=True).reset_index(drop=True)
+        vc['Intervall/Värde'] = vc['_value'].astype(str)
+        vc['_sort'] = vc['_value'].astype(float)
+        vc['Andel'] = vc['Antal'].map(lambda n: f"{100*n/total:.1f}%")
+        return vc[['Intervall/Värde', 'Antal', 'Andel', '_sort']]
 
 
 def _top_sequences_from_fat(fat_strings, length=2, top_n=5):
@@ -2443,11 +2495,21 @@ def _render_inline_filter_info(spec, interval, frame_rows, frame, antal_matcher)
     left, right = st.columns([1.05, 1])
     with left:
         st.markdown("**Frekvenstabell, 30 liknande omgångar**")
-        st.dataframe(freq_df, use_container_width=True, hide_index=True, height=230)
+        if not freq_df.empty:
+            table_df = freq_df.drop(columns=['_sort'], errors='ignore')
+            st.dataframe(table_df, use_container_width=True, hide_index=True, height=230)
+            st.caption("Sorterad från lägsta till högsta värde. Andel avser de 30 liknande omgångarna.")
+        else:
+            st.info("Ingen frekvensdata hittades för detta filter.")
     with right:
         st.markdown("**Fördelning**")
         if not freq_df.empty:
-            st.bar_chart(freq_df.set_index('Intervall/Värde')['Antal'])
+            plot_df = freq_df.sort_values('_sort', ascending=True).copy()
+            chart_df = plot_df.rename(columns={'Intervall/Värde': 'Värde / intervall'})[['Värde / intervall', 'Antal']]
+            try:
+                st.bar_chart(chart_df, x='Värde / intervall', y='Antal', use_container_width=True)
+            except Exception:
+                st.bar_chart(chart_df.set_index('Värde / intervall')['Antal'])
         if pass_rows:
             with st.expander("Teckenfördelning efter detta filter", expanded=False):
                 st.dataframe(build_sign_distribution_df(pass_rows, frame, antal_matcher), use_container_width=True, hide_index=True)
