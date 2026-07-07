@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0w – Flera värdekandidater i paketmotorn"
+APP_VERSION = "v12.0x – Synkad samlad träff för paket"
 
 
 st.markdown("""
@@ -2448,8 +2448,94 @@ def _apply_manual_filters(rows, specs, settings, group_reqs):
 
 
 def _hist_package_passes(v_m, specs, settings, group_reqs):
-    rows = list(v_m['Correct_Row'])
-    return len(_apply_manual_filters(rows, specs, settings, group_reqs)), len(rows)
+    """Samlad historisk träff för aktiva filter.
+
+    Viktigt: detta ska räknas på samma historiska filtervärden som används i
+    frekvenstabellerna och i rekommenderade paket. Vissa filter beror på
+    veckans procentvektor i sin getter, t.ex. AI-Rank/Delta/Poängfilter. Om vi
+    kör getter direkt på historiska rättsrader med veckans filter_vec blir
+    samlad träff fel och kan visa t.ex. 9/30 fast paketmotorn räknade 22/30.
+
+    Därför räknar denna funktion med spec['hist_values'][i] för varje av de
+    liknande historiska omgångarna. Det gör Filtercentralens samlade träff och
+    paketmotorns träff jämförbara.
+    """
+    try:
+        htot = int(max([len(s.get('hist_values', [])) for s in specs] + [len(v_m)]))
+    except Exception:
+        htot = len(v_m)
+    if htot <= 0:
+        return 0, 0
+
+    forced_specs = []
+    group_specs = {f'Grupp {i}': [] for i in range(1, 7)}
+    for spec in specs:
+        mode = settings.get(spec.get('key'), {}).get('mode', 'Av')
+        if mode == 'Tvingat':
+            forced_specs.append(spec)
+        elif mode in group_specs:
+            group_specs[mode].append(spec)
+
+    def hist_value_pass(spec, idx):
+        vals = spec.get('hist_values', []) or []
+        if idx >= len(vals):
+            return False
+        interval = settings.get(spec.get('key'), {}).get('interval', spec.get('default_interval'))
+        return in_range(vals[idx], interval)
+
+    passed = 0
+    for i in range(htot):
+        ok = True
+        for spec in forced_specs:
+            if not hist_value_pass(spec, i):
+                ok = False
+                break
+        if not ok:
+            continue
+        for gname, gs in group_specs.items():
+            if not gs:
+                continue
+            req = int(group_reqs.get(gname, 0) or 0)
+            if req <= 0:
+                continue
+            hits = 0
+            for spec in gs:
+                if hist_value_pass(spec, i):
+                    hits += 1
+            if hits < req:
+                ok = False
+                break
+        if ok:
+            passed += 1
+    return int(passed), int(htot)
+
+
+def _settings_package_signature(settings):
+    """Stabil signatur för att se om valt paket fortfarande ligger aktivt."""
+    sig = []
+    for k, v in sorted((settings or {}).items()):
+        mode = v.get('mode', 'Av')
+        if mode == 'Av':
+            continue
+        interval = v.get('interval')
+        try:
+            iv = (round(float(interval[0]), 6), round(float(interval[1]), 6))
+        except Exception:
+            iv = tuple(interval) if isinstance(interval, (list, tuple)) else interval
+        sig.append((k, mode, iv))
+    return tuple(sig)
+
+
+def _package_signature(package):
+    sig = []
+    for c in package.get('filters', []) or []:
+        interval = c.get('interval')
+        try:
+            iv = (round(float(interval[0]), 6), round(float(interval[1]), 6))
+        except Exception:
+            iv = tuple(interval) if isinstance(interval, (list, tuple)) else interval
+        sig.append((c.get('key'), 'Tvingat', iv))
+    return tuple(sorted(sig))
 
 
 
@@ -3255,6 +3341,16 @@ def _apply_recommended_package_to_session(package, specs, filter_hist_target_pct
     for i in range(1, 7):
         st.session_state[f'group_req_{i}'] = 0
 
+    # Spara vad paketmotorn räknade, så vi kan verifiera att Filtercentralen
+    # visar samma samlade historiska träff efter applicering.
+    st.session_state['v12_applied_package_meta'] = {
+        'hist_hit': int(package.get('hist_hit', 0)),
+        'hist_total': int(package.get('hist_total', 0)),
+        'frame_after': int(package.get('frame_after', 0)),
+        'num_filters': int(package.get('num_filters', len(package.get('filters', []) or []))),
+        'signature': _package_signature(package),
+    }
+
 
 
 # Init state
@@ -3655,6 +3751,19 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     m2.metric("Tvingade", forced_count)
     m3.metric("Gruppfilter", group_count)
     m4.metric("Samlad historikträff", f"{hpkg}/{htot}")
+
+    applied_meta = st.session_state.get('v12_applied_package_meta')
+    if applied_meta and active_count:
+        current_sig = _settings_package_signature(settings)
+        if current_sig == applied_meta.get('signature'):
+            pkg_txt = f"{int(applied_meta.get('hist_hit', 0))}/{int(applied_meta.get('hist_total', 0))}"
+            cur_txt = f"{hpkg}/{htot}"
+            if int(applied_meta.get('hist_hit', -1)) == int(hpkg) and int(applied_meta.get('hist_total', -1)) == int(htot):
+                st.success(f"Paketkontroll OK: paketet och aktiv filtercentral visar samma samlade träff ({cur_txt}).")
+            else:
+                st.error(f"Paketkontroll mismatch: paketet räknades som {pkg_txt}, men aktiv filtercentral visar {cur_txt}.")
+        else:
+            st.caption("Filtercentralen har ändrats efter att paketet applicerades; paketkontrollen är därför inte längre aktiv.")
 
     if active_count and hpkg <= max(3, int(0.25 * max(1, htot))):
         st.warning("Samlad historikträff är mycket låg. Det betyder oftast att för många filter är Tvingade samtidigt. Lägg över närliggande filter i Grupp eller bredda intervallen.")
