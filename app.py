@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0x – Synkad samlad träff för paket"
+APP_VERSION = "v12.0y – Hårda grupppaket"
 
 
 st.markdown("""
@@ -2534,7 +2534,10 @@ def _package_signature(package):
             iv = (round(float(interval[0]), 6), round(float(interval[1]), 6))
         except Exception:
             iv = tuple(interval) if isinstance(interval, (list, tuple)) else interval
-        sig.append((c.get('key'), 'Tvingat', iv))
+        mode = c.get('package_mode', 'Tvingat')
+        sig.append((c.get('key'), mode, iv))
+    for g in package.get('groups', []) or []:
+        sig.append((g.get('name'), 'REQ', int(g.get('req', 0)), int(g.get('n', 0))))
     return tuple(sorted(sig))
 
 
@@ -2999,6 +3002,246 @@ def _pareto_reduce_packages(packages):
     return dedup
 
 
+
+
+def _pick_best_variant_per_filter_for_group(candidates, category_filter, target, htot, min_hist_floor=None, max_items=10):
+    """Väljer en rimlig kandidatvariant per filter för en hård grupp.
+
+    Grupppaket ska inte bara ta den aggressivaste varianten. Därför balanseras
+    historisk träff och reducering. För gruppfilter tillåts lägre individuell
+    träff än målträffen eftersom gruppkravet (t.ex. 5 av 7) skyddar helheten.
+    """
+    if min_hist_floor is None:
+        min_hist_floor = max(1, min(htot, int(target) - 6))
+    by_key = {}
+    for c in candidates:
+        if not category_filter(c):
+            continue
+        if int(c.get('hist_hit', 0)) < int(min_hist_floor):
+            continue
+        # Undvik extremt svaga filter i gruppkärnan. De får hellre användas manuellt.
+        if float(c.get('red_pct', 0.0)) <= 0.05:
+            continue
+        cur = by_key.get(c.get('key'))
+        # Gruppscore: historisk säkerhet först, sedan reducering. Det hindrar att
+        # t.ex. AI-Rank 3/30 väljs bara för att den reducerar brutalt.
+        score = (
+            min(int(c.get('hist_hit', 0)), int(target) + 3),
+            float(c.get('hist_pct', 0.0)),
+            float(c.get('red_pct', 0.0)),
+            -int(c.get('frame_keep', 10**9)),
+        )
+        if cur is None or score > cur[0]:
+            by_key[c.get('key')] = (score, c)
+    picked = [v[1] for v in by_key.values()]
+    # Sortera för att få med de starkaste komponenterna först, men behåll flera värdefilter.
+    picked.sort(key=lambda c: (float(c.get('hist_pct',0.0))*0.60 + float(c.get('red_pct',0.0))*0.40, int(c.get('hist_hit',0))), reverse=True)
+    return picked[:int(max_items)]
+
+
+def _best_hard_group_from_candidates(group_label, group_no, group_candidates, cur_hist, cur_frame, target, frame_rows, frame, antal_matcher, min_members=3):
+    """Testar hårda gruppkrav, t.ex. 5 av 7, och returnerar bästa gruppblock.
+
+    Gruppen måste hålla samlad historikträff efter att kombineras med redan valt paket.
+    Den väljer hårdaste gruppkrav som ger bra reducering utan att förstöra träffbilden.
+    """
+    group_candidates = list(group_candidates or [])
+    if len(group_candidates) < int(min_members):
+        return None
+    htot = len(cur_hist); ftot = len(cur_frame)
+    cur_frame_count = int(cur_frame.sum())
+    if cur_frame_count <= 0:
+        return None
+    hist_stack = np.vstack([c['hist_mask'] for c in group_candidates]).astype(int)
+    frame_stack = np.vstack([c['frame_mask'] for c in group_candidates]).astype(int)
+    hist_scores = hist_stack.sum(axis=0)
+    frame_scores = frame_stack.sum(axis=0)
+    n = len(group_candidates)
+    # Hårda grupper: börja högt. En grupp på 8 filter testar t.ex. 8/8, 7/8, 6/8, 5/8.
+    min_req = max(1, int(np.ceil(n * 0.58)))
+    best = None
+    best_score = None
+    for req in range(n, min_req - 1, -1):
+        g_hist_mask = hist_scores >= req
+        g_frame_mask = frame_scores >= req
+        new_hist = cur_hist & g_hist_mask
+        hist_hit = int(new_hist.sum())
+        if hist_hit < int(target):
+            continue
+        new_frame = cur_frame & g_frame_mask
+        new_count = int(new_frame.sum())
+        if new_count >= cur_frame_count:
+            continue
+        test_rows = _rows_from_mask(frame_rows, new_frame)
+        if selected_signs_missing(test_rows, frame, antal_matcher):
+            continue
+        red_pct = 100.0 * (cur_frame_count - new_count) / max(1, cur_frame_count)
+        # Poäng: håll gruppen hård, men prioritera faktisk reducering och träff.
+        req_ratio = req / max(1, n)
+        score = (hist_hit, red_pct, req_ratio, -new_count, req)
+        if best is None or score > best_score:
+            best = {
+                'group_label': group_label,
+                'group_no': int(group_no),
+                'req': int(req),
+                'n': int(n),
+                'candidates': group_candidates,
+                'hist_mask': g_hist_mask,
+                'frame_mask': g_frame_mask,
+                'hist_hit': hist_hit,
+                'frame_after': new_count,
+                'step_red_pct': red_pct,
+            }
+            best_score = score
+    return best
+
+
+def _build_grouped_package_for_target(candidates, target, frame_rows, frame, antal_matcher, max_filters=18, min_value_filters=3):
+    """Bygger ett paket med hårda grupper i stället för att tvinga varje filter.
+
+    Målet är: fler viktiga filter, särskilt värde-/poängfilter, men med hårda gruppkrav
+    så träffbilden inte rasar lika hårt som när allt är tvingat.
+    """
+    if not candidates:
+        return None
+    htot = len(candidates[0]['hist_mask'])
+    ftot = len(candidates[0]['frame_mask'])
+    cur_hist = np.ones(htot, dtype=bool)
+    cur_frame = np.ones(ftot, dtype=bool)
+    groups = []
+    steps = []
+    used_keys = set()
+
+    # 1) Värde-/poängkärna. Detta är obligatoriskt om min_value_filters > 0.
+    value_cands = _pick_best_variant_per_filter_for_group(
+        candidates,
+        lambda c: str(c.get('category','')) == 'Värde & svårighet',
+        target,
+        htot,
+        min_hist_floor=max(1, int(target) - 6),
+        max_items=max(int(min_value_filters), min(9, int(max_filters))),
+    )
+    if int(min_value_filters) > 0 and len(value_cands) < int(min_value_filters):
+        return None
+    if value_cands:
+        # Använd minst min_value_filters, men gärna fler om de är rimliga.
+        n_val = min(len(value_cands), max(int(min_value_filters), min(8, int(max_filters))))
+        block = _best_hard_group_from_candidates('Värde-/poänggrupp', 1, value_cands[:n_val], cur_hist, cur_frame, target, frame_rows, frame, antal_matcher, min_members=max(2, int(min_value_filters)))
+        if block is None:
+            return None if int(min_value_filters) > 0 else None
+        cur_hist = cur_hist & block['hist_mask']
+        cur_frame = cur_frame & block['frame_mask']
+        groups.append(block)
+        used_keys.update(c['key'] for c in block['candidates'])
+        steps.append({
+            'Steg': 'Grupp',
+            'Filter/Grupp': block['group_label'],
+            'Kategori': 'Värde & svårighet',
+            'Intervall': f"minst {block['req']} av {block['n']}",
+            'Intervallträff': f"{block['hist_hit']}/{htot}",
+            'Testnivå': 'hård grupp',
+            'Stegreducering': f"{block['step_red_pct']:.1f}%",
+            'Efter filter': int(block['frame_after']),
+            'Samlad träff efter steg': f"{int(cur_hist.sum())}/{htot}",
+        })
+
+    # 2) Komplettera med FAT/Favorit/Struktur som hårda grupper, om de faktiskt förbättrar.
+    family_defs = [
+        ('FAT-/sekvensgrupp', 2, lambda c: str(c.get('category','')) in {'FAT', 'FAT-sekvenser'}, 3, 7),
+        ('Favorit-/skrällgrupp', 3, lambda c: str(c.get('category','')) == 'Favorit & skräll', 2, 6),
+        ('Strukturgrupp', 4, lambda c: str(c.get('category','')) == 'Struktur', 3, 8),
+    ]
+    while sum(len(g['candidates']) for g in groups) < int(max_filters):
+        best_block = None
+        best_score = None
+        for label, gno, pred, min_members, max_items in family_defs:
+            if any(g.get('group_no') == gno for g in groups):
+                continue
+            fam_cands = [c for c in _pick_best_variant_per_filter_for_group(
+                candidates,
+                lambda c, pred=pred: pred(c) and c.get('key') not in used_keys,
+                target,
+                htot,
+                min_hist_floor=max(1, int(target) - 8),
+                max_items=max_items,
+            ) if c.get('key') not in used_keys]
+            if len(fam_cands) < min_members:
+                continue
+            block = _best_hard_group_from_candidates(label, gno, fam_cands, cur_hist, cur_frame, target, frame_rows, frame, antal_matcher, min_members=min_members)
+            if block is None:
+                continue
+            score = (block['step_red_pct'], block['hist_hit'], -block['frame_after'], block['req'] / max(1, block['n']))
+            if best_block is None or score > best_score:
+                best_block = block
+                best_score = score
+        if best_block is None:
+            break
+        # Kräv att kompletterande grupper ger åtminstone tydlig extra effekt.
+        if best_block['step_red_pct'] < 2.0:
+            break
+        cur_hist = cur_hist & best_block['hist_mask']
+        cur_frame = cur_frame & best_block['frame_mask']
+        groups.append(best_block)
+        used_keys.update(c['key'] for c in best_block['candidates'])
+        steps.append({
+            'Steg': 'Grupp',
+            'Filter/Grupp': best_block['group_label'],
+            'Kategori': 'Gruppfilter',
+            'Intervall': f"minst {best_block['req']} av {best_block['n']}",
+            'Intervallträff': f"{best_block['hist_hit']}/{htot}",
+            'Testnivå': 'hård grupp',
+            'Stegreducering': f"{best_block['step_red_pct']:.1f}%",
+            'Efter filter': int(best_block['frame_after']),
+            'Samlad träff efter steg': f"{int(cur_hist.sum())}/{htot}",
+        })
+
+    if not groups:
+        return None
+    final_hit = int(cur_hist.sum())
+    final_keep = int(cur_frame.sum())
+    if final_hit < int(target) or final_keep >= ftot:
+        return None
+
+    filters = []
+    group_meta = []
+    for g in groups:
+        gname = f"Grupp {int(g['group_no'])}"
+        group_meta.append({
+            'name': gname,
+            'label': g['group_label'],
+            'req': int(g['req']),
+            'n': int(g['n']),
+        })
+        for c in g['candidates']:
+            c2 = dict(c)
+            c2['package_mode'] = gname
+            c2['package_group_label'] = g['group_label']
+            c2['package_group_req'] = int(g['req'])
+            c2['package_group_n'] = int(g['n'])
+            filters.append(c2)
+
+    value_filters = sum(1 for c in filters if str(c.get('category','')) == 'Värde & svårighet')
+    fat_filters = sum(1 for c in filters if str(c.get('category','')) in {'FAT', 'FAT-sekvenser'})
+    structure_filters = sum(1 for c in filters if str(c.get('category','')) == 'Struktur')
+    return {
+        'target': int(target),
+        'target_label': f"minst {int(target)}/{htot}",
+        'hist_hit': final_hit,
+        'hist_total': htot,
+        'frame_start': ftot,
+        'frame_after': final_keep,
+        'reduction_pct': 100.0 - 100.0 * final_keep / max(1, ftot),
+        'num_filters': len(filters),
+        'filters': filters,
+        'steps': steps,
+        'groups': group_meta,
+        'package_type': 'Hårda grupper',
+        'min_value_filters': int(min_value_filters),
+        'value_filters': int(value_filters),
+        'fat_filters': int(fat_filters),
+        'structure_filters': int(structure_filters),
+    }
+
 def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14, min_hit_count=15, frame_adapt=True, min_value_filters=3):
     """Bygger Pareto-rekommenderade filterpaket.
 
@@ -3193,6 +3436,23 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             'structure_filters': int(structure_filters),
         })
 
+    # Testa även hårda grupppaket. De bygger på samma kandidatvarianter men
+    # använder t.ex. 6 av 8 i stället för att tvinga alla 8. Det kan ge fler
+    # värde-/poängfilter utan att samlad historikträff faller lika hårt.
+    group_packages = []
+    for target in hit_levels:
+        try:
+            gp = _build_grouped_package_for_target(
+                candidates, int(target), frame_rows, frame, antal_matcher,
+                max_filters=int(max_filters),
+                min_value_filters=int(min_value_filters),
+            )
+            if gp is not None:
+                group_packages.append(gp)
+        except Exception:
+            pass
+    packages.extend(group_packages)
+
     final_packages = _pareto_reduce_packages(packages)
 
     # Kandidatanalys: visa att alla filter faktiskt testades, även om de inte hamnade
@@ -3281,13 +3541,18 @@ def _top_playable_packages(packages, n=3):
 def _recommended_packages_summary_df(packages):
     rows = []
     for i, p in enumerate(packages, 1):
+        group_txt = ''
+        if p.get('groups'):
+            group_txt = ' | '.join([f"{g.get('name')}: {g.get('req')}/{g.get('n')}" for g in p.get('groups', [])])
         rows.append({
             'Paket': f"P{i}",
+            'Typ': p.get('package_type', 'Tvingade filter'),
             'Samlad träff': f"{p['hist_hit']}/{p['hist_total']}",
             'Träff %': f"{100.0 * p['hist_hit'] / max(1, p['hist_total']):.1f}%",
             'Grundram → filter': f"{p['frame_start']:,} → {p['frame_after']:,}".replace(',', ' '),
             'Reducerar': f"{p['reduction_pct']:.1f}%",
-            'Tvingade filter': int(p['num_filters']),
+            'Filter': int(p['num_filters']),
+            'Gruppkrav': group_txt or '—',
             'Värde-/poängfilter': int(p.get('value_filters', 0)),
             'FAT/sekvens': int(p.get('fat_filters', 0)),
             'Struktur': int(p.get('structure_filters', 0)),
@@ -3320,7 +3585,7 @@ def _hidden_packages_reference_df(packages, max_after_rows, max_rows=8):
             'Samlad träff': f"{p['hist_hit']}/{p['hist_total']}",
             'Grundram → filter': f"{p['frame_start']:,} → {p['frame_after']:,}".replace(',', ' '),
             'Reducerar': f"{p['reduction_pct']:.1f}%",
-            'Tvingade filter': int(p.get('num_filters', 0)),
+            'Filter': int(p.get('num_filters', 0)),
             'Orsak': f"Över radgränsen {int(max_after_rows):,}".replace(',', ' '),
         })
     return pd.DataFrame(rows)
@@ -3331,15 +3596,24 @@ def _apply_recommended_package_to_session(package, specs, filter_hist_target_pct
     chosen_by_key = {c['key']: c for c in package.get('filters', [])}
     for spec in specs:
         k = spec['key']
-        st.session_state[f'filter_mode_{k}'] = 'Tvingat' if k in chosen_keys else 'Av'
         range_key = f'filter_range_{k}_h{int(filter_hist_target_pct)}_tf{int(top_fav_count)}'
         if k in chosen_by_key:
-            st.session_state[range_key] = chosen_by_key[k]['interval']
+            chosen = chosen_by_key[k]
+            st.session_state[f'filter_mode_{k}'] = chosen.get('package_mode', 'Tvingat')
+            st.session_state[range_key] = chosen['interval']
         else:
+            st.session_state[f'filter_mode_{k}'] = 'Av'
             # Låt avstängda filter ligga på rekommenderat intervall för tydlighet.
             st.session_state[range_key] = spec.get('default_interval')
     for i in range(1, 7):
         st.session_state[f'group_req_{i}'] = 0
+    for g in package.get('groups', []) or []:
+        try:
+            gi = int(str(g.get('name','Grupp 0')).split()[-1])
+            if 1 <= gi <= 6:
+                st.session_state[f'group_req_{gi}'] = int(g.get('req', 0))
+        except Exception:
+            pass
 
     # Spara vad paketmotorn räknade, så vi kan verifiera att Filtercentralen
     # visar samma samlade historiska träff efter applicering.
@@ -3532,7 +3806,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     st.caption("När du ändrar minsta historiska träff får varje filter nya slider-nycklar och startar på sitt rekommenderade intervall. 100% ska därför ge startintervall med 30/30 där det är möjligt.")
 
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
-        st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn ignorerar den manuella intervallslidern, testar flera intervallnivåer per filter, bygger först en värde-/poängkärna enligt din kvot och räknar historisk träff på filtervärdena från de 30 liknande omgångarna. Struktur/FAT-sekvensfilter kan grundramsanpassas så de inte pressar mot ramens ytterkanter.")
+        st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn ignorerar den manuella intervallslidern, testar flera intervallnivåer per filter och kan nu bygga hårda grupper, t.ex. 6 av 8, i stället för att tvinga alla filter. Det gör att fler värde-/poängfilter kan användas utan att samlad träffbild rasar lika snabbt. Struktur/FAT-sekvensfilter kan grundramsanpassas så de inte pressar mot ramens ytterkanter.")
         rp_c1, rp_c2, rp_c3, rp_c4, rp_c5, rp_c6, rp_c7 = st.columns([1, 1, 1, 1, 1, 1, 1])
         with rp_c1:
             rec_min_step = st.number_input(
@@ -3630,7 +3904,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             if not selectable_packages:
                 sel_pkg = None
             else:
-                labels = [f"{p['hist_hit']}/{p['hist_total']} · {p['frame_start']:,}→{p['frame_after']:,} · {p['reduction_pct']:.1f}% · {p['num_filters']} filter · {p.get('value_filters',0)} värde".replace(',', ' ') for p in selectable_packages]
+                labels = [f"{p['hist_hit']}/{p['hist_total']} · {p['frame_start']:,}→{p['frame_after']:,} · {p['reduction_pct']:.1f}% · {p['num_filters']} filter · {p.get('value_filters',0)} värde · {p.get('package_type','Tvingat')}".replace(',', ' ') for p in selectable_packages]
                 pick_idx = st.selectbox("Välj toppaket att använda", list(range(len(selectable_packages))), format_func=lambda i: labels[i], key="v12_recommended_pick")
                 sel_pkg = selectable_packages[int(pick_idx)]
             if sel_pkg is not None:
