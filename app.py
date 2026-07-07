@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0z – Obligatoriska filter i paket"
+APP_VERSION = "v12.0å – Obligatorisk kärna + bästa över gräns"
 
 
 st.markdown("""
@@ -3308,7 +3308,7 @@ def _build_grouped_package_for_target(candidates, target, frame_rows, frame, ant
         'structure_filters': int(structure_filters),
     }
 
-def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14, min_hit_count=15, frame_adapt=True, min_value_filters=3, required_keys=None):
+def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14, min_hit_count=15, frame_adapt=True, min_value_filters=3, required_keys=None, target_frame_after=None):
     """Bygger Pareto-rekommenderade filterpaket.
 
     Viktigt från v12.0n:
@@ -3326,6 +3326,10 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
     if htot == 0 or ftot == 0:
         return []
     required_keys = set(required_keys or [])
+    try:
+        target_frame_after = int(target_frame_after) if target_frame_after is not None else None
+    except Exception:
+        target_frame_after = None
     min_hit_count = int(max(0, min(htot, min_hit_count)))
     min_value_filters = int(max(0, min(12, min_value_filters)))
     if hit_levels is None:
@@ -3393,6 +3397,57 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
         used_keys = set()
         steps = []
 
+        # Obligatoriska filter ska fungera som startkärna, inte som passiv efterkontroll.
+        # För varje kryssat filter försöker vi lägga in den bredaste/säkraste variant
+        # som fortfarande håller målträffen och teckenskyddet. Därefter får motorn
+        # fylla på med kompletterande filter tills paketet blir spelbart eller stoppas
+        # av historik/teckenskydd.
+        forced_failed = False
+        for req_key in list(required_keys):
+            if req_key in used_keys:
+                continue
+            req_cands = [c for c in candidates if c.get('key') == req_key and int(c.get('hist_hit', 0)) >= int(target)]
+            req_cands.sort(key=lambda c: (int(c.get('hist_hit', 0)), float(c.get('hist_pct', 0.0)), float(c.get('red_pct', 0.0)), -int(c.get('frame_keep', 10**9))), reverse=True)
+            best_req = None
+            best_req_score = None
+            cur_frame_count = int(cur_frame.sum())
+            for cand in req_cands:
+                new_hist = cur_hist & cand['hist_mask']
+                hist_hit = int(new_hist.sum())
+                if hist_hit < int(target):
+                    continue
+                new_frame = cur_frame & cand['frame_mask']
+                new_frame_count = int(new_frame.sum())
+                if new_frame_count >= cur_frame_count:
+                    continue
+                test_rows = _rows_from_mask(frame_rows, new_frame)
+                if selected_signs_missing(test_rows, frame, antal_matcher):
+                    continue
+                step_red_pct = 100.0 * (cur_frame_count - new_frame_count) / max(1, cur_frame_count)
+                # För obligatorisk kärna prioriteras historisk säkerhet först.
+                score = (hist_hit, cand['hist_hit'], step_red_pct, -new_frame_count)
+                if best_req is None or score > best_req_score:
+                    best_req = (cand, new_hist, new_frame, hist_hit, new_frame_count, step_red_pct)
+                    best_req_score = score
+            if best_req is None:
+                forced_failed = True
+                break
+            cand, cur_hist, cur_frame, hist_hit, new_frame_count, step_red_pct = best_req
+            chosen.append(cand)
+            used_keys.add(cand['key'])
+            steps.append({
+                'Filter': cand['name'],
+                'Kategori': cand['category'],
+                'Intervall': cand['interval_txt'],
+                'Intervallträff': f"{cand['hist_hit']}/{htot}",
+                'Testnivå': f"{cand['coverage']:.0f}% · måste ingå",
+                'Stegreducering': f"{step_red_pct:.1f}%",
+                'Efter filter': int(new_frame_count),
+                'Samlad träff efter steg': f"{hist_hit}/{htot}",
+            })
+        if forced_failed:
+            continue
+
         while len(chosen) < int(max_filters):
             best = None
             best_score = None
@@ -3429,6 +3484,12 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 min_step_for_cand = float(min_step_reduction_pct)
                 if need_value and is_value and int(min_value_filters) > 0:
                     min_step_for_cand = min(min_step_for_cand, 0.5)
+                # Om användaren har valt obligatoriska filter och paketet fortfarande
+                # ligger över radgränsen, fortsätt leta mer aggressivt efter små men
+                # verkliga kompletteringar. Annars kan motorn fastna med ett enda
+                # dolt paket över gränsen.
+                if required_keys and target_frame_after is not None and cur_frame_count > int(target_frame_after):
+                    min_step_for_cand = min(min_step_for_cand, 0.20)
                 if step_red_pct < min_step_for_cand:
                     continue
 
@@ -3946,6 +4007,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     frame_adapt=bool(rec_frame_adapt),
                     min_value_filters=int(rec_min_value_filters),
                     required_keys=required_keys_now,
+                    target_frame_after=int(rec_display_max_rows),
                 )
                 if isinstance(rec_result, tuple):
                     packages, candidate_audit = rec_result
@@ -3983,7 +4045,13 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                         st.dataframe(_recommended_packages_summary_df(rest_packages), use_container_width=True, hide_index=True)
             else:
                 top_packages = []
-                st.warning("Inga paket hamnade under vald radgräns. Höj gränsen eller låt paketmotorn söka mer aggressivt.")
+                st.warning("Inga paket hamnade under vald radgräns. Visar därför bästa paketet över gränsen som referens så att listan inte blir tom.")
+                if hidden_packages:
+                    best_over = _top_playable_packages(hidden_packages, 1)
+                    if best_over:
+                        st.markdown("**Bästa paket över radgränsen**")
+                        st.dataframe(_recommended_packages_summary_df(best_over), use_container_width=True, hide_index=True)
+                        st.caption("Detta paket klarar dina krav bäst men lämnar fler rader än vald gräns. Höj radgränsen eller kryssa i fler/lämpligare filter om du vill pressa vidare.")
             if hidden_packages:
                 with st.expander("Visa bästa dolda paket över radgränsen", expanded=False):
                     hidden_ref = _hidden_packages_reference_df(packages, rec_display_max_rows)
@@ -3995,7 +4063,9 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 with st.expander('Visa kandidatanalys – alla filter som paketmotorn testade', expanded=False):
                     st.caption('Här kan du se om t.ex. Poängfilter faktiskt testades. Om det inte valdes beror det normalt på att ett annat filter gav bättre Pareto-paket eller att det överlappade med redan valda filter.')
                     st.dataframe(candidate_audit, use_container_width=True, hide_index=True)
-            selectable_packages = _top_playable_packages(visible_packages, 3) if visible_packages else []
+            selectable_packages = _top_playable_packages(visible_packages, 3) if visible_packages else _top_playable_packages(hidden_packages, 1)
+            if not visible_packages and selectable_packages:
+                st.info("Du kan använda bästa paketet över radgränsen, men filtermassan blir bredare än din valda gräns.")
             if not selectable_packages:
                 sel_pkg = None
             else:
