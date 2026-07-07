@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0r – Grundramsanpassade paketfilter"
+APP_VERSION = "v12.0s – FAT-ramfilter & rättningsmodul"
 
 
 st.markdown("""
@@ -2454,6 +2454,130 @@ def _hist_package_passes(v_m, specs, settings, group_reqs):
 
 
 
+
+
+def _hit_distribution_rows(label, rows, result_row, antal_matcher):
+    """Räknar antal rader med 13/12/11/10-rätt-liknande nivåer.
+
+    För 13 matcher visas exakt 13, 12, 11, 10 och Under 10.
+    För andra spelformer visas antal_matcher, -1, -2, -3 och under.
+    """
+    result_row = normalize_single_row_text(result_row)
+    clean_rows = [normalize_single_row_text(r) for r in (rows or []) if len(normalize_single_row_text(r)) == int(antal_matcher)]
+    total = len(clean_rows)
+    if not result_row or len(result_row) != int(antal_matcher):
+        return []
+    levels = [int(antal_matcher), int(antal_matcher)-1, int(antal_matcher)-2, int(antal_matcher)-3]
+    levels = [x for x in levels if x >= 0]
+    counts = {lvl: 0 for lvl in levels}
+    under = 0
+    floor = levels[-1] if levels else 0
+    for r in clean_rows:
+        hit = sum(1 for a, b in zip(result_row, r) if a == b)
+        if hit in counts:
+            counts[hit] += 1
+        elif hit < floor:
+            under += 1
+    out = []
+    for lvl in levels:
+        n = counts.get(lvl, 0)
+        out.append({
+            'Steg': label,
+            'Rätt': f'{lvl} rätt',
+            'Antal': int(n),
+            'Andel': f'{100*n/max(1,total):.2f}%' if total else '0.00%',
+        })
+    out.append({
+        'Steg': label,
+        'Rätt': f'Under {floor} rätt',
+        'Antal': int(under),
+        'Andel': f'{100*under/max(1,total):.2f}%' if total else '0.00%',
+    })
+    return out
+
+
+def build_correction_hit_distribution_df(result_row, base_rows, filtered_rows, reduced_rows, antal_matcher):
+    rows = []
+    rows += _hit_distribution_rows('Grundram', base_rows, result_row, antal_matcher)
+    rows += _hit_distribution_rows('Efter filter', filtered_rows, result_row, antal_matcher)
+    if reduced_rows:
+        rows += _hit_distribution_rows('Efter TipsetMatrix', reduced_rows, result_row, antal_matcher)
+    return pd.DataFrame(rows)
+
+
+def _format_filter_value(v, decimals=0):
+    try:
+        if int(decimals) == 0:
+            return str(int(round(float(v))))
+        return f"{float(v):.{int(decimals)}f}"
+    except Exception:
+        return str(v)
+
+
+def build_filter_correction_df(result_row, specs, settings, group_reqs):
+    """Visar vilka aktiva filter facitraden träffar/missar."""
+    result_row = normalize_single_row_text(result_row)
+    rows = []
+    for spec in specs:
+        setting = settings.get(spec.get('key'), {})
+        mode = setting.get('mode', 'Av')
+        if mode == 'Av':
+            continue
+        interval = setting.get('interval', spec.get('default_interval'))
+        try:
+            val = _spec_value(result_row, spec)
+            ok = bool(_spec_pass(result_row, spec, interval))
+            val_txt = _format_filter_value(val, spec.get('decimals', 0))
+        except Exception as e:
+            ok = False
+            val_txt = 'kunde inte räknas'
+        hp, ht, pct = _hist_pass_count(spec.get('hist_values', []), interval)
+        rows.append({
+            'Status': '✅ Träff' if ok else '❌ Miss',
+            'Läge': mode,
+            'Kategori': spec.get('category', ''),
+            'Filter': spec.get('name', ''),
+            'Facitvärde': val_txt,
+            'Intervall/regler': _display_interval(interval, spec.get('decimals', 0)),
+            'Historisk träff med intervallet': f'{hp}/{ht}',
+        })
+    return pd.DataFrame(rows)
+
+
+def build_group_correction_df(result_row, specs, settings, group_reqs):
+    """Summerar gruppfilter: hur många filter i gruppen facitraden klarar mot gruppkravet."""
+    result_row = normalize_single_row_text(result_row)
+    out = []
+    for gi in range(1, 7):
+        gname = f'Grupp {gi}'
+        group_specs = [s for s in specs if settings.get(s.get('key'), {}).get('mode') == gname]
+        if not group_specs:
+            continue
+        req = int(group_reqs.get(gname, 0) or 0)
+        hits = 0
+        miss_names = []
+        for spec in group_specs:
+            interval = settings.get(spec.get('key'), {}).get('interval', spec.get('default_interval'))
+            try:
+                ok = bool(_spec_pass(result_row, spec, interval))
+            except Exception:
+                ok = False
+            if ok:
+                hits += 1
+            else:
+                miss_names.append(spec.get('name', ''))
+        active_req = req if req > 0 else 0
+        ok_group = True if active_req <= 0 else hits >= active_req
+        out.append({
+            'Grupp': gname,
+            'Krav': f'minst {active_req} av {len(group_specs)}' if active_req else '0 = påverkar inte',
+            'Facit träffar': f'{hits}/{len(group_specs)}',
+            'Status': '✅ Träff' if ok_group else '❌ Miss',
+            'Missade filter': ', '.join(miss_names[:8]) + (' …' if len(miss_names) > 8 else ''),
+        })
+    return pd.DataFrame(out)
+
+
 def _forced_quality_rows(specs, settings, rows=None, min_hit_pct=90.0, min_reduction_pct=5.0):
     """Returnerar kvalitetsrad per tvingat filter.
 
@@ -2658,7 +2782,7 @@ def _frame_capacity_pressure(spec, interval, frame, frame_rows, antal_matcher):
         # Används bara om filtret ligger väldigt nära övre/nedre kanten av de
         # faktiska värden som kan uppstå i den sparade grundramen.
         category = str(spec.get('category', ''))
-        if category not in {'Struktur', 'FAT', 'Favorit & skräll'}:
+        if category not in {'Struktur', 'FAT', 'FAT-sekvenser', 'Favorit & skräll'}:
             return False, ''
         dec = int(spec.get('decimals', 0))
         if dec != 0:
@@ -2678,6 +2802,18 @@ def _frame_capacity_pressure(spec, interval, frame, frame_rows, antal_matcher):
         span = max(1.0, vmax - vmin)
         lower_pressure = max(0.0, (low - vmin) / span)
         upper_pressure = max(0.0, (vmax - high) / span)
+
+        # FAT-sekvenser behöver samma typ av ramkoll som teckenbalans.
+        # Om spelarens ram bara ger få möjliga sekvensträffar ska paketmotorn
+        # inte välja ett intervall som pressar mot ytterkanten, t.ex. 4–5 av 5,
+        # bara för att det historiskt ser starkt ut.
+        if category == 'FAT-sekvenser':
+            if lower_pressure >= 0.60:
+                return True, f"Grundramsanpassning: {name} {int(low)}–{int(high)} kräver hög FAT-sekvensträff relativt din ram ({vmin:.0f}–{vmax:.0f} möjliga i grundramen)."
+            if upper_pressure >= 0.80:
+                return True, f"Grundramsanpassning: {name} {int(low)}–{int(high)} tillåter för låg FAT-sekvensträff relativt din ram ({vmin:.0f}–{vmax:.0f} möjliga i grundramen)."
+            return False, ''
+
         # Blockera bara extrema ytterkantsfilter. Vanliga intervall får passera.
         if lower_pressure >= 0.72:
             return True, f"Grundramsanpassning: {name} ligger högt i grundramens möjliga värden ({vmin:.0f}–{vmax:.0f})."
@@ -3223,7 +3359,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 "Anpassa mot grundram",
                 value=True,
                 key="v12_rec_frame_adapt",
-                help="Undviker paketfilter som ligger för nära grundramens yttergränser, t.ex. Tecken 1 = 5–8 när din ram bara har 8 möjliga ettor.",
+                help="Undviker paketfilter som ligger för nära grundramens yttergränser, t.ex. Tecken 1 = 5–8 när din ram bara har 8 möjliga ettor eller FAT-sekvenser som kräver nästan maxträff mot din ram.",
             )
         with rp_c6:
             build_recs = st.button("Beräkna paket", use_container_width=True, key="v12_build_recommended_packages")
@@ -3471,6 +3607,57 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 st.dataframe(build_sign_distribution_df(filtered_rows, frame, antal_matcher), use_container_width=True, hide_index=True)
             if filtered_rows:
                 tm_download_button("⬇️ Ladda ner filtrerade rader TXT", rows_to_submission_text(filtered_rows, spelform, antal_matcher), f"{submission_file_stem(spelform)}_v12_filtrerade.txt", "text/plain", use_container_width=True)
+
+        st.markdown("---")
+        st.markdown("### 🧾 Rättningsmodul")
+        st.caption("Skriv in rätt rad manuellt. Rättningen använder senast körda grundram, filtermassa och TipsetMatrix-rader — den kör inte om filter eller reducering.")
+        with st.form("v12_correction_form", clear_on_submit=False):
+            corr_txt = st.text_input("Rätt rad", value=st.session_state.get('v12_correction_input', ''), placeholder="Exempel: 1X2X1122X... eller 1,X,2,X,...")
+            corr_submit = st.form_submit_button("Rätta system")
+        if corr_submit:
+            rr, err = parse_result_row(corr_txt, antal_matcher)
+            if err:
+                st.error(err)
+                st.session_state['v12_correction_row'] = ''
+            else:
+                st.session_state['v12_correction_input'] = corr_txt
+                st.session_state['v12_correction_row'] = rr
+        corr_row = st.session_state.get('v12_correction_row')
+        if corr_row:
+            base_rows_for_corr = frame_rows
+            filtered_rows_for_corr = filtered_rows
+            reduced_rows_for_corr = reduced_rows
+            corr = build_facit_check(corr_row, frame, base_rows_for_corr, filtered_rows_for_corr, reduced_rows_for_corr, antal_matcher)
+            cA, cB, cC, cD, cE = st.columns(5)
+            cA.metric("I grundram", yes_no(corr.get('I grundram')))
+            cB.metric("Efter filter", yes_no(corr.get('Efter filter')))
+            cC.metric("Efter TipsetMatrix", yes_no(corr.get('Efter TipsetMatrix')) if reduced_rows_for_corr else "Ej körd")
+            cD.metric("Bästa rätt", corr.get('Bästa rätt efter TipsetMatrix', 0) if reduced_rows_for_corr else "—")
+            cE.metric("12+", yes_no(corr.get('12+ uppnått')) if reduced_rows_for_corr else "—")
+
+            st.markdown("**Antal rader med 13/12/11/10 rätt**")
+            dist_df = build_correction_hit_distribution_df(corr_row, base_rows_for_corr, filtered_rows_for_corr, reduced_rows_for_corr, antal_matcher)
+            st.dataframe(dist_df, use_container_width=True, hide_index=True)
+
+            if reduced_rows_for_corr and corr.get('Närmaste reducerade rader'):
+                with st.expander("Visa närmaste reducerade rader", expanded=False):
+                    nearest_df = pd.DataFrame({
+                        'Rad': corr.get('Närmaste reducerade rader'),
+                        'Rätt': [sum(1 for a, b in zip(corr_row, r) if a == b) for r in corr.get('Närmaste reducerade rader')],
+                    })
+                    st.dataframe(nearest_df, use_container_width=True, hide_index=True)
+
+            st.markdown("**Filterträff/miss på rätt rad**")
+            filter_corr_df = build_filter_correction_df(corr_row, specs, res.get('settings', settings), res.get('group_reqs', group_reqs))
+            if filter_corr_df.empty:
+                st.info("Inga aktiva filter att rätta mot.")
+            else:
+                st.dataframe(filter_corr_df, use_container_width=True, hide_index=True)
+
+            group_corr_df = build_group_correction_df(corr_row, specs, res.get('settings', settings), res.get('group_reqs', group_reqs))
+            if not group_corr_df.empty:
+                st.markdown("**Gruppträffar**")
+                st.dataframe(group_corr_df, use_container_width=True, hide_index=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 else:
