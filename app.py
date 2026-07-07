@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0s – FAT-ramfilter & rättningsmodul"
+APP_VERSION = "v12.0t – Topp 3 paket & värdefilterkvot"
 
 
 st.markdown("""
@@ -2901,7 +2901,7 @@ def _pareto_reduce_packages(packages):
     return dedup
 
 
-def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14, min_hit_count=15, frame_adapt=True):
+def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14, min_hit_count=15, frame_adapt=True, min_value_filters=3):
     """Bygger Pareto-rekommenderade filterpaket.
 
     Viktigt från v12.0n:
@@ -2917,6 +2917,7 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
     if htot == 0 or ftot == 0:
         return []
     min_hit_count = int(max(0, min(htot, min_hit_count)))
+    min_value_filters = int(max(0, min(12, min_value_filters)))
     if hit_levels is None:
         # Gå hela vägen ner till vald lägstanivå, standard 15/30 när htot=30.
         hit_levels = list(range(htot, min_hit_count - 1, -1))
@@ -2981,6 +2982,10 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             cur_frame_count = int(cur_frame.sum())
             if cur_frame_count <= 0:
                 break
+            value_count_now = sum(1 for c in chosen if str(c.get('category', '')) == 'Värde & svårighet')
+            need_value = value_count_now < int(min_value_filters)
+            eligible_value_exists = False
+            eligible_items = []
             for cand in candidates:
                 if cand['key'] in used_keys:
                     continue
@@ -3001,8 +3006,20 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 test_rows = _rows_from_mask(frame_rows, new_frame)
                 if selected_signs_missing(test_rows, frame, antal_matcher):
                     continue
-                # Score: faktisk ny reducering är viktigast. Vid lika väljs högre hist och lägre kvarmassa.
-                score = (cur_frame_count - new_frame_count, hist_hit, cand['hist_hit'], -new_frame_count, cand['red_pct'])
+                is_value = str(cand.get('category', '')) == 'Värde & svårighet'
+                if is_value:
+                    eligible_value_exists = True
+                eligible_items.append((cand, new_hist, new_frame, hist_hit, new_frame_count, step_red_pct, is_value))
+
+            # För rekommenderade paket vill vi inte få paket som bara är struktur/FAT.
+            # Så länge det finns värde-/poängfilter som klarar kraven prioriteras de tills kvoten är fylld.
+            if need_value and eligible_value_exists:
+                eligible_items = [x for x in eligible_items if x[-1]]
+
+            for cand, new_hist, new_frame, hist_hit, new_frame_count, step_red_pct, is_value in eligible_items:
+                # Score: faktisk ny reducering är viktigast. Värdefilter får bara prioritet medan kvoten saknas.
+                value_bonus = 1 if (need_value and is_value) else 0
+                score = (value_bonus, cur_frame_count - new_frame_count, hist_hit, cand['hist_hit'], -new_frame_count, cand['red_pct'])
                 if best is None or score > best_score:
                     best = (cand, new_hist, new_frame, hist_hit, new_frame_count, step_red_pct)
                     best_score = score
@@ -3024,6 +3041,9 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
 
         final_hit = int(cur_hist.sum())
         final_keep = int(cur_frame.sum())
+        value_filters = sum(1 for c in chosen if str(c.get('category', '')) == 'Värde & svårighet')
+        fat_filters = sum(1 for c in chosen if str(c.get('category', '')) in {'FAT', 'FAT-sekvenser'})
+        structure_filters = sum(1 for c in chosen if str(c.get('category', '')) == 'Struktur')
         packages.append({
             'target': int(target),
             'target_label': f"minst {int(target)}/{htot}",
@@ -3038,6 +3058,10 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             'min_step_reduction_pct': min_step_reduction_pct,
             'min_hit_count': min_hit_count,
             'frame_adapt': bool(frame_adapt),
+            'min_value_filters': int(min_value_filters),
+            'value_filters': int(value_filters),
+            'fat_filters': int(fat_filters),
+            'structure_filters': int(structure_filters),
         })
 
     final_packages = _pareto_reduce_packages(packages)
@@ -3096,6 +3120,26 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
     audit_df = pd.DataFrame(audit_rows)
     return final_packages, audit_df
 
+
+def _package_value_score(p):
+    """Spelvärdespoäng för rekommenderade paket.
+
+    Poängen används bara för att välja de 3 mest intressanta paketen i listan:
+    hög samlad historisk träff OCH hög reducering. Värde-/poängfilter får en liten bonus
+    eftersom de bättre styr utdelningsprofilen än rena strukturfilter.
+    """
+    try:
+        hit_pct = 100.0 * float(p.get('hist_hit', 0)) / max(1.0, float(p.get('hist_total', 1)))
+        red_pct = float(p.get('reduction_pct', 0.0))
+        value_bonus = min(8.0, 1.5 * float(p.get('value_filters', 0)))
+        return (hit_pct * red_pct) + value_bonus
+    except Exception:
+        return 0.0
+
+def _top_playable_packages(packages, n=3):
+    pkgs = [p for p in (packages or []) if int(p.get('num_filters', 0)) > 0]
+    return sorted(pkgs, key=lambda p: (_package_value_score(p), int(p.get('hist_hit', 0)), -int(p.get('frame_after', 10**12))), reverse=True)[:int(n)]
+
 def _recommended_packages_summary_df(packages):
     rows = []
     for i, p in enumerate(packages, 1):
@@ -3106,6 +3150,10 @@ def _recommended_packages_summary_df(packages):
             'Grundram → filter': f"{p['frame_start']:,} → {p['frame_after']:,}".replace(',', ' '),
             'Reducerar': f"{p['reduction_pct']:.1f}%",
             'Tvingade filter': int(p['num_filters']),
+            'Värde-/poängfilter': int(p.get('value_filters', 0)),
+            'FAT/sekvens': int(p.get('fat_filters', 0)),
+            'Struktur': int(p.get('structure_filters', 0)),
+            'Spelvärde': f"{_package_value_score(p):.0f}",
             'Sökmål': p.get('target_label', ''),
         })
     return pd.DataFrame(rows)
@@ -3337,7 +3385,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
 
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
         st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn ignorerar den manuella intervallslidern, testar flera intervallnivåer per filter och kan grundramsanpassa strukturfilter så de inte pressar mot ramens ytterkanter.")
-        rp_c1, rp_c2, rp_c3, rp_c4, rp_c5, rp_c6 = st.columns([1, 1, 1, 1, 1, 1])
+        rp_c1, rp_c2, rp_c3, rp_c4, rp_c5, rp_c6, rp_c7 = st.columns([1, 1, 1, 1, 1, 1, 1])
         with rp_c1:
             rec_min_step = st.number_input(
                 "Minsta extra reducering",
@@ -3362,6 +3410,16 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 help="Undviker paketfilter som ligger för nära grundramens yttergränser, t.ex. Tecken 1 = 5–8 när din ram bara har 8 möjliga ettor eller FAT-sekvenser som kräver nästan maxträff mot din ram.",
             )
         with rp_c6:
+            rec_min_value_filters = st.number_input(
+                "Min värde-/poängfilter",
+                min_value=0,
+                max_value=10,
+                value=3,
+                step=1,
+                key="v12_rec_min_value_filters",
+                help="Rekommenderade paket bör bygga på utdelnings-/svårighetsprofilen. Standard kräver minst 3 filter från Värde & svårighet om det finns kandidater som klarar kraven.",
+            )
+        with rp_c7:
             build_recs = st.button("Beräkna paket", use_container_width=True, key="v12_build_recommended_packages")
         if build_recs:
             with st.spinner("Beräknar Pareto-paket på exakt grundram..."):
@@ -3371,6 +3429,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     max_filters=int(rec_max_filters),
                     min_hit_count=int(rec_min_hit),
                     frame_adapt=bool(rec_frame_adapt),
+                    min_value_filters=int(rec_min_value_filters),
                 )
                 if isinstance(rec_result, tuple):
                     packages, candidate_audit = rec_result
@@ -3388,6 +3447,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 'min_hit': int(rec_min_hit),
                 'display_max_rows': int(rec_display_max_rows),
                 'frame_adapt': bool(rec_frame_adapt),
+                'min_value_filters': int(rec_min_value_filters),
             }
         packages = st.session_state.get('v12_recommended_packages') or []
         rec_display_max_rows = int(st.session_state.get('v12_rec_display_max_rows', 5000))
@@ -3396,8 +3456,16 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         if packages:
             st.caption(f"Visar bara paket där filtermassan är högst {rec_display_max_rows:,} rader. {len(hidden_packages)} paket är dolda över gränsen.".replace(',', ' '))
             if visible_packages:
-                st.dataframe(_recommended_packages_summary_df(visible_packages), use_container_width=True, hide_index=True)
+                top_packages = _top_playable_packages(visible_packages, 3)
+                st.markdown("**3 mest spelvärda paket**")
+                st.caption("Sorterat på kombinationen samlad historisk träff + faktisk reducering. Paket med fler värde-/poängfilter får en liten bonus eftersom de styr utdelningsprofilen bättre.")
+                st.dataframe(_recommended_packages_summary_df(top_packages), use_container_width=True, hide_index=True)
+                rest_packages = [p for p in visible_packages if p not in top_packages]
+                if rest_packages:
+                    with st.expander("Visa övriga spelbara paket under radgränsen", expanded=False):
+                        st.dataframe(_recommended_packages_summary_df(rest_packages), use_container_width=True, hide_index=True)
             else:
+                top_packages = []
                 st.warning("Inga paket hamnade under vald radgräns. Höj gränsen eller låt paketmotorn söka mer aggressivt.")
             if hidden_packages:
                 with st.expander("Visa bästa dolda paket över radgränsen", expanded=False):
@@ -3410,12 +3478,13 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 with st.expander('Visa kandidatanalys – alla filter som paketmotorn testade', expanded=False):
                     st.caption('Här kan du se om t.ex. Poängfilter faktiskt testades. Om det inte valdes beror det normalt på att ett annat filter gav bättre Pareto-paket eller att det överlappade med redan valda filter.')
                     st.dataframe(candidate_audit, use_container_width=True, hide_index=True)
-            if not visible_packages:
+            selectable_packages = _top_playable_packages(visible_packages, 3) if visible_packages else []
+            if not selectable_packages:
                 sel_pkg = None
             else:
-                labels = [f"{p['hist_hit']}/{p['hist_total']} · {p['frame_start']:,}→{p['frame_after']:,} · {p['reduction_pct']:.1f}% · {p['num_filters']} filter".replace(',', ' ') for p in visible_packages]
-                pick_idx = st.selectbox("Välj paket att använda", list(range(len(visible_packages))), format_func=lambda i: labels[i], key="v12_recommended_pick")
-                sel_pkg = visible_packages[int(pick_idx)]
+                labels = [f"{p['hist_hit']}/{p['hist_total']} · {p['frame_start']:,}→{p['frame_after']:,} · {p['reduction_pct']:.1f}% · {p['num_filters']} filter · {p.get('value_filters',0)} värde".replace(',', ' ') for p in selectable_packages]
+                pick_idx = st.selectbox("Välj toppaket att använda", list(range(len(selectable_packages))), format_func=lambda i: labels[i], key="v12_recommended_pick")
+                sel_pkg = selectable_packages[int(pick_idx)]
             if sel_pkg is not None:
                 with st.expander("Visa filter och intervall i valt paket", expanded=False):
                     if sel_pkg.get('steps'):
