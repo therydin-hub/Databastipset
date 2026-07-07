@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0u – Hård värdefilterspärr & FAT-ramlogik"
+APP_VERSION = "v12.0v – Värdekärna i paketmotorn"
 
 
 st.markdown("""
@@ -3013,12 +3013,23 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 if new_frame_count >= cur_frame_count:
                     continue
                 step_red_pct = 100.0 * (cur_frame_count - new_frame_count) / max(1, cur_frame_count)
-                if step_red_pct < min_step_reduction_pct:
+                is_value = str(cand.get('category', '')) == 'Värde & svårighet'
+
+                # Värde-/poängfilter ska kunna bilda en värdekärna.
+                # Om användaren kräver minst t.ex. 3 värdefilter men varje filter måste ge 5%
+                # NY marginalreducering, kan motorn fastna efter första värdefiltret eftersom
+                # många värdefilter överlappar varandra. Därför gäller normal stegreducering
+                # för FAT/struktur/övriga filter, men värdefilter som behövs för kvoten får
+                # läggas till om de ger mätbar reducering och håller samlad historisk träff.
+                min_step_for_cand = float(min_step_reduction_pct)
+                if need_value and is_value and int(min_value_filters) > 0:
+                    min_step_for_cand = min(min_step_for_cand, 0.5)
+                if step_red_pct < min_step_for_cand:
                     continue
+
                 test_rows = _rows_from_mask(frame_rows, new_frame)
                 if selected_signs_missing(test_rows, frame, antal_matcher):
                     continue
-                is_value = str(cand.get('category', '')) == 'Värde & svårighet'
                 if is_value:
                     eligible_value_exists = True
                 eligible_items.append((cand, new_hist, new_frame, hist_hit, new_frame_count, step_red_pct, is_value))
@@ -3403,7 +3414,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     st.caption("När du ändrar minsta historiska träff får varje filter nya slider-nycklar och startar på sitt rekommenderade intervall. 100% ska därför ge startintervall med 30/30 där det är möjligt.")
 
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
-        st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn ignorerar den manuella intervallslidern, testar flera intervallnivåer per filter och kan grundramsanpassa strukturfilter så de inte pressar mot ramens ytterkanter.")
+        st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn ignorerar den manuella intervallslidern, testar flera intervallnivåer per filter, bygger först en värde-/poängkärna enligt din kvot och kan grundramsanpassa struktur/FAT-sekvensfilter så de inte pressar mot ramens ytterkanter.")
         rp_c1, rp_c2, rp_c3, rp_c4, rp_c5, rp_c6, rp_c7 = st.columns([1, 1, 1, 1, 1, 1, 1])
         with rp_c1:
             rec_min_step = st.number_input(
@@ -3413,7 +3424,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 value=5.0,
                 step=0.5,
                 key="v12_rec_min_step",
-                help="Ett nytt filter måste minska kvarvarande rader med minst denna procent för att få läggas till i ett rekommenderat paket.",
+                help="Gäller främst efter att värdekärnan är byggd. Värde-/poängfilter som behövs för kvoten får läggas till med lägre marginalkrav om de håller samlad träff.",
             )
         with rp_c2:
             rec_max_filters = st.number_input("Max filter i paket", min_value=1, max_value=40, value=18, step=1, key="v12_rec_max_filters")
@@ -3516,7 +3527,14 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     st.success("Paketet har lagts in i filtercentralen.")
                     st.rerun()
         else:
-            st.info("Inga rekommenderade paket beräknade ännu.")
+            candidate_audit = st.session_state.get('v12_recommended_candidate_audit')
+            if st.session_state.get('v12_recommended_meta'):
+                st.warning("Paketmotorn körde men hittade inga paket som klarade alla spärrar. Testa att höja radgränsen, sänka Min värde-/poängfilter eller sänka Minsta extra reducering.")
+                if isinstance(candidate_audit, pd.DataFrame) and not candidate_audit.empty:
+                    with st.expander('Visa kandidatanalys – varför inga paket visades', expanded=True):
+                        st.dataframe(candidate_audit, use_container_width=True, hide_index=True)
+            else:
+                st.info("Inga rekommenderade paket beräknade ännu.")
 
     mode_options = ['Av', 'Tvingat'] + [f'Grupp {i}' for i in range(1, 7)]
     cats = []
