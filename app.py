@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0p – Kandidatanalys poängfilter"
+APP_VERSION = "v12.0r – Grundramsanpassade paketfilter"
 
 
 st.markdown("""
@@ -2617,6 +2617,76 @@ def _rows_from_mask(rows, mask):
         return []
 
 
+
+def _frame_capacity_pressure(spec, interval, frame, frame_rows, antal_matcher):
+    """Bedömer om ett paketfilter är för hårt relativt den manuella grundramen.
+
+    Problemet vi skyddar mot: historiken kan gilla t.ex. Tecken 1 = 5–8,
+    men om spelarens grundram bara har 8 möjliga ettor totalt blir filtret
+    väldigt toppstyrt. Då kan paketmotorn välja något som är historiskt starkt
+    men opraktiskt/obalanserat i just veckans manuella ram.
+
+    Returnerar (blockera: bool, varningstext: str).
+    Detta påverkar bara rekommenderade paket; manuella filterval är fortfarande fria.
+    """
+    try:
+        name = str(spec.get('name', ''))
+        low = float(interval[0]); high = float(interval[1])
+        if not frame:
+            return False, ''
+
+        # Direkt kapacitetskontroll för teckenbalans 1/X/2.
+        sign = None
+        if name == 'Tecken 1': sign = '1'
+        elif name == 'Tecken X': sign = 'X'
+        elif name == 'Tecken 2': sign = '2'
+        if sign is not None:
+            norm_frame = [normalize_signs(x) for x in frame]
+            min_possible = sum(1 for signs in norm_frame if len(signs) == 1 and sign in signs)
+            max_possible = sum(1 for signs in norm_frame if sign in signs)
+            span = max(1, max_possible - min_possible)
+            lower_pressure = max(0.0, (low - min_possible) / span)
+            upper_pressure = max(0.0, (max_possible - high) / span)
+            # Vid få möjliga tecken är intervall nära ytterkant extra farliga.
+            if max_possible <= 9 and lower_pressure >= 0.38:
+                return True, f"Grundramsanpassning: {name} {int(low)}–{int(high)} kräver för många {sign} relativt din ram ({min_possible}–{max_possible} möjliga)."
+            if max_possible <= 9 and upper_pressure >= 0.45:
+                return True, f"Grundramsanpassning: {name} {int(low)}–{int(high)} tillåter för få {sign} relativt din ram ({min_possible}–{max_possible} möjliga)."
+            return False, ''
+
+        # Mjukare generell kontroll för diskreta struktur-/kapacitetsfilter.
+        # Används bara om filtret ligger väldigt nära övre/nedre kanten av de
+        # faktiska värden som kan uppstå i den sparade grundramen.
+        category = str(spec.get('category', ''))
+        if category not in {'Struktur', 'FAT', 'Favorit & skräll'}:
+            return False, ''
+        dec = int(spec.get('decimals', 0))
+        if dec != 0:
+            return False, ''
+        if not frame_rows:
+            return False, ''
+        vals = []
+        getter = spec.get('getter')
+        for r in frame_rows[:30000]:
+            try:
+                vals.append(float(getter(r)))
+            except Exception:
+                pass
+        if len(vals) < 10:
+            return False, ''
+        vmin = min(vals); vmax = max(vals)
+        span = max(1.0, vmax - vmin)
+        lower_pressure = max(0.0, (low - vmin) / span)
+        upper_pressure = max(0.0, (vmax - high) / span)
+        # Blockera bara extrema ytterkantsfilter. Vanliga intervall får passera.
+        if lower_pressure >= 0.72:
+            return True, f"Grundramsanpassning: {name} ligger högt i grundramens möjliga värden ({vmin:.0f}–{vmax:.0f})."
+        if upper_pressure >= 0.72:
+            return True, f"Grundramsanpassning: {name} ligger lågt i grundramens möjliga värden ({vmin:.0f}–{vmax:.0f})."
+    except Exception:
+        return False, ''
+    return False, ''
+
 def _candidate_intervals_for_spec(spec, coverages=None):
     """Skapar flera intervallvarianter för ett filter utan att skapa dubbletter i UI.
 
@@ -2695,7 +2765,7 @@ def _pareto_reduce_packages(packages):
     return dedup
 
 
-def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14, min_hit_count=15):
+def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14, min_hit_count=15, frame_adapt=True):
     """Bygger Pareto-rekommenderade filterpaket.
 
     Viktigt från v12.0n:
@@ -2719,10 +2789,21 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
     # Bygg kandidatvarianter. Flera intervall per filter testas, men högst en variant
     # av samma filter får väljas i ett paket.
     candidates = []
+    rejected_by_frame_adapt = []
     coverage_grid = [100, 97, 95, 93, 90, 87, 85, 80, 75, 70, 65, 60, 55, 50]
     for spec in specs:
         for iv in _candidate_intervals_for_spec(spec, coverage_grid):
             interval = iv['interval']
+            if frame_adapt:
+                block, reason = _frame_capacity_pressure(spec, interval, frame, frame_rows, antal_matcher)
+                if block:
+                    rejected_by_frame_adapt.append({
+                        'Kategori': spec.get('category', ''),
+                        'Filter': spec.get('name', ''),
+                        'Intervall': iv.get('interval_txt', _display_interval(interval, spec.get('decimals', 0))),
+                        'Orsak': reason,
+                    })
+                    continue
             try:
                 hist_mask = np.array([_spec_pass(r, spec, interval) for r in hist_rows], dtype=bool)
                 frame_mask = np.array([_spec_pass(r, spec, interval) for r in frame_rows], dtype=bool)
@@ -2820,6 +2901,7 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             'steps': steps,
             'min_step_reduction_pct': min_step_reduction_pct,
             'min_hit_count': min_hit_count,
+            'frame_adapt': bool(frame_adapt),
         })
 
     final_packages = _pareto_reduce_packages(packages)
@@ -2841,6 +2923,11 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
         key = spec.get('key')
         cand_list = candidates_by_key.get(key, [])
         if not cand_list:
+            frame_reasons = [r.get('Orsak', '') for r in rejected_by_frame_adapt if r.get('Filter') == spec.get('name')]
+            if frame_reasons:
+                comment = 'Blockerat av grundramsanpassning. Exempel: ' + frame_reasons[0]
+            else:
+                comment = 'Ingen kandidat gav reducering på grundramen eller kunde inte testas.'
             audit_rows.append({
                 'Kategori': spec.get('category', ''),
                 'Filter': spec.get('name', ''),
@@ -2848,7 +2935,7 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 'Bästa individuell träff': '-',
                 'Reducerar ensam': '-',
                 'Valt i paket': 'Nej',
-                'Kommentar': 'Ingen kandidat gav reducering på grundramen eller kunde inte testas.',
+                'Kommentar': comment,
             })
             continue
 
@@ -2884,6 +2971,35 @@ def _recommended_packages_summary_df(packages):
             'Reducerar': f"{p['reduction_pct']:.1f}%",
             'Tvingade filter': int(p['num_filters']),
             'Sökmål': p.get('target_label', ''),
+        })
+    return pd.DataFrame(rows)
+
+
+def _hidden_packages_reference_df(packages, max_after_rows, max_rows=8):
+    """Visar bästa dolda paket över radgränsen som referens.
+
+    Ett paket över radgränsen är ofta för brett för spel, men det är ändå
+    användbart att se att säkrare paket fanns och varför de inte visas i
+    huvudlistan.
+    """
+    hidden = [p for p in (packages or []) if int(p.get('frame_after', 10**12)) > int(max_after_rows)]
+    if not hidden:
+        return pd.DataFrame()
+    # Behåll bästa/lägsta radantal per samlad träffnivå.
+    best_by_hit = {}
+    for p in hidden:
+        h = int(p.get('hist_hit', 0))
+        cur = best_by_hit.get(h)
+        if cur is None or int(p.get('frame_after', 10**12)) < int(cur.get('frame_after', 10**12)):
+            best_by_hit[h] = p
+    rows = []
+    for p in sorted(best_by_hit.values(), key=lambda x: (-int(x.get('hist_hit', 0)), int(x.get('frame_after', 10**12))))[:int(max_rows)]:
+        rows.append({
+            'Samlad träff': f"{p['hist_hit']}/{p['hist_total']}",
+            'Grundram → filter': f"{p['frame_start']:,} → {p['frame_after']:,}".replace(',', ' '),
+            'Reducerar': f"{p['reduction_pct']:.1f}%",
+            'Tvingade filter': int(p.get('num_filters', 0)),
+            'Orsak': f"Över radgränsen {int(max_after_rows):,}".replace(',', ' '),
         })
     return pd.DataFrame(rows)
 
@@ -3084,8 +3200,8 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     st.caption("När du ändrar minsta historiska träff får varje filter nya slider-nycklar och startar på sitt rekommenderade intervall. 100% ska därför ge startintervall med 30/30 där det är möjligt.")
 
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
-        st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn ignorerar den manuella intervallslidern och testar själv flera intervallnivåer per filter, från säkert till aggressivt.")
-        rp_c1, rp_c2, rp_c3, rp_c4 = st.columns([1, 1, 1, 1])
+        st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn ignorerar den manuella intervallslidern, testar flera intervallnivåer per filter och kan grundramsanpassa strukturfilter så de inte pressar mot ramens ytterkanter.")
+        rp_c1, rp_c2, rp_c3, rp_c4, rp_c5, rp_c6 = st.columns([1, 1, 1, 1, 1, 1])
         with rp_c1:
             rec_min_step = st.number_input(
                 "Minsta extra reducering",
@@ -3101,6 +3217,15 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         with rp_c3:
             rec_min_hit = st.number_input("Sök ner till träff", min_value=1, max_value=int(len(v_m)), value=min(15, int(len(v_m))), step=1, key="v12_rec_min_hit", help="Exempel: 15 betyder att paketmotorn söker ända ner till 15/30 när historikbasen är 30.")
         with rp_c4:
+            rec_display_max_rows = st.number_input("Visa paket under", min_value=100, max_value=75000, value=5000, step=100, key="v12_rec_display_max_rows", help="Paket över denna filtermassa döljs i huvudlistan. Standard 5 000 eftersom bredare paket oftast är opraktiska inför TipsetMatrix.")
+        with rp_c5:
+            rec_frame_adapt = st.checkbox(
+                "Anpassa mot grundram",
+                value=True,
+                key="v12_rec_frame_adapt",
+                help="Undviker paketfilter som ligger för nära grundramens yttergränser, t.ex. Tecken 1 = 5–8 när din ram bara har 8 möjliga ettor.",
+            )
+        with rp_c6:
             build_recs = st.button("Beräkna paket", use_container_width=True, key="v12_build_recommended_packages")
         if build_recs:
             with st.spinner("Beräknar Pareto-paket på exakt grundram..."):
@@ -3109,6 +3234,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     min_step_reduction_pct=float(rec_min_step),
                     max_filters=int(rec_max_filters),
                     min_hit_count=int(rec_min_hit),
+                    frame_adapt=bool(rec_frame_adapt),
                 )
                 if isinstance(rec_result, tuple):
                     packages, candidate_audit = rec_result
@@ -3124,28 +3250,47 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 'min_step': float(rec_min_step),
                 'max_filters': int(rec_max_filters),
                 'min_hit': int(rec_min_hit),
+                'display_max_rows': int(rec_display_max_rows),
+                'frame_adapt': bool(rec_frame_adapt),
             }
         packages = st.session_state.get('v12_recommended_packages') or []
+        rec_display_max_rows = int(st.session_state.get('v12_rec_display_max_rows', 5000))
+        visible_packages = [p for p in packages if int(p.get('frame_after', 10**12)) <= rec_display_max_rows]
+        hidden_packages = [p for p in packages if int(p.get('frame_after', 10**12)) > rec_display_max_rows]
         if packages:
-            st.dataframe(_recommended_packages_summary_df(packages), use_container_width=True, hide_index=True)
+            st.caption(f"Visar bara paket där filtermassan är högst {rec_display_max_rows:,} rader. {len(hidden_packages)} paket är dolda över gränsen.".replace(',', ' '))
+            if visible_packages:
+                st.dataframe(_recommended_packages_summary_df(visible_packages), use_container_width=True, hide_index=True)
+            else:
+                st.warning("Inga paket hamnade under vald radgräns. Höj gränsen eller låt paketmotorn söka mer aggressivt.")
+            if hidden_packages:
+                with st.expander("Visa bästa dolda paket över radgränsen", expanded=False):
+                    hidden_ref = _hidden_packages_reference_df(packages, rec_display_max_rows)
+                    if not hidden_ref.empty:
+                        st.dataframe(hidden_ref, use_container_width=True, hide_index=True)
+                    st.caption("Dessa paket har ofta högre träffbild men är för breda för huvudlistan eftersom de lämnar för många rader före TipsetMatrix.")
             candidate_audit = st.session_state.get('v12_recommended_candidate_audit')
             if isinstance(candidate_audit, pd.DataFrame) and not candidate_audit.empty:
                 with st.expander('Visa kandidatanalys – alla filter som paketmotorn testade', expanded=False):
                     st.caption('Här kan du se om t.ex. Poängfilter faktiskt testades. Om det inte valdes beror det normalt på att ett annat filter gav bättre Pareto-paket eller att det överlappade med redan valda filter.')
                     st.dataframe(candidate_audit, use_container_width=True, hide_index=True)
-            labels = [f"{p['hist_hit']}/{p['hist_total']} · {p['frame_start']:,}→{p['frame_after']:,} · {p['reduction_pct']:.1f}% · {p['num_filters']} filter".replace(',', ' ') for p in packages]
-            pick_idx = st.selectbox("Välj paket att använda", list(range(len(packages))), format_func=lambda i: labels[i], key="v12_recommended_pick")
-            sel_pkg = packages[int(pick_idx)]
-            with st.expander("Visa filter och intervall i valt paket", expanded=False):
-                if sel_pkg.get('steps'):
-                    st.dataframe(pd.DataFrame(sel_pkg['steps']), use_container_width=True, hide_index=True)
-                    st.caption("Intervallträff är hur många av de liknande historiska omgångarna det enskilda filterintervallet klarar. Samlad träff efter steg är hela paketets träff efter att filtret lagts till.")
-                else:
-                    st.info("Detta paket hittade inga filter som gav tillräcklig extra reducering inom träffmålet.")
-            if st.button("✅ Använd valt paket i filtercentralen", use_container_width=True, key="v12_apply_recommended_package"):
-                _apply_recommended_package_to_session(sel_pkg, specs, filter_hist_target_pct, top_fav_count)
-                st.success("Paketet har lagts in i filtercentralen.")
-                st.rerun()
+            if not visible_packages:
+                sel_pkg = None
+            else:
+                labels = [f"{p['hist_hit']}/{p['hist_total']} · {p['frame_start']:,}→{p['frame_after']:,} · {p['reduction_pct']:.1f}% · {p['num_filters']} filter".replace(',', ' ') for p in visible_packages]
+                pick_idx = st.selectbox("Välj paket att använda", list(range(len(visible_packages))), format_func=lambda i: labels[i], key="v12_recommended_pick")
+                sel_pkg = visible_packages[int(pick_idx)]
+            if sel_pkg is not None:
+                with st.expander("Visa filter och intervall i valt paket", expanded=False):
+                    if sel_pkg.get('steps'):
+                        st.dataframe(pd.DataFrame(sel_pkg['steps']), use_container_width=True, hide_index=True)
+                        st.caption("Intervallträff är hur många av de liknande historiska omgångarna det enskilda filterintervallet klarar. Samlad träff efter steg är hela paketets träff efter att filtret lagts till.")
+                    else:
+                        st.info("Detta paket hittade inga filter som gav tillräcklig extra reducering inom träffmålet.")
+                if st.button("✅ Använd valt paket i filtercentralen", use_container_width=True, key="v12_apply_recommended_package"):
+                    _apply_recommended_package_to_session(sel_pkg, specs, filter_hist_target_pct, top_fav_count)
+                    st.success("Paketet har lagts in i filtercentralen.")
+                    st.rerun()
         else:
             st.info("Inga rekommenderade paket beräknade ännu.")
 
