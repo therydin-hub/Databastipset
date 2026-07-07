@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0v – Värdekärna i paketmotorn"
+APP_VERSION = "v12.0w – Flera värdekandidater i paketmotorn"
 
 
 st.markdown("""
@@ -2920,6 +2920,8 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
     - Paketmotorn ignorerar den manuella slidern "Minsta historiska träff på filterintervall".
     - Varje filter finns fortfarande bara en gång i UI, men motorn testar flera intervallnivåer
       bakom kulisserna, t.ex. 100/95/90/85/.../50%.
+    - Historisk träff i paketmotorn räknas på filtervärdena från de 30 liknande
+      omgångarna, inte genom att återräkna dem med veckans filter_vec.
     - Den visar bästa paket längs träffbild/reducering-skalan, ner till valt min-hit, t.ex. 15/30.
     """
     hist_rows = [normalize_single_row_text(r) for r in list(v_m['Correct_Row']) if len(normalize_single_row_text(r)) == int(antal_matcher)]
@@ -2954,7 +2956,14 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                     })
                     continue
             try:
-                hist_mask = np.array([_spec_pass(r, spec, interval) for r in hist_rows], dtype=bool)
+                # Historisk träff ska räknas på samma historiska filtervärden som
+                # ligger bakom frekvenstabellen/rekommenderat intervall.
+                # Tidigare kördes _spec_pass på historiska rader med veckans
+                # filter_vec/getter. Det kunde göra att t.ex. AI-Rank visade
+                # 3/30 i paketmotorn trots att intervallet från historiken
+                # egentligen täckte långt fler av de 30 liknande omgångarna.
+                hist_vals = list(spec.get('hist_values', []))
+                hist_mask = np.array([in_range(v, interval) for v in hist_vals], dtype=bool)
                 frame_mask = np.array([_spec_pass(r, spec, interval) for r in frame_rows], dtype=bool)
             except Exception:
                 continue
@@ -3040,9 +3049,13 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 eligible_items = [x for x in eligible_items if x[-1]]
 
             for cand, new_hist, new_frame, hist_hit, new_frame_count, step_red_pct, is_value in eligible_items:
-                # Score: faktisk ny reducering är viktigast. Värdefilter får bara prioritet medan kvoten saknas.
+                # Score: när värdekärnan saknas prioriteras värdefilter, men inte blint den
+                # hårdaste varianten. Då väger historisk säkerhet före maximal reducering.
                 value_bonus = 1 if (need_value and is_value) else 0
-                score = (value_bonus, cur_frame_count - new_frame_count, hist_hit, cand['hist_hit'], -new_frame_count, cand['red_pct'])
+                if need_value and is_value:
+                    score = (value_bonus, hist_hit, cand['hist_hit'], cur_frame_count - new_frame_count, -new_frame_count, cand['red_pct'])
+                else:
+                    score = (value_bonus, cur_frame_count - new_frame_count, hist_hit, cand['hist_hit'], -new_frame_count, cand['red_pct'])
                 if best is None or score > best_score:
                     best = (cand, new_hist, new_frame, hist_hit, new_frame_count, step_red_pct)
                     best_score = score
@@ -3121,28 +3134,37 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             audit_rows.append({
                 'Kategori': spec.get('category', ''),
                 'Filter': spec.get('name', ''),
-                'Bästa intervall': '-',
-                'Bästa individuell träff': '-',
-                'Reducerar ensam': '-',
+                'Bästa säkra intervall': '-',
+                'Säker träff': '-',
+                'Säker reducering': '-',
+                'Mest reducerande intervall': '-',
+                'Mest reducerande träff': '-',
+                'Mest reducerar': '-',
                 'Valt i paket': 'Nej',
                 'Kommentar': comment,
             })
             continue
 
-        # Visa bästa enskilda variant som paketmotorn såg. Prioritera faktisk reducering,
-        # men markera fortfarande historisk träff så man ser varför den kan väljas bort.
-        best = max(cand_list, key=lambda c: (float(c.get('red_pct', 0.0)), int(c.get('hist_hit', 0)), -int(c.get('frame_keep', 10**9))))
+        # Visa både bästa historiskt säkra variant och mest reducerande variant.
+        # Tidigare visades bara max reducering, vilket gjorde att värdefilter kunde
+        # se ut som 3/30 eller 4/30 trots att samma filter också hade bredare och
+        # spelbara kandidater.
+        best_safe = max(cand_list, key=lambda c: (int(c.get('hist_hit', 0)), float(c.get('red_pct', 0.0)), -int(c.get('frame_keep', 10**9))))
+        best_red = max(cand_list, key=lambda c: (float(c.get('red_pct', 0.0)), int(c.get('hist_hit', 0)), -int(c.get('frame_keep', 10**9))))
         selected = selected_by_key.get(key, [])
         if selected:
             comment = 'Valt i ' + ', '.join(selected)
         else:
             comment = 'Testat men ej valt: gav inte bästa Pareto-paketet. Ofta beror detta på överlapp med andra filter eller för låg extra reducering efter tidigare filter.'
         audit_rows.append({
-            'Kategori': best.get('category', spec.get('category', '')),
-            'Filter': best.get('name', spec.get('name', '')),
-            'Bästa intervall': best.get('interval_txt', '-'),
-            'Bästa individuell träff': f"{int(best.get('hist_hit', 0))}/{htot}",
-            'Reducerar ensam': f"{float(best.get('red_pct', 0.0)):.1f}%",
+            'Kategori': best_safe.get('category', spec.get('category', '')),
+            'Filter': best_safe.get('name', spec.get('name', '')),
+            'Bästa säkra intervall': best_safe.get('interval_txt', '-'),
+            'Säker träff': f"{int(best_safe.get('hist_hit', 0))}/{htot}",
+            'Säker reducering': f"{float(best_safe.get('red_pct', 0.0)):.1f}%",
+            'Mest reducerande intervall': best_red.get('interval_txt', '-'),
+            'Mest reducerande träff': f"{int(best_red.get('hist_hit', 0))}/{htot}",
+            'Mest reducerar': f"{float(best_red.get('red_pct', 0.0)):.1f}%",
             'Valt i paket': ', '.join(selected) if selected else 'Nej',
             'Kommentar': comment,
         })
@@ -3414,7 +3436,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     st.caption("När du ändrar minsta historiska träff får varje filter nya slider-nycklar och startar på sitt rekommenderade intervall. 100% ska därför ge startintervall med 30/30 där det är möjligt.")
 
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
-        st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn ignorerar den manuella intervallslidern, testar flera intervallnivåer per filter, bygger först en värde-/poängkärna enligt din kvot och kan grundramsanpassa struktur/FAT-sekvensfilter så de inte pressar mot ramens ytterkanter.")
+        st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn ignorerar den manuella intervallslidern, testar flera intervallnivåer per filter, bygger först en värde-/poängkärna enligt din kvot och räknar historisk träff på filtervärdena från de 30 liknande omgångarna. Struktur/FAT-sekvensfilter kan grundramsanpassas så de inte pressar mot ramens ytterkanter.")
         rp_c1, rp_c2, rp_c3, rp_c4, rp_c5, rp_c6, rp_c7 = st.columns([1, 1, 1, 1, 1, 1, 1])
         with rp_c1:
             rec_min_step = st.number_input(
