@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0t – Topp 3 paket & värdefilterkvot"
+APP_VERSION = "v12.0u – Hård värdefilterspärr & FAT-ramlogik"
 
 
 st.markdown("""
@@ -2808,10 +2808,22 @@ def _frame_capacity_pressure(spec, interval, frame, frame_rows, antal_matcher):
         # inte välja ett intervall som pressar mot ytterkanten, t.ex. 4–5 av 5,
         # bara för att det historiskt ser starkt ut.
         if category == 'FAT-sekvenser':
-            if lower_pressure >= 0.60:
+            # FAT-sekvenser kan bli missvisande när spelarens manuella ram redan
+            # låser in ett visst antal sekvensträffar via spikar/halvor.
+            # Exempel: om grundramens möjliga spann redan är 3–5 och filtret är 3–4
+            # reducerar det hårt genom att kapa max, men det kräver egentligen inte
+            # någon "egen" sekvensträff utöver ramen. Då ska paketmotorn inte
+            # behandla det som ett starkt rekommenderat filter.
+            small_span = span <= 3.0
+            locks_to_frame_min = (vmin >= 1 and low <= vmin + 0.01 and high < vmax - 0.01)
+            near_upper_cap = upper_pressure >= (0.45 if small_span else 0.65)
+            near_lower_req = lower_pressure >= (0.45 if small_span else 0.65)
+            if locks_to_frame_min:
+                return True, f"Grundramsanpassning: {name} {int(low)}–{int(high)} är för beroende av din grundram. Ramen har redan minst {vmin:.0f} sekvensträffar och filtret kapar bara spannet {vmin:.0f}–{vmax:.0f}."
+            if near_lower_req:
                 return True, f"Grundramsanpassning: {name} {int(low)}–{int(high)} kräver hög FAT-sekvensträff relativt din ram ({vmin:.0f}–{vmax:.0f} möjliga i grundramen)."
-            if upper_pressure >= 0.80:
-                return True, f"Grundramsanpassning: {name} {int(low)}–{int(high)} tillåter för låg FAT-sekvensträff relativt din ram ({vmin:.0f}–{vmax:.0f} möjliga i grundramen)."
+            if near_upper_cap:
+                return True, f"Grundramsanpassning: {name} {int(low)}–{int(high)} kapar FAT-sekvenser för hårt relativt din ram ({vmin:.0f}–{vmax:.0f} möjliga i grundramen)."
             return False, ''
 
         # Blockera bara extrema ytterkantsfilter. Vanliga intervall får passera.
@@ -3044,6 +3056,13 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
         value_filters = sum(1 for c in chosen if str(c.get('category', '')) == 'Värde & svårighet')
         fat_filters = sum(1 for c in chosen if str(c.get('category', '')) in {'FAT', 'FAT-sekvenser'})
         structure_filters = sum(1 for c in chosen if str(c.get('category', '')) == 'Struktur')
+        # Hård spärr: om användaren kräver t.ex. minst 3 värde-/poängfilter
+        # ska paketet inte visas om det bara råkar få en bonus från ett värdefilter.
+        # Tidigare var detta mer en prioritering, vilket kunde ge topppaket med bara
+        # 1 värdefilter och resten struktur/FAT.
+        if int(min_value_filters) > 0 and int(value_filters) < int(min_value_filters):
+            continue
+
         packages.append({
             'target': int(target),
             'target_label': f"minst {int(target)}/{htot}",
@@ -3407,7 +3426,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 "Anpassa mot grundram",
                 value=True,
                 key="v12_rec_frame_adapt",
-                help="Undviker paketfilter som ligger för nära grundramens yttergränser, t.ex. Tecken 1 = 5–8 när din ram bara har 8 möjliga ettor eller FAT-sekvenser som kräver nästan maxträff mot din ram.",
+                help="Undviker paketfilter som ligger för nära grundramens yttergränser. Gäller även FAT-sekvenser som blir grundramsdrivna, t.ex. när ramen redan låser minst 3 sekvensträffar och filtret bara kapar max.",
             )
         with rp_c6:
             rec_min_value_filters = st.number_input(
@@ -3417,7 +3436,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 value=3,
                 step=1,
                 key="v12_rec_min_value_filters",
-                help="Rekommenderade paket bör bygga på utdelnings-/svårighetsprofilen. Standard kräver minst 3 filter från Värde & svårighet om det finns kandidater som klarar kraven.",
+                help="Hård spärr: ett rekommenderat paket måste innehålla minst detta antal filter från Värde & svårighet. Annars visas paketet inte i listan.",
             )
         with rp_c7:
             build_recs = st.button("Beräkna paket", use_container_width=True, key="v12_build_recommended_packages")
