@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0ac – Eftertrim + smartare nivåval"
+APP_VERSION = "v12.0ad – Grupppaket som egen väg"
 
 
 st.markdown("""
@@ -3110,6 +3110,74 @@ def _pareto_reduce_packages(packages):
     return dedup
 
 
+def _is_hard_group_package(p):
+    """Sant om paketet innehåller hårda gruppvillkor.
+
+    Grupppaket ska visas som egen väg. Annars kan de lätt försvinna i Pareto-
+    reduceringen eftersom ett rent tvingat paket ofta reducerar fler rader på
+    samma historiska träffnivå. Det betyder inte att grupppaketet är ointressant;
+    det är en annan riskprofil.
+    """
+    try:
+        return bool(p.get('groups')) or ('grupp' in str(p.get('package_type', '')).lower())
+    except Exception:
+        return False
+
+
+def _dedupe_package_list(packages):
+    """Tar bort identiska paket men behåller olika pakettyper/riskprofiler."""
+    out = []
+    seen = set()
+    for p in list(packages or []):
+        try:
+            sig = _package_signature(p)
+        except Exception:
+            sig = (p.get('package_type'), p.get('hist_hit'), p.get('frame_after'), p.get('num_filters'))
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append(p)
+    return out
+
+
+def _append_group_representatives(pareto_packages, all_packages, max_group_packages=5):
+    """Lägg tillbaka representativa grupppaket efter Pareto.
+
+    Normal Pareto-logik är matematisk korrekt för två axlar: högre träff och
+    färre rader. Men hårda grupper har en annan funktion: de kan ge högre
+    robusthet och fler filter utan att alla måste sitta samtidigt. Därför ska
+    minst några grupppaket överleva som egen jämförelseväg även om ett tvingat
+    paket råkar dominera dem i ren radmängd.
+    """
+    pareto_packages = list(pareto_packages or [])
+    group_candidates = [p for p in list(all_packages or []) if _is_hard_group_package(p) and int(p.get('frame_after', 10**18)) < int(p.get('frame_start', 0))]
+    if not group_candidates:
+        return pareto_packages
+
+    # Bästa grupppaket per samlad träffnivå. Detta ger både säkra och mer
+    # reducerande gruppalternativ, i stället för att bara visa ett enda.
+    best_by_hit = {}
+    for p in group_candidates:
+        h = int(p.get('hist_hit', 0))
+        cur = best_by_hit.get(h)
+        if cur is None:
+            best_by_hit[h] = p
+            continue
+        score_p = (float(p.get('reduction_pct', 0.0)), len(p.get('groups', []) or []), -int(p.get('frame_after', 10**12)), int(p.get('num_filters', 0)))
+        score_c = (float(cur.get('reduction_pct', 0.0)), len(cur.get('groups', []) or []), -int(cur.get('frame_after', 10**12)), int(cur.get('num_filters', 0)))
+        if score_p > score_c:
+            best_by_hit[h] = p
+
+    reps = list(best_by_hit.values())
+    reps.sort(key=lambda p: (-int(p.get('hist_hit', 0)), int(p.get('frame_after', 10**12)), -float(p.get('reduction_pct', 0.0))))
+    # Lägg även till bästa rena reducering bland grupppaketen om den inte redan
+    # finns bland träffnivå-representanterna.
+    strongest = sorted(group_candidates, key=lambda p: (float(p.get('reduction_pct', 0.0)), int(p.get('hist_hit', 0)), -int(p.get('frame_after', 10**12))), reverse=True)[:2]
+    merged = _dedupe_package_list(pareto_packages + reps[:int(max_group_packages)] + strongest)
+    merged.sort(key=lambda x: (-int(x.get('hist_hit', 0)), int(x.get('frame_after', 10**12)), 0 if _is_hard_group_package(x) else 1, -float(x.get('reduction_pct', 0.0))))
+    return merged
+
+
 
 def _combine_forced_candidate_masks(chosen):
     """Kombinerar tvingade filter till samlad historik-/grundramsmask."""
@@ -3914,7 +3982,10 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
         packages = [p for p in packages if required_keys.issubset({c.get('key') for c in (p.get('filters', []) or [])})]
 
     _progress("Steg 4/4: väljer Pareto-bästa paket och bygger kandidatanalys")
-    final_packages = _pareto_reduce_packages(packages)
+    pareto_packages = _pareto_reduce_packages(packages)
+    # v12.0ad: Grupppaket ska inte bara vara fallback. De visas som egen
+    # risk-/reduceringsväg även om rena tvingade paket dominerar i radantal.
+    final_packages = _append_group_representatives(pareto_packages, packages, max_group_packages=6)
 
     # Kandidatanalys: visa att alla filter faktiskt testades, även om de inte hamnade
     # i ett Pareto-paket. Särskilt viktigt för värde-/poängfilter som ofta överlappar
@@ -4010,7 +4081,8 @@ def _package_value_score(p):
         hit_pct = 100.0 * float(p.get('hist_hit', 0)) / max(1.0, float(p.get('hist_total', 1)))
         red_pct = float(p.get('reduction_pct', 0.0))
         value_bonus = min(8.0, 1.5 * float(p.get('value_filters', 0)))
-        return (hit_pct * red_pct) + value_bonus
+        group_bonus = 10.0 if _is_hard_group_package(p) else 0.0
+        return (hit_pct * red_pct) + value_bonus + group_bonus
     except Exception:
         return 0.0
 
@@ -4287,7 +4359,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     st.caption("När du ändrar minsta historiska träff får varje filter nya slider-nycklar och startar på sitt rekommenderade intervall. 100% ska därför ge startintervall med 30/30 där det är möjligt.")
 
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
-        st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn bygger nivåtrappa per filter, visar progressklocka/ETA och eftertrimmar valt paket: om ett filter kan snävas åt mer utan att sänka samlad historikträff väljs den hårdare nivån automatiskt.")
+        st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn bygger nivåtrappa per filter, visar progressklocka/ETA, eftertrimmar valt paket och visar nu hårda grupppaket som egen pakettyp även om ett tvingat paket reducerar mer.")
 
         with st.expander("Välj filter som måste ingå i rekommenderade paket", expanded=False):
             st.caption("Kryssa i filter du vill att paketmotorn ska använda. Motorn får själv avgöra om de passar bäst som tvingade filter eller i hårda grupper. Om ett ikryssat filter inte kan användas utan att träffbild/teckenskydd rasar visas inget paket på den nivån.")
@@ -4390,7 +4462,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             st.session_state['v12_recommended_packages'] = packages
             st.session_state['v12_recommended_candidate_audit'] = candidate_audit
             st.session_state['v12_recommended_meta'] = {
-                'package_engine': 'pareto_multilevel_progress_posttrim',
+                'package_engine': 'pareto_multilevel_progress_posttrim_group_path',
                 'manual_hist_target_pct': int(filter_hist_target_pct),
                 'top_fav_count': int(top_fav_count),
                 'frame_rows': int(len(frame_rows)),
@@ -4413,7 +4485,13 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 st.markdown("**3 mest spelvärda paket**")
                 st.caption("Sorterat på kombinationen samlad historisk träff + faktisk reducering. Paket med fler värde-/poängfilter får en liten bonus eftersom de styr utdelningsprofilen bättre.")
                 st.dataframe(_recommended_packages_summary_df(top_packages), use_container_width=True, hide_index=True)
-                rest_packages = [p for p in visible_packages if p not in top_packages]
+                group_visible = [p for p in visible_packages if _is_hard_group_package(p)]
+                best_group_packages = _top_playable_packages(group_visible, 3) if group_visible else []
+                if best_group_packages:
+                    st.markdown("**Bästa hårda grupppaket**")
+                    st.caption("Visas separat eftersom grupppaket är en annan riskprofil: fler filter kan ingå men alla måste inte sitta samtidigt. Därför ska de inte försvinna bara för att ett tvingat paket reducerar mer.")
+                    st.dataframe(_recommended_packages_summary_df(best_group_packages), use_container_width=True, hide_index=True)
+                rest_packages = [p for p in visible_packages if p not in top_packages and p not in best_group_packages]
                 if rest_packages:
                     with st.expander("Visa övriga spelbara paket under radgränsen", expanded=False):
                         st.dataframe(_recommended_packages_summary_df(rest_packages), use_container_width=True, hide_index=True)
@@ -4437,7 +4515,14 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 with st.expander('Visa kandidatanalys – alla filter som paketmotorn testade', expanded=False):
                     st.caption('Här ser du hela nivåtrappan per filter: säkert, balanserat, aggressivt och valt intervall i paket. Det gör det lättare att se varför t.ex. FAT Summa valdes på en viss nivå.')
                     st.dataframe(candidate_audit, use_container_width=True, hide_index=True)
-            selectable_packages = _top_playable_packages(visible_packages, 3) if visible_packages else _top_playable_packages(hidden_packages, 1)
+            if visible_packages:
+                _sel_base = _top_playable_packages(visible_packages, 3)
+                _sel_groups = _top_playable_packages([p for p in visible_packages if _is_hard_group_package(p)], 3)
+                selectable_packages = _dedupe_package_list(_sel_base + _sel_groups)
+            else:
+                _sel_base = _top_playable_packages(hidden_packages, 1)
+                _sel_groups = _top_playable_packages([p for p in hidden_packages if _is_hard_group_package(p)], 2)
+                selectable_packages = _dedupe_package_list(_sel_base + _sel_groups)
             if not visible_packages and selectable_packages:
                 st.info("Du kan använda bästa paketet över radgränsen, men filtermassan blir bredare än din valda gräns.")
             if not selectable_packages:
