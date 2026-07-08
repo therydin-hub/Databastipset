@@ -7,11 +7,12 @@ import html
 import itertools
 import bisect
 import matplotlib.pyplot as plt
+import time
 from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0å – Obligatorisk kärna + bästa över gräns"
+APP_VERSION = "v12.0ab – Nivåtrappa + klocka"
 
 
 st.markdown("""
@@ -2830,6 +2831,113 @@ def _rows_from_mask(rows, mask):
         return []
 
 
+def _fmt_elapsed(seconds):
+    """Formaterar sekunder som mm:ss eller h:mm:ss för progressraden."""
+    try:
+        seconds = int(max(0, float(seconds)))
+    except Exception:
+        seconds = 0
+    h, rem = divmod(seconds, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return f"{h:d}:{m:02d}:{sec:02d}"
+    return f"{m:02d}:{sec:02d}"
+
+
+def _frame_row_matrix(frame_rows, antal_matcher):
+    """Preberäknar grundrader som teckenmatris för snabb teckenskyddskontroll."""
+    try:
+        clean = [normalize_single_row_text(r) for r in (frame_rows or []) if len(normalize_single_row_text(r)) == int(antal_matcher)]
+        if not clean:
+            return None
+        return np.array([list(r) for r in clean], dtype='<U1')
+    except Exception:
+        return None
+
+
+def _selected_signs_missing_from_mask(row_matrix, mask, frame, antal_matcher):
+    """Snabb variant av selected_signs_missing när vi redan har en boolean-mask."""
+    if row_matrix is None or not frame:
+        return []
+    try:
+        mask = np.asarray(mask, dtype=bool)
+        if mask.size == 0 or not mask.any():
+            # Om inga rader finns kvar saknas alla manuellt valda tecken.
+            return [(mi + 1, sign) for mi in range(int(antal_matcher)) for sign in (normalize_signs(frame[mi]) if mi < len(frame) else [])]
+        sub = row_matrix[mask]
+        missing = []
+        for mi in range(int(antal_matcher)):
+            selected = normalize_signs(frame[mi]) if mi < len(frame) else []
+            if not selected:
+                continue
+            col = sub[:, mi]
+            for sign in selected:
+                if not np.any(col == sign):
+                    missing.append((mi + 1, sign))
+        return missing
+    except Exception:
+        return []
+
+
+def _mask_keeps_teckenskydd(row_matrix, mask, frame, antal_matcher):
+    """True om maskad radmassa fortfarande innehåller alla manuellt valda tecken."""
+    miss = _selected_signs_missing_from_mask(row_matrix, mask, frame, antal_matcher)
+    return not bool(miss)
+
+
+def _prune_candidate_ladder(spec_candidates, max_levels=18):
+    """Behåller en nivåtrappa per filter i stället för bara säkrast/hårdast.
+
+    För varje möjlig historisk träffnivå behålls den variant som reducerar mest.
+    Det ger en riktig trade-off-kurva: 30/30, 29/30, 28/30 ... ner till
+    mer aggressiva nivåer, utan att paketmotorn drunknar i dubbletter.
+    """
+    by_hit = {}
+    for c in spec_candidates or []:
+        h = int(c.get('hist_hit', 0))
+        cur = by_hit.get(h)
+        score = (float(c.get('red_pct', 0.0)), -int(c.get('frame_keep', 10**12)), float(c.get('hist_pct', 0.0)))
+        if cur is None or score > cur[0]:
+            by_hit[h] = (score, c)
+    ladder = [v[1] for v in by_hit.values()]
+    ladder.sort(key=lambda c: (-int(c.get('hist_hit', 0)), int(c.get('frame_keep', 10**12)), -float(c.get('red_pct', 0.0))))
+    if len(ladder) <= int(max_levels):
+        return ladder
+    # Bevara säkra änden, aggressiva änden och jämnt fördelade mellanlägen.
+    keep_idx = {0, 1, len(ladder)-2, len(ladder)-1}
+    slots = max(0, int(max_levels) - len(keep_idx))
+    if slots > 0 and len(ladder) > 4:
+        for idx in np.linspace(2, len(ladder)-3, slots):
+            keep_idx.add(int(round(idx)))
+    return [ladder[i] for i in sorted(i for i in keep_idx if 0 <= i < len(ladder))]
+
+
+def _candidate_ladder_text(cand_list, htot, max_items=9):
+    """Kort text med filtertrappan för kandidatanalysen."""
+    if not cand_list:
+        return '-'
+    ordered = sorted(cand_list, key=lambda c: (-int(c.get('hist_hit', 0)), -float(c.get('red_pct', 0.0))))
+    parts = []
+    for c in ordered[:int(max_items)]:
+        parts.append(f"{c.get('interval_txt','-')} {int(c.get('hist_hit',0))}/{int(htot)} {float(c.get('red_pct',0.0)):.1f}%")
+    if len(ordered) > int(max_items):
+        parts.append(f"+{len(ordered)-int(max_items)} nivåer")
+    return ' | '.join(parts)
+
+
+def _balanced_candidate_for_audit(cand_list, htot, min_hit_floor=None):
+    """Väljer ett illustrativt mellanläge: hög reducering men med rimlig historisk säkerhet."""
+    if not cand_list:
+        return None
+    if min_hit_floor is None:
+        min_hit_floor = max(1, int(round(float(htot) * 0.70)))
+    viable = [c for c in cand_list if int(c.get('hist_hit', 0)) >= int(min_hit_floor)] or list(cand_list)
+    def score(c):
+        hp = int(c.get('hist_hit', 0)) / max(1.0, float(htot))
+        return (float(c.get('red_pct', 0.0)) * (hp ** 1.8), hp, -int(c.get('frame_keep', 10**12)))
+    return max(viable, key=score)
+
+
 
 def _frame_capacity_pressure(spec, interval, frame, frame_rows, antal_matcher):
     """Bedömer om ett paketfilter är för hårt relativt den manuella grundramen.
@@ -3054,7 +3162,7 @@ def _pick_best_variant_per_filter_for_group(candidates, category_filter, target,
     return dedup
 
 
-def _best_hard_group_from_candidates(group_label, group_no, group_candidates, cur_hist, cur_frame, target, frame_rows, frame, antal_matcher, min_members=3):
+def _best_hard_group_from_candidates(group_label, group_no, group_candidates, cur_hist, cur_frame, target, frame_rows, frame, antal_matcher, min_members=3, row_matrix=None):
     """Testar hårda gruppkrav, t.ex. 5 av 7, och returnerar bästa gruppblock.
 
     Gruppen måste hålla samlad historikträff efter att kombineras med redan valt paket.
@@ -3087,9 +3195,13 @@ def _best_hard_group_from_candidates(group_label, group_no, group_candidates, cu
         new_count = int(new_frame.sum())
         if new_count >= cur_frame_count:
             continue
-        test_rows = _rows_from_mask(frame_rows, new_frame)
-        if selected_signs_missing(test_rows, frame, antal_matcher):
-            continue
+        if row_matrix is not None:
+            if not _mask_keeps_teckenskydd(row_matrix, new_frame, frame, antal_matcher):
+                continue
+        else:
+            test_rows = _rows_from_mask(frame_rows, new_frame)
+            if selected_signs_missing(test_rows, frame, antal_matcher):
+                continue
         red_pct = 100.0 * (cur_frame_count - new_count) / max(1, cur_frame_count)
         # Poäng: håll gruppen hård, men prioritera faktisk reducering och träff.
         req_ratio = req / max(1, n)
@@ -3111,7 +3223,7 @@ def _best_hard_group_from_candidates(group_label, group_no, group_candidates, cu
     return best
 
 
-def _build_grouped_package_for_target(candidates, target, frame_rows, frame, antal_matcher, max_filters=18, min_value_filters=3, required_keys=None):
+def _build_grouped_package_for_target(candidates, target, frame_rows, frame, antal_matcher, max_filters=18, min_value_filters=3, required_keys=None, row_matrix=None):
     """Bygger ett paket med hårda grupper i stället för att tvinga varje filter.
 
     Målet är: fler viktiga filter, särskilt värde-/poängfilter, men med hårda gruppkrav
@@ -3149,7 +3261,7 @@ def _build_grouped_package_for_target(candidates, target, frame_rows, frame, ant
         opt_val = [c for c in value_cands if c.get('key') not in value_required_keys]
         n_val = min(len(value_cands), max(int(min_value_filters), len(req_val), min(8, int(max_filters))))
         group_cands = req_val + opt_val[:max(0, n_val - len(req_val))]
-        block = _best_hard_group_from_candidates('Värde-/poänggrupp', 1, group_cands, cur_hist, cur_frame, target, frame_rows, frame, antal_matcher, min_members=max(1, min(max(2, int(min_value_filters)), len(group_cands))))
+        block = _best_hard_group_from_candidates('Värde-/poänggrupp', 1, group_cands, cur_hist, cur_frame, target, frame_rows, frame, antal_matcher, min_members=max(1, min(max(2, int(min_value_filters)), len(group_cands))), row_matrix=row_matrix)
         if block is None:
             return None if (int(min_value_filters) > 0 or value_required_keys) else None
         cur_hist = cur_hist & block['hist_mask']
@@ -3197,7 +3309,7 @@ def _build_grouped_package_for_target(candidates, target, frame_rows, frame, ant
         ) if c.get('key') not in used_keys]
         if not family_required.issubset({c.get('key') for c in fam_cands}):
             return None
-        block = _best_hard_group_from_candidates(label, gno, fam_cands, cur_hist, cur_frame, target, frame_rows, frame, antal_matcher, min_members=1)
+        block = _best_hard_group_from_candidates(label, gno, fam_cands, cur_hist, cur_frame, target, frame_rows, frame, antal_matcher, min_members=1, row_matrix=row_matrix)
         if block is None:
             return None
         cur_hist = cur_hist & block['hist_mask']
@@ -3233,7 +3345,7 @@ def _build_grouped_package_for_target(candidates, target, frame_rows, frame, ant
             ) if c.get('key') not in used_keys]
             if len(fam_cands) < min_members:
                 continue
-            block = _best_hard_group_from_candidates(label, gno, fam_cands, cur_hist, cur_frame, target, frame_rows, frame, antal_matcher, min_members=min_members)
+            block = _best_hard_group_from_candidates(label, gno, fam_cands, cur_hist, cur_frame, target, frame_rows, frame, antal_matcher, min_members=min_members, row_matrix=row_matrix)
             if block is None:
                 continue
             score = (block['step_red_pct'], block['hist_hit'], -block['frame_after'], block['req'] / max(1, block['n']))
@@ -3308,7 +3420,7 @@ def _build_grouped_package_for_target(candidates, target, frame_rows, frame, ant
         'structure_filters': int(structure_filters),
     }
 
-def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14, min_hit_count=15, frame_adapt=True, min_value_filters=3, required_keys=None, target_frame_after=None):
+def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14, min_hit_count=15, frame_adapt=True, min_value_filters=3, required_keys=None, target_frame_after=None, progress_cb=None):
     """Bygger Pareto-rekommenderade filterpaket.
 
     Viktigt från v12.0n:
@@ -3337,12 +3449,38 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
         hit_levels = list(range(htot, min_hit_count - 1, -1))
     hit_levels = sorted({int(max(0, min(htot, h))) for h in hit_levels if int(h) >= min_hit_count}, reverse=True)
 
-    # Bygg kandidatvarianter. Flera intervall per filter testas, men högst en variant
-    # av samma filter får väljas i ett paket.
+    # Progress/ETA: totalen är en uppskattning men ger en stabil klocka i UI.
+    progress_total = max(1, len(specs) + (2 * len(hit_levels)) + 4)
+    progress_done = 0
+
+    def _progress(label, best=None, bump=1):
+        nonlocal progress_done
+        progress_done = min(progress_total, progress_done + int(max(0, bump)))
+        if progress_cb is not None:
+            try:
+                progress_cb(progress_done, progress_total, label, best)
+            except Exception:
+                pass
+
+    row_matrix = _frame_row_matrix(frame_rows, antal_matcher)
+
+    # Bygg kandidatvarianter. Varje filter får en riktig nivåtrappa, inte bara
+    # säkrast + aggressivast. För hastighet räknas grundramens filtervärden
+    # en gång per filter och återanvänds för alla intervallnivåer.
     candidates = []
     rejected_by_frame_adapt = []
-    coverage_grid = [100, 97, 95, 93, 90, 87, 85, 80, 75, 70, 65, 60, 55, 50]
-    for spec in specs:
+    # Tätare grid ger mellanlägen, t.ex. FAT Summa 20–28 / 21–27 / 22–26,
+    # medan _prune_candidate_ladder tar bort dubbletter och svaga nivåer.
+    coverage_grid = [100, 99, 98, 97, 96, 95, 94, 93, 92, 91, 90, 88, 86, 84, 82, 80, 78, 76, 74, 72, 70, 68, 66, 64, 62, 60, 58, 56, 54, 52, 50]
+    for si, spec in enumerate(specs, 1):
+        spec_cands = []
+        try:
+            getter = spec.get('getter')
+            frame_vals = np.array([float(getter(r)) for r in frame_rows], dtype=float)
+        except Exception:
+            frame_vals = None
+        hist_vals = list(spec.get('hist_values', []))
+        hist_arr = np.array([np.nan if pd.isna(v) else float(v) for v in hist_vals], dtype=float)
         for iv in _candidate_intervals_for_spec(spec, coverage_grid):
             interval = iv['interval']
             if frame_adapt:
@@ -3356,15 +3494,12 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                     })
                     continue
             try:
-                # Historisk träff ska räknas på samma historiska filtervärden som
-                # ligger bakom frekvenstabellen/rekommenderat intervall.
-                # Tidigare kördes _spec_pass på historiska rader med veckans
-                # filter_vec/getter. Det kunde göra att t.ex. AI-Rank visade
-                # 3/30 i paketmotorn trots att intervallet från historiken
-                # egentligen täckte långt fler av de 30 liknande omgångarna.
-                hist_vals = list(spec.get('hist_values', []))
-                hist_mask = np.array([in_range(v, interval) for v in hist_vals], dtype=bool)
-                frame_mask = np.array([_spec_pass(r, spec, interval) for r in frame_rows], dtype=bool)
+                lo, hi = float(interval[0]), float(interval[1])
+                hist_mask = np.isfinite(hist_arr) & (hist_arr >= lo) & (hist_arr <= hi)
+                if frame_vals is not None:
+                    frame_mask = np.isfinite(frame_vals) & (frame_vals >= lo) & (frame_vals <= hi)
+                else:
+                    frame_mask = np.array([_spec_pass(r, spec, interval) for r in frame_rows], dtype=bool)
             except Exception:
                 continue
             hist_hit = int(hist_mask.sum())
@@ -3372,25 +3507,31 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             red_pct = 100.0 - 100.0 * frame_keep / max(1, ftot)
             if frame_keep >= ftot:
                 continue
-            candidates.append({
+            spec_cands.append({
                 'key': spec['key'],
                 'name': spec['name'],
                 'category': spec.get('category', ''),
                 'coverage': iv['coverage'],
                 'interval': interval,
                 'interval_txt': iv['interval_txt'],
-                'hist_mask': hist_mask,
-                'frame_mask': frame_mask,
+                'hist_mask': hist_mask.astype(bool),
+                'frame_mask': frame_mask.astype(bool),
                 'hist_hit': hist_hit,
                 'hist_total': htot,
                 'hist_pct': 100.0 * hist_hit / max(1, htot),
                 'frame_keep': frame_keep,
                 'red_pct': red_pct,
             })
+        pruned = _prune_candidate_ladder(spec_cands, max_levels=18)
+        candidates.extend(pruned)
+        if si == 1 or si == len(specs) or si % 3 == 0:
+            _progress(f"Steg 1/4: bygger nivåtrappor · filter {si}/{len(specs)} · kandidater {len(candidates)}")
+        else:
+            progress_done = min(progress_total, progress_done + 1)
 
     packages = []
     min_step_reduction_pct = float(min_step_reduction_pct)
-    for target in hit_levels:
+    for target_idx, target in enumerate(hit_levels, 1):
         cur_hist = np.ones(htot, dtype=bool)
         cur_frame = np.ones(ftot, dtype=bool)
         chosen = []
@@ -3420,9 +3561,13 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 new_frame_count = int(new_frame.sum())
                 if new_frame_count >= cur_frame_count:
                     continue
-                test_rows = _rows_from_mask(frame_rows, new_frame)
-                if selected_signs_missing(test_rows, frame, antal_matcher):
-                    continue
+                if row_matrix is not None:
+                    if not _mask_keeps_teckenskydd(row_matrix, new_frame, frame, antal_matcher):
+                        continue
+                else:
+                    test_rows = _rows_from_mask(frame_rows, new_frame)
+                    if selected_signs_missing(test_rows, frame, antal_matcher):
+                        continue
                 step_red_pct = 100.0 * (cur_frame_count - new_frame_count) / max(1, cur_frame_count)
                 # För obligatorisk kärna prioriteras historisk säkerhet först.
                 score = (hist_hit, cand['hist_hit'], step_red_pct, -new_frame_count)
@@ -3493,9 +3638,13 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 if step_red_pct < min_step_for_cand:
                     continue
 
-                test_rows = _rows_from_mask(frame_rows, new_frame)
-                if selected_signs_missing(test_rows, frame, antal_matcher):
-                    continue
+                if row_matrix is not None:
+                    if not _mask_keeps_teckenskydd(row_matrix, new_frame, frame, antal_matcher):
+                        continue
+                else:
+                    test_rows = _rows_from_mask(frame_rows, new_frame)
+                    if selected_signs_missing(test_rows, frame, antal_matcher):
+                        continue
                 if is_value:
                     eligible_value_exists = True
                 eligible_items.append((cand, new_hist, new_frame, hist_hit, new_frame_count, step_red_pct, is_value))
@@ -3506,13 +3655,23 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 eligible_items = [x for x in eligible_items if x[-1]]
 
             for cand, new_hist, new_frame, hist_hit, new_frame_count, step_red_pct, is_value in eligible_items:
-                # Score: när värdekärnan saknas prioriteras värdefilter, men inte blint den
-                # hårdaste varianten. Då väger historisk säkerhet före maximal reducering.
+                # Score: välj ett balanserat mellanläge. Målet är inte bara maxslakt
+                # per filter, utan bästa reducering MED så hög samlad träff som möjligt.
                 value_bonus = 1 if (need_value and is_value) else 0
-                if need_value and is_value:
-                    score = (value_bonus, hist_hit, cand['hist_hit'], cur_frame_count - new_frame_count, -new_frame_count, cand['red_pct'])
+                hit_buffer = int(hist_hit) - int(target)
+                cand_safety = int(cand.get('hist_hit', 0))
+                abs_gain = int(cur_frame_count - new_frame_count)
+                # Om vi ligger över användarens radgräns premieras faktisk väg mot gränsen,
+                # annars premieras extra reducering försiktigare så träffen inte offras i onödan.
+                if target_frame_after is not None and cur_frame_count > int(target_frame_after):
+                    need_rows = max(1, cur_frame_count - int(target_frame_after))
+                    target_progress = min(1.0, abs_gain / need_rows)
                 else:
-                    score = (value_bonus, cur_frame_count - new_frame_count, hist_hit, cand['hist_hit'], -new_frame_count, cand['red_pct'])
+                    target_progress = 0.0
+                if need_value and is_value:
+                    score = (value_bonus, hist_hit, cand_safety, step_red_pct, -new_frame_count, cand['red_pct'])
+                else:
+                    score = (target_progress, hist_hit, hit_buffer, step_red_pct, abs_gain, cand_safety, -new_frame_count)
                 if best is None or score > best_score:
                     best = (cand, new_hist, new_frame, hist_hit, new_frame_count, step_red_pct)
                     best_score = score
@@ -3563,37 +3722,48 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             'fat_filters': int(fat_filters),
             'structure_filters': int(structure_filters),
         })
+        _progress(f"Steg 2/4: bygger tvingade paket · träffnivå {target_idx}/{len(hit_levels)} · bästa hittills {final_hit}/{htot}, {final_keep:,} rader".replace(',', ' '), best={'hit': final_hit, 'total': htot, 'rows': final_keep})
 
     # Testa även hårda grupppaket. De bygger på samma kandidatvarianter men
     # använder t.ex. 6 av 8 i stället för att tvinga alla 8. Det kan ge fler
     # värde-/poängfilter utan att samlad historikträff faller lika hårt.
     group_packages = []
-    for target in hit_levels:
+    for group_idx, target in enumerate(hit_levels, 1):
         try:
             gp = _build_grouped_package_for_target(
                 candidates, int(target), frame_rows, frame, antal_matcher,
                 max_filters=int(max_filters),
                 min_value_filters=int(min_value_filters),
                 required_keys=required_keys,
+                row_matrix=row_matrix,
             )
             if gp is not None:
                 group_packages.append(gp)
+                _progress(f"Steg 3/4: bygger hårda grupper · träffnivå {group_idx}/{len(hit_levels)} · bästa grupp {gp.get('hist_hit',0)}/{htot}, {int(gp.get('frame_after',0)):,} rader".replace(',', ' '), best={'hit': gp.get('hist_hit',0), 'total': htot, 'rows': gp.get('frame_after',0)})
+            else:
+                _progress(f"Steg 3/4: bygger hårda grupper · träffnivå {group_idx}/{len(hit_levels)}")
         except Exception:
+            _progress(f"Steg 3/4: bygger hårda grupper · träffnivå {group_idx}/{len(hit_levels)}")
             pass
     packages.extend(group_packages)
 
     if required_keys:
         packages = [p for p in packages if required_keys.issubset({c.get('key') for c in (p.get('filters', []) or [])})]
 
+    _progress("Steg 4/4: väljer Pareto-bästa paket och bygger kandidatanalys")
     final_packages = _pareto_reduce_packages(packages)
 
     # Kandidatanalys: visa att alla filter faktiskt testades, även om de inte hamnade
     # i ett Pareto-paket. Särskilt viktigt för värde-/poängfilter som ofta överlappar
     # andra filter och därför kan bli utkonkurrerade i greedy-urvalet.
     selected_by_key = {}
+    selected_detail_by_key = {}
     for pi, pkg in enumerate(final_packages, 1):
         for c in pkg.get('filters', []) or []:
-            selected_by_key.setdefault(c.get('key'), []).append(f"P{pi}")
+            label = f"P{pi}"
+            selected_by_key.setdefault(c.get('key'), []).append(label)
+            mode = c.get('package_mode') or pkg.get('package_type', 'Tvingat')
+            selected_detail_by_key.setdefault(c.get('key'), []).append(f"{label}: {c.get('interval_txt','-')} ({mode})")
 
     candidates_by_key = {}
     for c in candidates:
@@ -3612,13 +3782,19 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             audit_rows.append({
                 'Kategori': spec.get('category', ''),
                 'Filter': spec.get('name', ''),
+                'Nivåer testade': 0,
+                'Nivåtrappa': '-',
                 'Bästa säkra intervall': '-',
                 'Säker träff': '-',
                 'Säker reducering': '-',
+                'Balanserat intervall': '-',
+                'Balanserad träff': '-',
+                'Balanserad reducering': '-',
                 'Mest reducerande intervall': '-',
                 'Mest reducerande träff': '-',
                 'Mest reducerar': '-',
                 'Valt i paket': 'Nej',
+                'Valt intervall': '-',
                 'Kommentar': comment,
             })
             continue
@@ -3629,7 +3805,9 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
         # spelbara kandidater.
         best_safe = max(cand_list, key=lambda c: (int(c.get('hist_hit', 0)), float(c.get('red_pct', 0.0)), -int(c.get('frame_keep', 10**9))))
         best_red = max(cand_list, key=lambda c: (float(c.get('red_pct', 0.0)), int(c.get('hist_hit', 0)), -int(c.get('frame_keep', 10**9))))
+        best_bal = _balanced_candidate_for_audit(cand_list, htot, min_hit_floor=max(int(min_hit_count), int(round(htot * 0.70))))
         selected = selected_by_key.get(key, [])
+        selected_details = selected_detail_by_key.get(key, [])
         if selected:
             comment = 'Valt i ' + ', '.join(selected)
         else:
@@ -3637,17 +3815,24 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
         audit_rows.append({
             'Kategori': best_safe.get('category', spec.get('category', '')),
             'Filter': best_safe.get('name', spec.get('name', '')),
+            'Nivåer testade': int(len(cand_list)),
+            'Nivåtrappa': _candidate_ladder_text(cand_list, htot, max_items=8),
             'Bästa säkra intervall': best_safe.get('interval_txt', '-'),
             'Säker träff': f"{int(best_safe.get('hist_hit', 0))}/{htot}",
             'Säker reducering': f"{float(best_safe.get('red_pct', 0.0)):.1f}%",
+            'Balanserat intervall': best_bal.get('interval_txt', '-') if best_bal else '-',
+            'Balanserad träff': f"{int(best_bal.get('hist_hit', 0))}/{htot}" if best_bal else '-',
+            'Balanserad reducering': f"{float(best_bal.get('red_pct', 0.0)):.1f}%" if best_bal else '-',
             'Mest reducerande intervall': best_red.get('interval_txt', '-'),
             'Mest reducerande träff': f"{int(best_red.get('hist_hit', 0))}/{htot}",
             'Mest reducerar': f"{float(best_red.get('red_pct', 0.0)):.1f}%",
             'Valt i paket': ', '.join(selected) if selected else 'Nej',
+            'Valt intervall': ' | '.join(selected_details) if selected_details else '-',
             'Kommentar': comment,
         })
 
     audit_df = pd.DataFrame(audit_rows)
+    _progress(f"Klar: {len(final_packages)} Pareto-paket · {len(candidates)} filterkandidater testade", bump=progress_total)
     return final_packages, audit_df
 
 
@@ -3938,7 +4123,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     st.caption("När du ändrar minsta historiska träff får varje filter nya slider-nycklar och startar på sitt rekommenderade intervall. 100% ska därför ge startintervall med 30/30 där det är möjligt.")
 
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
-        st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn ignorerar den manuella intervallslidern, testar flera intervallnivåer per filter och kan nu bygga hårda grupper, t.ex. 6 av 8, i stället för att tvinga alla filter. Det gör att fler värde-/poängfilter kan användas utan att samlad träffbild rasar lika snabbt. Struktur/FAT-sekvensfilter kan grundramsanpassas så de inte pressar mot ramens ytterkanter.")
+        st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn bygger nu en nivåtrappa per filter, t.ex. säkert/balanserat/aggressivt och flera mellanlägen, i stället för bara säkrast + högst reducering. Den visar progressklocka/ETA och använder förberäknade filtermasker för snabbare sökning på större grundramar.")
 
         with st.expander("Välj filter som måste ingå i rekommenderade paket", expanded=False):
             st.caption("Kryssa i filter du vill att paketmotorn ska använda. Motorn får själv avgöra om de passar bäst som tvingade filter eller i hårda grupper. Om ett ikryssat filter inte kan användas utan att träffbild/teckenskydd rasar visas inget paket på den nivån.")
@@ -3998,25 +4183,50 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         with rp_c7:
             build_recs = st.button("Beräkna paket", use_container_width=True, key="v12_build_recommended_packages")
         if build_recs:
-            with st.spinner("Beräknar Pareto-paket på exakt grundram..."):
-                rec_result = _build_recommended_filter_packages(
-                    v_m, specs, frame_rows, frame, antal_matcher,
-                    min_step_reduction_pct=float(rec_min_step),
-                    max_filters=int(rec_max_filters),
-                    min_hit_count=int(rec_min_hit),
-                    frame_adapt=bool(rec_frame_adapt),
-                    min_value_filters=int(rec_min_value_filters),
-                    required_keys=required_keys_now,
-                    target_frame_after=int(rec_display_max_rows),
-                )
-                if isinstance(rec_result, tuple):
-                    packages, candidate_audit = rec_result
-                else:
-                    packages, candidate_audit = rec_result, pd.DataFrame()
+            start_clock = time.time()
+            progress_bar = st.progress(0, text="Startar paketmotor...")
+            progress_status = st.empty()
+            progress_best = st.empty()
+
+            def _ui_package_progress(done, total, label, best=None):
+                try:
+                    done_i = int(max(0, done)); total_i = int(max(1, total))
+                    pct = int(max(0, min(100, round(100 * done_i / total_i))))
+                    elapsed = time.time() - start_clock
+                    if done_i > 0 and pct > 0:
+                        eta = elapsed * (total_i - done_i) / max(1, done_i)
+                        eta_txt = _fmt_elapsed(eta)
+                    else:
+                        eta_txt = "beräknas..."
+                    progress_bar.progress(pct, text=f"{label} · {pct}%")
+                    progress_status.caption(f"Förfluten tid: {_fmt_elapsed(elapsed)} · uppskattad kvar: {eta_txt}")
+                    if isinstance(best, dict) and best:
+                        progress_best.info(f"Bästa hittills: {int(best.get('hit', 0))}/{int(best.get('total', 0))} · {int(best.get('rows', 0)):,} rader".replace(',', ' '))
+                except Exception:
+                    pass
+
+            rec_result = _build_recommended_filter_packages(
+                v_m, specs, frame_rows, frame, antal_matcher,
+                min_step_reduction_pct=float(rec_min_step),
+                max_filters=int(rec_max_filters),
+                min_hit_count=int(rec_min_hit),
+                frame_adapt=bool(rec_frame_adapt),
+                min_value_filters=int(rec_min_value_filters),
+                required_keys=required_keys_now,
+                target_frame_after=int(rec_display_max_rows),
+                progress_cb=_ui_package_progress,
+            )
+            if isinstance(rec_result, tuple):
+                packages, candidate_audit = rec_result
+            else:
+                packages, candidate_audit = rec_result, pd.DataFrame()
+            elapsed_total = time.time() - start_clock
+            progress_bar.progress(100, text=f"Klar på {_fmt_elapsed(elapsed_total)}")
+            progress_status.success(f"Paketberäkningen är klar. Total tid: {_fmt_elapsed(elapsed_total)}.")
             st.session_state['v12_recommended_packages'] = packages
             st.session_state['v12_recommended_candidate_audit'] = candidate_audit
             st.session_state['v12_recommended_meta'] = {
-                'package_engine': 'pareto_multi_interval',
+                'package_engine': 'pareto_multilevel_progress',
                 'manual_hist_target_pct': int(filter_hist_target_pct),
                 'top_fav_count': int(top_fav_count),
                 'frame_rows': int(len(frame_rows)),
@@ -4061,7 +4271,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             candidate_audit = st.session_state.get('v12_recommended_candidate_audit')
             if isinstance(candidate_audit, pd.DataFrame) and not candidate_audit.empty:
                 with st.expander('Visa kandidatanalys – alla filter som paketmotorn testade', expanded=False):
-                    st.caption('Här kan du se om t.ex. Poängfilter faktiskt testades. Om det inte valdes beror det normalt på att ett annat filter gav bättre Pareto-paket eller att det överlappade med redan valda filter.')
+                    st.caption('Här ser du hela nivåtrappan per filter: säkert, balanserat, aggressivt och valt intervall i paket. Det gör det lättare att se varför t.ex. FAT Summa valdes på en viss nivå.')
                     st.dataframe(candidate_audit, use_container_width=True, hide_index=True)
             selectable_packages = _top_playable_packages(visible_packages, 3) if visible_packages else _top_playable_packages(hidden_packages, 1)
             if not visible_packages and selectable_packages:
