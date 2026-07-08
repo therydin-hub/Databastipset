@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0ab – Nivåtrappa + klocka"
+APP_VERSION = "v12.0ac – Eftertrim + smartare nivåval"
 
 
 st.markdown("""
@@ -3111,6 +3111,137 @@ def _pareto_reduce_packages(packages):
 
 
 
+def _combine_forced_candidate_masks(chosen):
+    """Kombinerar tvingade filter till samlad historik-/grundramsmask."""
+    chosen = list(chosen or [])
+    if not chosen:
+        return None, None
+    try:
+        htot = len(chosen[0]['hist_mask'])
+        ftot = len(chosen[0]['frame_mask'])
+        hist = np.ones(htot, dtype=bool)
+        frame = np.ones(ftot, dtype=bool)
+        for c in chosen:
+            hist = hist & np.asarray(c['hist_mask'], dtype=bool)
+            frame = frame & np.asarray(c['frame_mask'], dtype=bool)
+        return hist, frame
+    except Exception:
+        return None, None
+
+
+def _rebuild_forced_package_steps(chosen, htot, ftot):
+    """Bygger om steg-tabellen efter att nivåer bytts i eftertrimningen."""
+    cur_hist = np.ones(int(htot), dtype=bool)
+    cur_frame = np.ones(int(ftot), dtype=bool)
+    steps = []
+    for cand in list(chosen or []):
+        prev_count = int(cur_frame.sum())
+        cur_hist = cur_hist & np.asarray(cand['hist_mask'], dtype=bool)
+        cur_frame = cur_frame & np.asarray(cand['frame_mask'], dtype=bool)
+        new_count = int(cur_frame.sum())
+        step_red_pct = 100.0 * (prev_count - new_count) / max(1, prev_count)
+        test_level = f"{float(cand.get('coverage', 0.0)):.0f}%"
+        if cand.get('required_in_package'):
+            test_level += " · måste ingå"
+        steps.append({
+            'Filter': cand.get('name', ''),
+            'Kategori': cand.get('category', ''),
+            'Intervall': cand.get('interval_txt', '-'),
+            'Intervallträff': f"{int(cand.get('hist_hit', 0))}/{int(htot)}",
+            'Testnivå': test_level,
+            'Stegreducering': f"{step_red_pct:.1f}%",
+            'Efter filter': int(new_count),
+            'Samlad träff efter steg': f"{int(cur_hist.sum())}/{int(htot)}",
+        })
+    return steps, int(cur_hist.sum()), int(cur_frame.sum()), cur_hist, cur_frame
+
+
+def _post_trim_forced_package_levels(chosen, candidates_by_key, frame, antal_matcher, row_matrix=None, max_passes=2):
+    """Snävar åt valda filter efter paketbygget utan att sänka samlad träff.
+
+    Exempel: om paketet har FAT Summa 19–30 och hela paketet ändå har 23/30,
+    testas hårdare FAT Summa-nivåer. Om 19–26 fortfarande ger 23/30 men färre
+    rader, byts nivån automatiskt. Detta görs bara för tvingade paket där varje
+    filter är ett AND-villkor; grupppaket hanteras separat av gruppkravet.
+    """
+    chosen = [dict(c) for c in list(chosen or [])]
+    if not chosen:
+        return chosen, [], None, None
+    base_hist, base_frame = _combine_forced_candidate_masks(chosen)
+    if base_hist is None or base_frame is None:
+        return chosen, [], None, None
+    preserve_hit = int(base_hist.sum())
+    htot = len(base_hist)
+    notes = []
+
+    for _pass in range(int(max_passes)):
+        changed = False
+        for idx, cur in enumerate(list(chosen)):
+            cur_key = cur.get('key')
+            if cur_key is None:
+                continue
+            cur_hist_mask, cur_frame_mask = _combine_forced_candidate_masks(chosen)
+            if cur_hist_mask is None or cur_frame_mask is None:
+                continue
+            cur_rows = int(cur_frame_mask.sum())
+            best_alt = None
+            best_alt_frame = None
+            best_score = None
+            for alt in candidates_by_key.get(cur_key, []) or []:
+                # Samma nivå ger ingen nytta.
+                if str(alt.get('interval_txt')) == str(cur.get('interval_txt')):
+                    continue
+                trial = list(chosen)
+                alt2 = dict(alt)
+                # Bevara metadata som behövs i UI/applicering.
+                if cur.get('required_in_package'):
+                    alt2['required_in_package'] = True
+                trial[idx] = alt2
+                new_hist, new_frame = _combine_forced_candidate_masks(trial)
+                if new_hist is None or new_frame is None:
+                    continue
+                new_hit = int(new_hist.sum())
+                if new_hit < preserve_hit:
+                    continue
+                new_rows = int(new_frame.sum())
+                if new_rows >= cur_rows:
+                    continue
+                if row_matrix is not None:
+                    if not _mask_keeps_teckenskydd(row_matrix, new_frame, frame, antal_matcher):
+                        continue
+                # Välj lägst slutradantal. Vid samma radantal: högre individuell
+                # träff först så eftertrimmen inte väljer onödigt riskig nivå.
+                score = (new_rows, -int(alt.get('hist_hit', 0)), -float(alt.get('hist_pct', 0.0)), -float(alt.get('red_pct', 0.0)))
+                if best_alt is None or score < best_score:
+                    best_alt = alt2
+                    best_alt_frame = new_frame
+                    best_score = score
+            if best_alt is not None:
+                before = str(cur.get('interval_txt', '-'))
+                after = str(best_alt.get('interval_txt', '-'))
+                before_hit = int(cur.get('hist_hit', 0))
+                after_hit = int(best_alt.get('hist_hit', 0))
+                before_rows = int(cur_rows)
+                after_rows = int(best_score[0]) if best_score else int(best_alt_frame.sum())
+                notes.append({
+                    'Filter': cur.get('name', ''),
+                    'Före': before,
+                    'Efter': after,
+                    'Filterträff före': f"{before_hit}/{int(htot)}",
+                    'Filterträff efter': f"{after_hit}/{int(htot)}",
+                    'Paket-rader före': int(before_rows),
+                    'Paket-rader efter': int(after_rows),
+                    'Samlad träff bevarad': f"{preserve_hit}/{int(htot)}",
+                })
+                chosen[idx] = best_alt
+                changed = True
+        if not changed:
+            break
+    final_hist, final_frame = _combine_forced_candidate_masks(chosen)
+    return chosen, notes, final_hist, final_frame
+
+
+
 
 def _pick_best_variant_per_filter_for_group(candidates, category_filter, target, htot, min_hist_floor=None, max_items=10, required_keys=None):
     """Väljer en rimlig kandidatvariant per filter för en hård grupp.
@@ -3530,6 +3661,9 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             progress_done = min(progress_total, progress_done + 1)
 
     packages = []
+    candidates_by_key_for_trim = {}
+    for _c in candidates:
+        candidates_by_key_for_trim.setdefault(_c.get('key'), []).append(_c)
     min_step_reduction_pct = float(min_step_reduction_pct)
     for target_idx, target in enumerate(hit_levels, 1):
         cur_hist = np.ones(htot, dtype=bool)
@@ -3578,6 +3712,8 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 forced_failed = True
                 break
             cand, cur_hist, cur_frame, hist_hit, new_frame_count, step_red_pct = best_req
+            cand = dict(cand)
+            cand['required_in_package'] = True
             chosen.append(cand)
             used_keys.add(cand['key'])
             steps.append({
@@ -3668,10 +3804,19 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                     target_progress = min(1.0, abs_gain / need_rows)
                 else:
                     target_progress = 0.0
+                safe_floor = max(int(target), min(int(htot), max(int(round(float(htot) * 0.87)), int(target) + 2)))
+                risk_cost = max(0, int(safe_floor) - int(cand_safety))
+                heavy_low_hit = 1 if (float(cand.get('red_pct', 0.0)) >= 45.0 and risk_cost > 0) else 0
                 if need_value and is_value:
-                    score = (value_bonus, hist_hit, cand_safety, step_red_pct, -new_frame_count, cand['red_pct'])
+                    # Värdekärnan ska byggas med starka filter först. Ett filter som
+                    # reducerar brutalt men bara har låg individuell historikträff får
+                    # inte vinna enbart på reducering om ett stabilare värdefilter finns.
+                    score = (value_bonus, hist_hit, -risk_cost, -heavy_low_hit, cand_safety, step_red_pct, -new_frame_count, cand['red_pct'])
                 else:
-                    score = (target_progress, hist_hit, hit_buffer, step_red_pct, abs_gain, cand_safety, -new_frame_count)
+                    # När vi fortfarande ligger över radgränsen får faktisk framdrift väga
+                    # tungt, men riskkostnad ligger före ren stegreducering. Detta minskar
+                    # risken att t.ex. Delta/Avvikelse väljs extremt hårt i onödan.
+                    score = (target_progress, hist_hit, hit_buffer, -risk_cost, -heavy_low_hit, cand_safety, step_red_pct, abs_gain, -new_frame_count)
                 if best is None or score > best_score:
                     best = (cand, new_hist, new_frame, hist_hit, new_frame_count, step_red_pct)
                     best_score = score
@@ -3690,6 +3835,23 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 'Efter filter': int(new_frame_count),
                 'Samlad träff efter steg': f"{hist_hit}/{htot}",
             })
+
+        # Eftertrimma valda nivåer: byt till hårdare intervall om hela paketets
+        # samlade historikträff inte försämras. Detta fångar t.ex. FAT Summa
+        # 19–30 -> 19–26 när båda ger samma 23/30 i färdigt paket.
+        chosen, post_trim_notes, trim_hist, trim_frame = _post_trim_forced_package_levels(
+            chosen,
+            candidates_by_key_for_trim,
+            frame,
+            antal_matcher,
+            row_matrix=row_matrix,
+            max_passes=2,
+        )
+        if trim_hist is not None and trim_frame is not None:
+            cur_hist, cur_frame = trim_hist, trim_frame
+            steps, _, _, _, _ = _rebuild_forced_package_steps(chosen, htot, ftot)
+        else:
+            post_trim_notes = []
 
         final_hit = int(cur_hist.sum())
         final_keep = int(cur_frame.sum())
@@ -3721,6 +3883,7 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             'value_filters': int(value_filters),
             'fat_filters': int(fat_filters),
             'structure_filters': int(structure_filters),
+            'post_trim_notes': post_trim_notes,
         })
         _progress(f"Steg 2/4: bygger tvingade paket · träffnivå {target_idx}/{len(hit_levels)} · bästa hittills {final_hit}/{htot}, {final_keep:,} rader".replace(',', ' '), best={'hit': final_hit, 'total': htot, 'rows': final_keep})
 
@@ -3869,6 +4032,7 @@ def _recommended_packages_summary_df(packages):
             'Grundram → filter': f"{p['frame_start']:,} → {p['frame_after']:,}".replace(',', ' '),
             'Reducerar': f"{p['reduction_pct']:.1f}%",
             'Filter': int(p['num_filters']),
+            'Eftertrim': int(len(p.get('post_trim_notes', []) or [])),
             'Gruppkrav': group_txt or '—',
             'Värde-/poängfilter': int(p.get('value_filters', 0)),
             'FAT/sekvens': int(p.get('fat_filters', 0)),
@@ -4123,7 +4287,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     st.caption("När du ändrar minsta historiska träff får varje filter nya slider-nycklar och startar på sitt rekommenderade intervall. 100% ska därför ge startintervall med 30/30 där det är möjligt.")
 
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
-        st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn bygger nu en nivåtrappa per filter, t.ex. säkert/balanserat/aggressivt och flera mellanlägen, i stället för bara säkrast + högst reducering. Den visar progressklocka/ETA och använder förberäknade filtermasker för snabbare sökning på större grundramar.")
+        st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn bygger nivåtrappa per filter, visar progressklocka/ETA och eftertrimmar valt paket: om ett filter kan snävas åt mer utan att sänka samlad historikträff väljs den hårdare nivån automatiskt.")
 
         with st.expander("Välj filter som måste ingå i rekommenderade paket", expanded=False):
             st.caption("Kryssa i filter du vill att paketmotorn ska använda. Motorn får själv avgöra om de passar bäst som tvingade filter eller i hårda grupper. Om ett ikryssat filter inte kan användas utan att träffbild/teckenskydd rasar visas inget paket på den nivån.")
@@ -4226,7 +4390,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             st.session_state['v12_recommended_packages'] = packages
             st.session_state['v12_recommended_candidate_audit'] = candidate_audit
             st.session_state['v12_recommended_meta'] = {
-                'package_engine': 'pareto_multilevel_progress',
+                'package_engine': 'pareto_multilevel_progress_posttrim',
                 'manual_hist_target_pct': int(filter_hist_target_pct),
                 'top_fav_count': int(top_fav_count),
                 'frame_rows': int(len(frame_rows)),
@@ -4287,6 +4451,10 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     if sel_pkg.get('steps'):
                         st.dataframe(pd.DataFrame(sel_pkg['steps']), use_container_width=True, hide_index=True)
                         st.caption("Intervallträff är hur många av de liknande historiska omgångarna det enskilda filterintervallet klarar. Samlad träff efter steg är hela paketets träff efter att filtret lagts till.")
+                        if sel_pkg.get('post_trim_notes'):
+                            st.markdown("**Eftertrimning utan tappad samlad träff**")
+                            st.dataframe(pd.DataFrame(sel_pkg.get('post_trim_notes') or []), use_container_width=True, hide_index=True)
+                            st.caption("Eftertrim betyder att appen hittade ett snävare intervall som gav färre rader men behöll samma samlade historikträff för paketet.")
                     else:
                         st.info("Detta paket hittade inga filter som gav tillräcklig extra reducering inom träffmålet.")
                 if st.button("✅ Använd valt paket i filtercentralen", use_container_width=True, key="v12_apply_recommended_package"):
