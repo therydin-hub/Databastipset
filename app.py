@@ -8,11 +8,12 @@ import itertools
 import bisect
 import matplotlib.pyplot as plt
 import time
+import json
 from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0ae – Synlig gruppdiagnos"
+APP_VERSION = "v12.0ag – Granskad spelfil + grupp min/max-optimering"
 
 
 st.markdown("""
@@ -881,6 +882,51 @@ def tipsetmatrix12_reduce(rows, row_scores=None, mode="Balans", max_output_rows=
     reduced_rows = [rows[idx] for idx in best_selected]
     best_meta["selected_count"] = len(reduced_rows)
     return reduced_rows, best_meta
+
+
+def add_rows_for_13_chance(filtered_rows, reduced_rows, row_scores=None, target_13_pct=0.0):
+    """Lägger till extra rader ovanpå minsta 12-garantival för att höja 13-chansen.
+
+    12-garantin byggs först med så få rader som motorn hittar. Därefter kan
+    användaren höja önskad 13-chans. Då adderas rader från den redan filtrerade
+    massan, prioriterat efter rad_score/procentvikt. Det kan aldrig försämra
+    12-garantin; det ökar bara slutradantalet och andelen exakta rader.
+    """
+    filtered_rows = list(dict.fromkeys([normalize_single_row_text(r) for r in (filtered_rows or []) if normalize_single_row_text(r)]))
+    reduced_rows = list(dict.fromkeys([normalize_single_row_text(r) for r in (reduced_rows or []) if normalize_single_row_text(r)]))
+    n = len(filtered_rows)
+    if n == 0:
+        return reduced_rows, {'target_13_pct': 0.0, 'target_rows': 0, 'base_12_rows': len(reduced_rows), 'extra_13_rows': 0, 'final_13_pct': 0.0}
+    try:
+        target_13_pct = float(target_13_pct or 0.0)
+    except Exception:
+        target_13_pct = 0.0
+    target_13_pct = max(0.0, min(100.0, target_13_pct))
+    target_rows = int(np.ceil(n * target_13_pct / 100.0))
+    base_count = len(reduced_rows)
+    if target_rows <= base_count:
+        return reduced_rows, {'target_13_pct': target_13_pct, 'target_rows': target_rows, 'base_12_rows': base_count, 'extra_13_rows': 0, 'final_13_pct': round(100.0 * base_count / max(1, n), 2)}
+
+    selected = set(reduced_rows)
+    score_by_row = {}
+    if row_scores is not None and len(row_scores) == len(filtered_rows):
+        try:
+            score_by_row = {r: float(sc) for r, sc in zip(filtered_rows, row_scores)}
+        except Exception:
+            score_by_row = {}
+    remaining = [r for r in filtered_rows if r not in selected]
+    # Högre log-probability först. Om scores saknas blir ordningen stabil.
+    remaining.sort(key=lambda r: score_by_row.get(r, 0.0), reverse=True)
+    need = max(0, target_rows - base_count)
+    add = remaining[:need]
+    final_rows = reduced_rows + add
+    return final_rows, {
+        'target_13_pct': target_13_pct,
+        'target_rows': target_rows,
+        'base_12_rows': base_count,
+        'extra_13_rows': len(add),
+        'final_13_pct': round(100.0 * len(final_rows) / max(1, n), 2),
+    }
 
 
 def build_tipsetmatrix_guarantee_table(filtered_rows, reduced_rows, antal_matcher, prob_vector=None):
@@ -2434,14 +2480,14 @@ def _apply_manual_filters(rows, specs, settings, group_reqs):
         for gname, gs in group_specs.items():
             if not gs:
                 continue
-            req = int(group_reqs.get(gname, 0))
-            if req <= 0:
+            min_req, max_req = _group_req_bounds(group_reqs, gname, len(gs))
+            if min_req <= 0 and max_req >= len(gs):
                 continue
             hits = 0
             for spec in gs:
                 if _spec_pass(r, spec, settings[spec['key']]['interval']):
                     hits += 1
-            if hits < req:
+            if hits < min_req or hits > max_req:
                 ok = False; break
         if ok:
             filtered.append(r)
@@ -2496,14 +2542,14 @@ def _hist_package_passes(v_m, specs, settings, group_reqs):
         for gname, gs in group_specs.items():
             if not gs:
                 continue
-            req = int(group_reqs.get(gname, 0) or 0)
-            if req <= 0:
+            min_req, max_req = _group_req_bounds(group_reqs, gname, len(gs))
+            if min_req <= 0 and max_req >= len(gs):
                 continue
             hits = 0
             for spec in gs:
                 if hist_value_pass(spec, i):
                     hits += 1
-            if hits < req:
+            if hits < min_req or hits > max_req:
                 ok = False
                 break
         if ok:
@@ -2538,11 +2584,233 @@ def _package_signature(package):
         mode = c.get('package_mode', 'Tvingat')
         sig.append((c.get('key'), mode, iv))
     for g in package.get('groups', []) or []:
-        sig.append((g.get('name'), 'REQ', int(g.get('req', 0)), int(g.get('n', 0))))
+        sig.append((g.get('name'), 'REQ', int(g.get('req', 0)), int(g.get('max_req', g.get('n', 0))), int(g.get('n', 0))))
     return tuple(sorted(sig))
 
 
 
+def _group_req_bounds(group_reqs, gname, n_filters=0):
+    """Returnerar (min, max) för en grupp, bakåtkompatibelt med gamla heltalskrav.
+
+    Gamla versioner sparade bara `Grupp 1: 4`, vilket betydde minst 4 av N.
+    v12.0af sparar `{'min': 4, 'max': 6}` så gruppen kan styras som min/max.
+    """
+    n_filters = int(max(0, n_filters or 0))
+    raw = (group_reqs or {}).get(gname, None)
+    if isinstance(raw, dict):
+        mn = int(raw.get('min', raw.get('req', 0)) or 0)
+        mx = int(raw.get('max', raw.get('max_req', n_filters)) or n_filters)
+    else:
+        mn = int(raw or 0)
+        mx = n_filters
+    mn = max(0, min(mn, n_filters))
+    mx = max(0, min(mx, n_filters))
+    if mx < mn:
+        mx = mn
+    return mn, mx
+
+
+def _group_req_label(group_reqs, gname, n_filters=0):
+    mn, mx = _group_req_bounds(group_reqs, gname, n_filters)
+    if n_filters <= 0:
+        return '—'
+    if mn <= 0 and mx >= n_filters:
+        return '0 = påverkar inte'
+    if mx >= n_filters:
+        return f'minst {mn} av {n_filters}'
+    return f'{mn}–{mx} av {n_filters}'
+
+
+def _json_safe_value(x):
+    """Gör numpy/pandas-värden JSON-vänliga utan att förstöra listor/dicts."""
+    try:
+        if pd.isna(x):
+            return None
+    except Exception:
+        pass
+    if isinstance(x, (np.integer,)):
+        return int(x)
+    if isinstance(x, (np.floating,)):
+        return float(x)
+    if isinstance(x, (np.ndarray,)):
+        return [_json_safe_value(v) for v in x.tolist()]
+    if isinstance(x, (list, tuple)):
+        return [_json_safe_value(v) for v in x]
+    if isinstance(x, dict):
+        return {str(k): _json_safe_value(v) for k, v in x.items()}
+    return x
+
+
+def _history_records_for_spelfil(v_m):
+    """Sparar bara det som behövs för att återskapa filterstatistik utan ny databasläsning."""
+    records = []
+    try:
+        for _, row in v_m.iterrows():
+            records.append({
+                'Correct_Row': normalize_single_row_text(row.get('Correct_Row', '')),
+                'Prob_Vector': _json_safe_value(row.get('Prob_Vector', [])),
+            })
+    except Exception:
+        pass
+    return records
+
+
+def _history_df_from_records(records):
+    rows = []
+    for r in records or []:
+        cr = normalize_single_row_text((r or {}).get('Correct_Row', ''))
+        pv = (r or {}).get('Prob_Vector', []) or []
+        try:
+            pv = [float(x) for x in pv]
+        except Exception:
+            pv = []
+        if cr and pv:
+            rows.append({'Correct_Row': cr, 'Prob_Vector': pv})
+    return pd.DataFrame(rows)
+
+
+def _collect_filter_settings_for_save(specs, filter_hist_target_pct, top_fav_count):
+    out = {}
+    for spec in specs or []:
+        k = spec.get('key')
+        if not k:
+            continue
+        mode = st.session_state.get(f'filter_mode_{k}', 'Av')
+        range_key = f'filter_range_{k}_h{int(filter_hist_target_pct)}_tf{int(top_fav_count)}'
+        interval = st.session_state.get(range_key, spec.get('default_interval'))
+        out[k] = {
+            'name': spec.get('name', k),
+            'category': spec.get('category', ''),
+            'mode': mode,
+            'interval': _json_safe_value(interval),
+        }
+    return out
+
+
+def _current_group_reqs_from_session():
+    out = {}
+    for i in range(1, 7):
+        # Bakåtkompatibel default: om gamla group_req_i finns används den som min.
+        old = int(st.session_state.get(f'group_req_{i}', 0) or 0)
+        mn = int(st.session_state.get(f'group_req_min_{i}', old) or 0)
+        mx = int(st.session_state.get(f'group_req_max_{i}', 40) or 40)
+        out[f'Grupp {i}'] = {'min': mn, 'max': mx}
+    return out
+
+
+def _apply_filter_settings_to_session(saved_settings, filter_hist_target_pct, top_fav_count):
+    for k, v in (saved_settings or {}).items():
+        if not isinstance(v, dict):
+            continue
+        st.session_state[f'filter_mode_{k}'] = v.get('mode', 'Av')
+        interval = v.get('interval')
+        if isinstance(interval, (list, tuple)) and len(interval) >= 2:
+            range_key = f'filter_range_{k}_h{int(filter_hist_target_pct)}_tf{int(top_fav_count)}'
+            # Behåll int/float-typen från filen. Streamlits int-sliders kan annars
+            # bli griniga om de får float-värden i session_state.
+            st.session_state[range_key] = (interval[0], interval[1])
+
+
+def _apply_group_reqs_to_session(group_reqs):
+    for i in range(1, 7):
+        gname = f'Grupp {i}'
+        raw = (group_reqs or {}).get(gname, {})
+        if isinstance(raw, dict):
+            mn = int(raw.get('min', raw.get('req', 0)) or 0)
+            mx = int(raw.get('max', raw.get('max_req', 40)) or 40)
+        else:
+            mn = int(raw or 0)
+            mx = 40
+        st.session_state[f'group_req_min_{i}'] = mn
+        st.session_state[f'group_req_max_{i}'] = mx
+        st.session_state[f'group_req_{i}'] = mn
+
+
+def _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher):
+    return {
+        'file_type': 'tipset_filterpaket',
+        'app_version': APP_VERSION,
+        'created_at': datetime.now().isoformat(timespec='seconds'),
+        'spelform': spelform,
+        'antal_matcher': int(antal_matcher),
+        'filter_hist_target_pct': int(filter_hist_target_pct),
+        'top_fav_count': int(top_fav_count),
+        'filters': _collect_filter_settings_for_save(specs, filter_hist_target_pct, top_fav_count),
+        'group_reqs': _json_safe_value(group_reqs),
+    }
+
+
+def _build_spelfil_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher, input_text, top_n, pay_min, frame, v_m, filter_vec, reducer_settings=None):
+    payload = _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher)
+    payload.update({
+        'file_type': 'tipset_spelfil',
+        'input_text': input_text or '',
+        'top_n': int(top_n),
+        'pay_min': int(pay_min),
+        'frame': _json_safe_value(frame),
+        'filter_vec': _json_safe_value(filter_vec or []),
+        'history_records': _history_records_for_spelfil(v_m),
+        'reducer_settings': _json_safe_value(reducer_settings or {}),
+    })
+    return payload
+
+
+def _payload_to_json_bytes(payload):
+    return json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
+
+
+def _load_payload_from_uploaded_file(uploaded):
+    raw = uploaded.read()
+    if isinstance(raw, bytes):
+        raw = raw.decode('utf-8')
+    return json.loads(raw)
+
+
+def _apply_spelfil_payload(payload):
+    """Läser in spelfil/filterpaket i session_state. Körs helst före huvudwidgets skapas."""
+    ftype = str((payload or {}).get('file_type', '')).lower()
+    # Grundinställningar: sätts tidigt i sidebar innan selectbox/text_area byggs.
+    if payload.get('spelform'):
+        st.session_state['v12_spelform'] = payload.get('spelform')
+    if payload.get('input_text') is not None:
+        st.session_state['v12_input_text'] = payload.get('input_text', '')
+    if payload.get('top_n') is not None:
+        st.session_state['v12_top_n'] = int(payload.get('top_n') or 30)
+    if payload.get('pay_min') is not None:
+        st.session_state['v12_pay_min'] = int(payload.get('pay_min') or 0)
+    if payload.get('filter_hist_target_pct') is not None:
+        st.session_state['v12_filter_hist_target_pct'] = int(payload.get('filter_hist_target_pct') or 90)
+    if payload.get('top_fav_count') is not None:
+        st.session_state['v12_top_fav_count'] = int(payload.get('top_fav_count') or 3)
+
+    fhp = int(st.session_state.get('v12_filter_hist_target_pct', payload.get('filter_hist_target_pct', 90)) or 90)
+    tfc = int(st.session_state.get('v12_top_fav_count', payload.get('top_fav_count', 3)) or 3)
+    _apply_filter_settings_to_session(payload.get('filters', {}), fhp, tfc)
+    _apply_group_reqs_to_session(payload.get('group_reqs', {}))
+
+    if ftype == 'tipset_spelfil':
+        frame = payload.get('frame') or []
+        if frame:
+            st.session_state['v12_saved_frame'] = [[s for s in normalize_signs(x)] for x in frame]
+            st.session_state['v12_frame_saved'] = True
+            st.session_state['v12_frame_defaults'] = st.session_state['v12_saved_frame']
+            st.session_state['v12_frame_spelform'] = payload.get('spelform', st.session_state.get('v12_spelform'))
+        hist_df = _history_df_from_records(payload.get('history_records', []))
+        filter_vec = payload.get('filter_vec', []) or []
+        if not hist_df.empty and filter_vec:
+            st.session_state['v12_v_m'] = hist_df
+            st.session_state['v12_filter_vec'] = [float(x) for x in filter_vec]
+            st.session_state['v12_db_name'] = 'spelfil'
+            st.session_state['v12_analysis_ready'] = True
+        rs = payload.get('reducer_settings') or {}
+        if isinstance(rs, dict):
+            for k, v in rs.items():
+                st.session_state[k] = v
+    return ftype
+
+
+def _fmt_file_stem(prefix='tipset'):
+    return f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 
 
@@ -2643,7 +2911,7 @@ def build_group_correction_df(result_row, specs, settings, group_reqs):
         group_specs = [s for s in specs if settings.get(s.get('key'), {}).get('mode') == gname]
         if not group_specs:
             continue
-        req = int(group_reqs.get(gname, 0) or 0)
+        min_req, max_req = _group_req_bounds(group_reqs, gname, len(group_specs))
         hits = 0
         miss_names = []
         for spec in group_specs:
@@ -2656,11 +2924,11 @@ def build_group_correction_df(result_row, specs, settings, group_reqs):
                 hits += 1
             else:
                 miss_names.append(spec.get('name', ''))
-        active_req = req if req > 0 else 0
-        ok_group = True if active_req <= 0 else hits >= active_req
+        inactive = (min_req <= 0 and max_req >= len(group_specs))
+        ok_group = True if inactive else (min_req <= hits <= max_req)
         out.append({
             'Grupp': gname,
-            'Krav': f'minst {active_req} av {len(group_specs)}' if active_req else '0 = påverkar inte',
+            'Krav': _group_req_label(group_reqs, gname, len(group_specs)),
             'Facit träffar': f'{hits}/{len(group_specs)}',
             'Status': '✅ Träff' if ok_group else '❌ Miss',
             'Missade filter': ', '.join(miss_names[:8]) + (' …' if len(miss_names) > 8 else ''),
@@ -3362,10 +3630,11 @@ def _pick_best_variant_per_filter_for_group(candidates, category_filter, target,
 
 
 def _best_hard_group_from_candidates(group_label, group_no, group_candidates, cur_hist, cur_frame, target, frame_rows, frame, antal_matcher, min_members=3, row_matrix=None):
-    """Testar hårda gruppkrav, t.ex. 5 av 7, och returnerar bästa gruppblock.
+    """Testar hårda gruppkrav med både min och max, t.ex. 5-7 av 8.
 
     Gruppen måste hålla samlad historikträff efter att kombineras med redan valt paket.
-    Den väljer hårdaste gruppkrav som ger bra reducering utan att förstöra träffbilden.
+    v12.0ag testar inte bara "minst X" utan även övre spärr, eftersom vissa
+    filterfamiljer kan bli för extrema om alla delvillkor träffar samtidigt.
     """
     group_candidates = list(group_candidates or [])
     if len(group_candidates) < int(min_members):
@@ -3379,46 +3648,52 @@ def _best_hard_group_from_candidates(group_label, group_no, group_candidates, cu
     hist_scores = hist_stack.sum(axis=0)
     frame_scores = frame_stack.sum(axis=0)
     n = len(group_candidates)
-    # Hårda grupper: börja högt. En grupp på 8 filter testar t.ex. 8/8, 7/8, 6/8, 5/8.
-    min_req = max(1, int(np.ceil(n * 0.58)))
+    # Hårda grupper: börja högt. En grupp på 8 filter testar t.ex. 8-8, 7-8, 6-8,
+    # men även 5-7 osv. Max=n betyder vanlig "minst"-grupp. Max<n är en äkta
+    # Helgardering-lik min/max-grupp.
+    min_req_floor = max(1, int(np.ceil(n * 0.58)))
     best = None
     best_score = None
-    for req in range(n, min_req - 1, -1):
-        g_hist_mask = hist_scores >= req
-        g_frame_mask = frame_scores >= req
-        new_hist = cur_hist & g_hist_mask
-        hist_hit = int(new_hist.sum())
-        if hist_hit < int(target):
-            continue
-        new_frame = cur_frame & g_frame_mask
-        new_count = int(new_frame.sum())
-        if new_count >= cur_frame_count:
-            continue
-        if row_matrix is not None:
-            if not _mask_keeps_teckenskydd(row_matrix, new_frame, frame, antal_matcher):
+    for req in range(n, min_req_floor - 1, -1):
+        for max_req in range(n, req - 1, -1):
+            g_hist_mask = (hist_scores >= req) & (hist_scores <= max_req)
+            g_frame_mask = (frame_scores >= req) & (frame_scores <= max_req)
+            new_hist = cur_hist & g_hist_mask
+            hist_hit = int(new_hist.sum())
+            if hist_hit < int(target):
                 continue
-        else:
-            test_rows = _rows_from_mask(frame_rows, new_frame)
-            if selected_signs_missing(test_rows, frame, antal_matcher):
+            new_frame = cur_frame & g_frame_mask
+            new_count = int(new_frame.sum())
+            if new_count >= cur_frame_count:
                 continue
-        red_pct = 100.0 * (cur_frame_count - new_count) / max(1, cur_frame_count)
-        # Poäng: håll gruppen hård, men prioritera faktisk reducering och träff.
-        req_ratio = req / max(1, n)
-        score = (hist_hit, red_pct, req_ratio, -new_count, req)
-        if best is None or score > best_score:
-            best = {
-                'group_label': group_label,
-                'group_no': int(group_no),
-                'req': int(req),
-                'n': int(n),
-                'candidates': group_candidates,
-                'hist_mask': g_hist_mask,
-                'frame_mask': g_frame_mask,
-                'hist_hit': hist_hit,
-                'frame_after': new_count,
-                'step_red_pct': red_pct,
-            }
-            best_score = score
+            if row_matrix is not None:
+                if not _mask_keeps_teckenskydd(row_matrix, new_frame, frame, antal_matcher):
+                    continue
+            else:
+                test_rows = _rows_from_mask(frame_rows, new_frame)
+                if selected_signs_missing(test_rows, frame, antal_matcher):
+                    continue
+            red_pct = 100.0 * (cur_frame_count - new_count) / max(1, cur_frame_count)
+            req_ratio = req / max(1, n)
+            max_tightness = (n - max_req) / max(1, n)
+            # Poäng: först samlad träff, därefter faktisk reducering. Vid jämnt
+            # läge premieras hård min-nivå och en meningsfull max-spärr.
+            score = (hist_hit, red_pct, req_ratio, max_tightness, -new_count, req, -max_req)
+            if best is None or score > best_score:
+                best = {
+                    'group_label': group_label,
+                    'group_no': int(group_no),
+                    'req': int(req),
+                    'max_req': int(max_req),
+                    'n': int(n),
+                    'candidates': group_candidates,
+                    'hist_mask': g_hist_mask,
+                    'frame_mask': g_frame_mask,
+                    'hist_hit': hist_hit,
+                    'frame_after': new_count,
+                    'step_red_pct': red_pct,
+                }
+                best_score = score
     return best
 
 
@@ -3471,7 +3746,7 @@ def _build_grouped_package_for_target(candidates, target, frame_rows, frame, ant
             'Steg': 'Grupp',
             'Filter/Grupp': block['group_label'],
             'Kategori': 'Värde & svårighet',
-            'Intervall': f"minst {block['req']} av {block['n']}",
+            'Intervall': f"{block['req']}–{block.get('max_req', block['n'])} av {block['n']}",
             'Intervallträff': f"{block['hist_hit']}/{htot}",
             'Testnivå': 'hård grupp',
             'Stegreducering': f"{block['step_red_pct']:.1f}%",
@@ -3519,7 +3794,7 @@ def _build_grouped_package_for_target(candidates, target, frame_rows, frame, ant
             'Steg': 'Grupp',
             'Filter/Grupp': block['group_label'],
             'Kategori': 'Obligatorisk grupp',
-            'Intervall': f"minst {block['req']} av {block['n']}",
+            'Intervall': f"{block['req']}–{block.get('max_req', block['n'])} av {block['n']}",
             'Intervallträff': f"{block['hist_hit']}/{htot}",
             'Testnivå': 'måste ingå',
             'Stegreducering': f"{block['step_red_pct']:.1f}%",
@@ -3564,7 +3839,7 @@ def _build_grouped_package_for_target(candidates, target, frame_rows, frame, ant
             'Steg': 'Grupp',
             'Filter/Grupp': best_block['group_label'],
             'Kategori': 'Gruppfilter',
-            'Intervall': f"minst {best_block['req']} av {best_block['n']}",
+            'Intervall': f"{best_block['req']}–{best_block.get('max_req', best_block['n'])} av {best_block['n']}",
             'Intervallträff': f"{best_block['hist_hit']}/{htot}",
             'Testnivå': 'hård grupp',
             'Stegreducering': f"{best_block['step_red_pct']:.1f}%",
@@ -3587,6 +3862,7 @@ def _build_grouped_package_for_target(candidates, target, frame_rows, frame, ant
             'name': gname,
             'label': g['group_label'],
             'req': int(g['req']),
+            'max_req': int(g.get('max_req', g['n'])),
             'n': int(g['n']),
         })
         for c in g['candidates']:
@@ -3594,6 +3870,7 @@ def _build_grouped_package_for_target(candidates, target, frame_rows, frame, ant
             c2['package_mode'] = gname
             c2['package_group_label'] = g['group_label']
             c2['package_group_req'] = int(g['req'])
+            c2['package_group_max_req'] = int(g.get('max_req', g['n']))
             c2['package_group_n'] = int(g['n'])
             filters.append(c2)
 
@@ -4095,7 +4372,7 @@ def _recommended_packages_summary_df(packages):
     for i, p in enumerate(packages, 1):
         group_txt = ''
         if p.get('groups'):
-            group_txt = ' | '.join([f"{g.get('name')}: {g.get('req')}/{g.get('n')}" for g in p.get('groups', [])])
+            group_txt = ' | '.join([f"{g.get('name')}: {g.get('req')}-{g.get('max_req', g.get('n'))}/{g.get('n')}" for g in p.get('groups', [])])
         rows.append({
             'Paket': f"P{i}",
             'Typ': p.get('package_type', 'Tvingade filter'),
@@ -4178,7 +4455,7 @@ def _group_packages_status_df(packages, max_after_rows, max_rows=6):
     rows = []
     for i, p in enumerate(chosen, 1):
         after = int(p.get('frame_after', 0))
-        group_txt = ' | '.join([f"{g.get('label', g.get('name','Grupp'))}: {g.get('req')}/{g.get('n')}" for g in p.get('groups', [])]) or '—'
+        group_txt = ' | '.join([f"{g.get('label', g.get('name','Grupp'))}: {g.get('req')}-{g.get('max_req', g.get('n'))}/{g.get('n')}" for g in p.get('groups', [])]) or '—'
         status = 'Under radgränsen' if after <= int(max_after_rows) else f"Över radgränsen {int(max_after_rows):,}".replace(',', ' ')
         rows.append({
             'Grupppaket': f"G{i}",
@@ -4223,11 +4500,17 @@ def _apply_recommended_package_to_session(package, specs, filter_hist_target_pct
             st.session_state[range_key] = spec.get('default_interval')
     for i in range(1, 7):
         st.session_state[f'group_req_{i}'] = 0
+        st.session_state[f'group_req_min_{i}'] = 0
+        st.session_state[f'group_req_max_{i}'] = 40
     for g in package.get('groups', []) or []:
         try:
             gi = int(str(g.get('name','Grupp 0')).split()[-1])
             if 1 <= gi <= 6:
-                st.session_state[f'group_req_{gi}'] = int(g.get('req', 0))
+                mn = int(g.get('req', g.get('min_req', 0)) or 0)
+                mx = int(g.get('max_req', g.get('n', 40)) or 40)
+                st.session_state[f'group_req_{gi}'] = mn
+                st.session_state[f'group_req_min_{gi}'] = mn
+                st.session_state[f'group_req_max_{gi}'] = mx
         except Exception:
             pass
 
@@ -4267,6 +4550,26 @@ st.markdown(f"""
 with st.sidebar:
     st.header("Kontroll")
     st.caption("Sidan är rensad. Filter och grupper styrs manuellt.")
+    st.markdown("**Öppna spelfil/filterpaket**")
+    uploaded_setup = st.file_uploader(
+        "JSON-fil",
+        type=["json"],
+        key="v12_open_spelfil_filterpaket",
+        help="Spelfil återställer kupong, grundram och filter. Filterpaket återställer bara filter/grupper.",
+    )
+    if uploaded_setup is not None:
+        upload_sig = f"{getattr(uploaded_setup, 'name', '')}:{getattr(uploaded_setup, 'size', 0)}"
+        if st.session_state.get('v12_last_loaded_upload_sig') != upload_sig:
+            try:
+                payload = _load_payload_from_uploaded_file(uploaded_setup)
+                ftype = _apply_spelfil_payload(payload)
+                st.session_state['v12_last_loaded_upload_sig'] = upload_sig
+                st.success("Spelfil öppnad." if ftype == 'tipset_spelfil' else "Filterpaket öppnat.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Kunde inte öppna filen: {e}")
+        else:
+            st.caption("Filen är redan öppnad. Ladda upp en annan fil om du vill byta.")
     if st.button("🧹 Rensa cache", use_container_width=True):
         st.cache_data.clear()
         st.success("Cache tömd.")
@@ -4700,21 +5003,43 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 settings[k] = {'mode': mode, 'interval': rng}
                 st.divider()
     st.markdown("---")
-    st.markdown("**Gruppkrav**")
+    st.markdown("**Gruppkrav – min/max**")
+    st.caption("Min/max styr hur många filter i respektive grupp som måste träffa. Exempel: 5–7 av 8 betyder att raden ska klara minst 5 men inte nödvändigtvis alla 8. Max kan även användas för att stoppa för extrema rader som klarar för många filter i samma familj.")
     gc = st.columns(6)
     group_reqs = {}
     for i in range(1, 7):
         gname = f'Grupp {i}'
+        n_in_group = sum(1 for v in settings.values() if v.get('mode') == gname)
+        old_req = int(st.session_state.get(f'group_req_{i}', 0) or 0)
+        default_min = int(st.session_state.get(f'group_req_min_{i}', old_req) or 0)
+        default_max = int(st.session_state.get(f'group_req_max_{i}', max(1, n_in_group)) or max(1, n_in_group))
+        default_min = max(0, min(default_min, max(40, n_in_group)))
+        default_max = max(default_min, min(default_max, max(40, n_in_group)))
         with gc[i-1]:
-            group_reqs[gname] = st.number_input(
-                gname,
+            st.caption(f"{gname} · {n_in_group} filter")
+            mn = st.number_input(
+                "Min",
                 min_value=0,
                 max_value=40,
-                value=int(st.session_state.get(f'group_req_{i}', 0)),
+                value=default_min,
                 step=1,
-                key=f"group_req_{i}",
-                help="0 = gruppen påverkar inte. Exempel: Grupp 1 har 7 filter, krav 4 betyder minst 4 av 7.",
+                key=f"group_req_min_{i}",
+                help="0 = inget min-krav. Gruppen påverkar bara om min eller max faktiskt begränsar.",
             )
+            mx = st.number_input(
+                "Max",
+                min_value=0,
+                max_value=40,
+                value=default_max,
+                step=1,
+                key=f"group_req_max_{i}",
+                help="Max antal filter som får träffa i gruppen. Sätt max till antal filter i gruppen om du inte vill ha övre spärr.",
+            )
+            if int(mx) < int(mn):
+                st.warning("Max < min")
+            group_reqs[gname] = {'min': int(mn), 'max': int(mx)}
+            # Bakåtkompatibel nyckel, så äldre delar/metadata fortfarande kan läsa min-kravet.
+            st.session_state[f'group_req_{i}'] = int(mn)
     active_preview = sum(1 for v in settings.values() if v['mode'] != 'Av')
     if active_preview > 0:
         st.success(f"{active_preview} filter är aktiva direkt. Du behöver inte spara filtercentralen separat — körknappen använder nuvarande val.")
@@ -4757,13 +5082,51 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     # Step 4 – run filters + TipsetMatrix
     st.markdown("<div class='v12-card'>", unsafe_allow_html=True)
     st.markdown("<div class='v12-step'>Steg 4</div><div class='v12-title'>Kör filtrering och TipsetMatrix</div>", unsafe_allow_html=True)
-    col_r1, col_r2, col_r3 = st.columns([1, 1, 1])
+    col_r1, col_r2, col_r3, col_r4 = st.columns([1, 1, 1, 1])
     with col_r1:
-        matrix_limit = st.number_input("Max filtermassa till TipsetMatrix", min_value=500, max_value=50000, value=5000, step=500, help="Om fler rader återstår körs filtreringen ändå, men TipsetMatrix stoppas tills du höjer spärren eller filtrerar hårdare.")
+        matrix_limit = st.number_input(
+            "Max filtermassa till TipsetMatrix",
+            min_value=500,
+            max_value=50000,
+            value=int(st.session_state.get('v12_matrix_limit', 5000)),
+            step=500,
+            key="v12_matrix_limit",
+            help="Om fler rader återstår körs filtreringen ändå, men TipsetMatrix stoppas tills du höjer spärren eller filtrerar hårdare.",
+        )
     with col_r2:
-        run_matrix = st.checkbox("Kör TipsetMatrix 12", value=True)
+        run_matrix = st.checkbox("Kör TipsetMatrix 12", value=bool(st.session_state.get('v12_run_matrix', True)), key="v12_run_matrix")
     with col_r3:
-        reducer_mode = st.selectbox("Motor", ["Balans", "Favoriter", "Skräll"], index=0)
+        reducer_modes = ["Minsta rader", "Balans", "Favoriter", "Skräll"]
+        saved_mode = st.session_state.get('v12_reducer_mode', "Minsta rader")
+        reducer_mode = st.selectbox("Motor", reducer_modes, index=reducer_modes.index(saved_mode) if saved_mode in reducer_modes else 0, key="v12_reducer_mode")
+    with col_r4:
+        target_13_pct = st.number_input(
+            "Höj 13-chans till minst %",
+            min_value=0.0,
+            max_value=100.0,
+            value=float(st.session_state.get('v12_target_13_pct', 0.0)),
+            step=1.0,
+            key="v12_target_13_pct",
+            help="0 = minsta radantal för full 12-rättsgaranti. Om systemet känns för billigt kan du höja procenten; appen lägger då till extra rader med högst procentvikt för att öka chansen till 13 rätt.",
+        )
+
+    with st.expander("💾 Spara / öppna system", expanded=False):
+        st.caption("Filterpaket sparar bara filter, intervall och gruppkrav. Spelfil sparar även kupong, grundram, historik och reduceringsinställningar.")
+        reducer_save_settings = {
+            'v12_matrix_limit': int(matrix_limit),
+            'v12_run_matrix': bool(run_matrix),
+            'v12_reducer_mode': reducer_mode,
+            'v12_target_13_pct': float(target_13_pct),
+        }
+        filter_payload = _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher)
+        game_payload = _build_spelfil_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher, input_text, top_n, pay_min, frame, v_m, filter_vec, reducer_settings=reducer_save_settings)
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            tm_download_button("⬇️ Spara filterpaket", _payload_to_json_bytes(filter_payload), f"{_fmt_file_stem('filterpaket')}.json", "application/json", use_container_width=True)
+        with sc2:
+            tm_download_button("⬇️ Spara spelfil", _payload_to_json_bytes(game_payload), f"{_fmt_file_stem('spelfil')}.json", "application/json", use_container_width=True)
+        st.caption("Öppna filer görs i sidopanelen. En spelfil kan öppnas direkt utan att du behöver klicka i grundram/filter igen.")
+
     go = st.button("🚀 Kör filtrering + reducering", use_container_width=True)
 
     if go:
@@ -4789,10 +5152,18 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     filtered_rows = clean_filtered_rows
                     st.session_state['v12_last_result']['filtered_rows'] = filtered_rows
                     scores = [row_log_probability(r, filter_vec) for r in filtered_rows]
-                    reduced_rows, tm_meta = tipsetmatrix12_reduce(filtered_rows, row_scores=scores, mode=reducer_mode, max_output_rows=None, seed=42)
+                    reduced_rows_12, tm_meta = tipsetmatrix12_reduce(filtered_rows, row_scores=scores, mode=reducer_mode, max_output_rows=None, seed=42)
+                    reduced_rows, boost_meta = add_rows_for_13_chance(filtered_rows, reduced_rows_12, row_scores=scores, target_13_pct=target_13_pct)
+                    tm_meta['base_12_rows'] = int(boost_meta.get('base_12_rows', len(reduced_rows_12)))
+                    tm_meta['extra_13_rows'] = int(boost_meta.get('extra_13_rows', 0))
+                    tm_meta['target_13_pct'] = float(boost_meta.get('target_13_pct', 0.0))
+                    tm_meta['final_13_pct'] = float(boost_meta.get('final_13_pct', 0.0))
                 st.session_state['v12_last_result']['reduced_rows'] = reduced_rows
                 st.session_state['v12_last_result']['tm_meta'] = tm_meta
-                st.success(f"TipsetMatrix klar: {len(filtered_rows):,} → {len(reduced_rows):,} rader.".replace(',', ' '))
+                if tm_meta.get('extra_13_rows', 0):
+                    st.success(f"TipsetMatrix klar: 12-garanti {len(filtered_rows):,} → {tm_meta.get('base_12_rows', len(reduced_rows)):,} rader. 13-chans höjd med {tm_meta.get('extra_13_rows',0):,} extra rader → {len(reduced_rows):,} slutrader.".replace(',', ' '))
+                else:
+                    st.success(f"TipsetMatrix klar: {len(filtered_rows):,} → {len(reduced_rows):,} rader.".replace(',', ' '))
                 if not tm_meta.get('complete', False):
                     st.warning(f"TipsetMatrix täckte {tm_meta.get('covered_pct', 0)}% av filtermassan. Höj spärren eller filtrera hårdare om du vill kräva full 12-garanti.")
 
@@ -4809,9 +5180,18 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         c1.metric("Grundram", f"{len(frame_rows):,}".replace(',', ' '))
         c2.metric("Efter filter", f"{len(filtered_rows):,}".replace(',', ' '), f"-{(100-100*len(filtered_rows)/max(1,len(frame_rows))):.1f}%")
         if reduced_rows:
+            tm_meta_display = res.get('tm_meta', {}) or {}
+            base_12_rows = int(tm_meta_display.get('base_12_rows', len(reduced_rows)) or len(reduced_rows))
+            extra_13_rows = int(tm_meta_display.get('extra_13_rows', 0) or 0)
             c3.metric("Efter TipsetMatrix", f"{len(reduced_rows):,}".replace(',', ' '), f"-{(100-100*len(reduced_rows)/max(1,len(filtered_rows))):.1f}%")
             c4.metric("13-chans", f"{100*len(reduced_rows)/max(1,len(filtered_rows)):.2f}%")
+            if extra_13_rows > 0:
+                st.info(f"Reduceringsval: minsta hittade 12-garanti gav {base_12_rows:,} rader. Därefter lades {extra_13_rows:,} extra rader till för att höja 13-chansen.".replace(',', ' '))
+            else:
+                st.caption(f"Reduceringsval: minsta hittade 12-garantimassa används ({base_12_rows:,} rader). Höj 13-chansmålet om systemet känns för billigt.".replace(',', ' '))
             guarantee_df, guarantee_meta = build_tipsetmatrix_guarantee_table(filtered_rows, reduced_rows, antal_matcher, prob_vector=filter_vec)
+            if float(guarantee_meta.get('12plus', 0.0)) < 100.0:
+                st.error(f"Kontrollvarning: garantitabellen visar bara {guarantee_meta.get('12plus', 0)}% 12+. Använd inte inlämningsfilen förrän filtret/reduceringen har körts om eller spärren justerats.")
             st.dataframe(guarantee_df, use_container_width=True, hide_index=True)
             with st.expander("Teckenfördelning efter filter och slutrader"):
                 st.dataframe(build_combined_sign_distribution_df(filtered_rows, reduced_rows, frame, antal_matcher), use_container_width=True, hide_index=True)
