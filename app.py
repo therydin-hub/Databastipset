@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0ad – Grupppaket som egen väg"
+APP_VERSION = "v12.0ae – Synlig gruppdiagnos"
 
 
 st.markdown("""
@@ -4144,6 +4144,69 @@ def _hidden_packages_reference_df(packages, max_after_rows, max_rows=8):
     return pd.DataFrame(rows)
 
 
+
+
+def _group_packages_status_df(packages, max_after_rows, max_rows=6):
+    """Sammanfattar grupppaket oavsett om de ligger under radgränsen.
+
+    UI:t ska aldrig kännas som att gruppmotorn saknas. Om grupppaket finns men
+    inte är spelbara under vald radgräns visas bästa över gränsen med tydlig
+    status. Om inga grupppaket alls finns returneras tom DataFrame och UI:t
+    visar en förklaring.
+    """
+    group_packages = [p for p in (packages or []) if _is_hard_group_package(p)]
+    if not group_packages:
+        return pd.DataFrame()
+
+    # Visa alltid de bästa synliga först, sedan bästa dolda över gränsen.
+    visible = [p for p in group_packages if int(p.get('frame_after', 10**12)) <= int(max_after_rows)]
+    hidden = [p for p in group_packages if int(p.get('frame_after', 10**12)) > int(max_after_rows)]
+    chosen = []
+    chosen.extend(_top_playable_packages(visible, max_rows))
+
+    # För dolda grupppaket: välj bästa per träffnivå så man ser trade-offen.
+    best_hidden_by_hit = {}
+    for p in hidden:
+        h = int(p.get('hist_hit', 0))
+        cur = best_hidden_by_hit.get(h)
+        if cur is None or int(p.get('frame_after', 10**12)) < int(cur.get('frame_after', 10**12)):
+            best_hidden_by_hit[h] = p
+    hidden_best = sorted(best_hidden_by_hit.values(), key=lambda x: (-int(x.get('hist_hit',0)), int(x.get('frame_after', 10**12))))[:max(0, int(max_rows) - len(chosen))]
+    chosen.extend(hidden_best)
+    chosen = _dedupe_package_list(chosen)[:int(max_rows)]
+
+    rows = []
+    for i, p in enumerate(chosen, 1):
+        after = int(p.get('frame_after', 0))
+        group_txt = ' | '.join([f"{g.get('label', g.get('name','Grupp'))}: {g.get('req')}/{g.get('n')}" for g in p.get('groups', [])]) or '—'
+        status = 'Under radgränsen' if after <= int(max_after_rows) else f"Över radgränsen {int(max_after_rows):,}".replace(',', ' ')
+        rows.append({
+            'Grupppaket': f"G{i}",
+            'Status': status,
+            'Samlad träff': f"{int(p.get('hist_hit',0))}/{int(p.get('hist_total',0))}",
+            'Grundram → filter': f"{int(p.get('frame_start',0)):,} → {after:,}".replace(',', ' '),
+            'Reducerar': f"{float(p.get('reduction_pct',0.0)):.1f}%",
+            'Filter': int(p.get('num_filters',0)),
+            'Värde-/poängfilter': int(p.get('value_filters',0)),
+            'Gruppkrav': group_txt,
+            'Spelvärde': f"{_package_value_score(p):.0f}",
+        })
+    return pd.DataFrame(rows)
+
+
+def _group_packages_status_text(packages, max_after_rows):
+    group_packages = [p for p in (packages or []) if _is_hard_group_package(p)]
+    if not group_packages:
+        return "Inga hårda grupppaket skapades på de valda kraven. Vanliga orsaker är för hög minsta träff, för få lämpliga filter i samma familj, teckenskydd eller att gruppen inte gav någon faktisk extra reducering."
+    visible = [p for p in group_packages if int(p.get('frame_after', 10**12)) <= int(max_after_rows)]
+    hidden = [p for p in group_packages if int(p.get('frame_after', 10**12)) > int(max_after_rows)]
+    if visible:
+        return f"{len(visible)} hårda grupppaket ligger under radgränsen."
+    if hidden:
+        best = min(hidden, key=lambda p: int(p.get('frame_after', 10**12)))
+        return f"Grupppaket finns, men inget ligger under {int(max_after_rows):,} rader. Närmast är {int(best.get('frame_after',0)):,} rader med {int(best.get('hist_hit',0))}/{int(best.get('hist_total',0))} samlad träff.".replace(',', ' ')
+    return "Inga hårda grupppaket att visa."
+
 def _apply_recommended_package_to_session(package, specs, filter_hist_target_pct, top_fav_count):
     chosen_keys = {c['key'] for c in package.get('filters', [])}
     chosen_by_key = {c['key']: c for c in package.get('filters', [])}
@@ -4359,7 +4422,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     st.caption("När du ändrar minsta historiska träff får varje filter nya slider-nycklar och startar på sitt rekommenderade intervall. 100% ska därför ge startintervall med 30/30 där det är möjligt.")
 
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
-        st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn bygger nivåtrappa per filter, visar progressklocka/ETA, eftertrimmar valt paket och visar nu hårda grupppaket som egen pakettyp även om ett tvingat paket reducerar mer.")
+        st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn bygger nivåtrappa per filter, visar progressklocka/ETA, eftertrimmar valt paket och visar nu hårda grupppaket som egen pakettyp. Gruppresultatet visas alltid, även när det ligger över radgränsen eller inte kunde byggas.")
 
         with st.expander("Välj filter som måste ingå i rekommenderade paket", expanded=False):
             st.caption("Kryssa i filter du vill att paketmotorn ska använda. Motorn får själv avgöra om de passar bäst som tvingade filter eller i hårda grupper. Om ett ikryssat filter inte kan användas utan att träffbild/teckenskydd rasar visas inget paket på den nivån.")
@@ -4462,7 +4525,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             st.session_state['v12_recommended_packages'] = packages
             st.session_state['v12_recommended_candidate_audit'] = candidate_audit
             st.session_state['v12_recommended_meta'] = {
-                'package_engine': 'pareto_multilevel_progress_posttrim_group_path',
+                'package_engine': 'pareto_multilevel_progress_posttrim_group_visible_diagnostics',
                 'manual_hist_target_pct': int(filter_hist_target_pct),
                 'top_fav_count': int(top_fav_count),
                 'frame_rows': int(len(frame_rows)),
@@ -4485,12 +4548,19 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 st.markdown("**3 mest spelvärda paket**")
                 st.caption("Sorterat på kombinationen samlad historisk träff + faktisk reducering. Paket med fler värde-/poängfilter får en liten bonus eftersom de styr utdelningsprofilen bättre.")
                 st.dataframe(_recommended_packages_summary_df(top_packages), use_container_width=True, hide_index=True)
-                group_visible = [p for p in visible_packages if _is_hard_group_package(p)]
-                best_group_packages = _top_playable_packages(group_visible, 3) if group_visible else []
-                if best_group_packages:
-                    st.markdown("**Bästa hårda grupppaket**")
-                    st.caption("Visas separat eftersom grupppaket är en annan riskprofil: fler filter kan ingå men alla måste inte sitta samtidigt. Därför ska de inte försvinna bara för att ett tvingat paket reducerar mer.")
-                    st.dataframe(_recommended_packages_summary_df(best_group_packages), use_container_width=True, hide_index=True)
+
+                # v12.0ae: visa grupppaketsektionen alltid, även om inga grupppaket
+                # ligger under radgränsen. Annars ser funktionen ut att saknas.
+                st.markdown("**Bästa hårda grupppaket**")
+                st.caption("Visas separat eftersom grupppaket är en annan riskprofil: fler filter kan ingå men alla måste inte sitta samtidigt. Sektionen visas även när bästa grupppaket ligger över radgränsen.")
+                group_status_df = _group_packages_status_df(packages, rec_display_max_rows, max_rows=6)
+                if not group_status_df.empty:
+                    st.dataframe(group_status_df, use_container_width=True, hide_index=True)
+                    st.caption(_group_packages_status_text(packages, rec_display_max_rows))
+                else:
+                    st.info(_group_packages_status_text(packages, rec_display_max_rows))
+
+                best_group_packages = _top_playable_packages([p for p in visible_packages if _is_hard_group_package(p)], 3)
                 rest_packages = [p for p in visible_packages if p not in top_packages and p not in best_group_packages]
                 if rest_packages:
                     with st.expander("Visa övriga spelbara paket under radgränsen", expanded=False):
@@ -4504,6 +4574,14 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                         st.markdown("**Bästa paket över radgränsen**")
                         st.dataframe(_recommended_packages_summary_df(best_over), use_container_width=True, hide_index=True)
                         st.caption("Detta paket klarar dina krav bäst men lämnar fler rader än vald gräns. Höj radgränsen eller kryssa i fler/lämpligare filter om du vill pressa vidare.")
+                st.markdown("**Bästa hårda grupppaket**")
+                st.caption("Sektionen visas även när inga grupppaket är spelbara under radgränsen, så du ser om gruppmotorn faktiskt byggde något.")
+                group_status_df = _group_packages_status_df(packages, rec_display_max_rows, max_rows=6)
+                if not group_status_df.empty:
+                    st.dataframe(group_status_df, use_container_width=True, hide_index=True)
+                    st.caption(_group_packages_status_text(packages, rec_display_max_rows))
+                else:
+                    st.info(_group_packages_status_text(packages, rec_display_max_rows))
             if hidden_packages:
                 with st.expander("Visa bästa dolda paket över radgränsen", expanded=False):
                     hidden_ref = _hidden_packages_reference_df(packages, rec_display_max_rows)
