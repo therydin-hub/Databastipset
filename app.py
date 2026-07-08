@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0ag – Granskad spelfil + grupp min/max-optimering"
+APP_VERSION = "v12.0ah – Spara/öppna i sidomeny"
 
 
 st.markdown("""
@@ -4570,6 +4570,12 @@ with st.sidebar:
                 st.error(f"Kunde inte öppna filen: {e}")
         else:
             st.caption("Filen är redan öppnad. Ladda upp en annan fil om du vill byta.")
+
+    sidebar_save_slot = st.empty()
+    with sidebar_save_slot.container():
+        st.markdown("**Spara spelfil/filterpaket**")
+        st.caption("Spara blir aktivt när kupong, grundram och filtercentral är laddade.")
+
     if st.button("🧹 Rensa cache", use_container_width=True):
         st.cache_data.clear()
         st.success("Cache tömd.")
@@ -5110,22 +5116,35 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             help="0 = minsta radantal för full 12-rättsgaranti. Om systemet känns för billigt kan du höja procenten; appen lägger då till extra rader med högst procentvikt för att öka chansen till 13 rätt.",
         )
 
-    with st.expander("💾 Spara / öppna system", expanded=False):
-        st.caption("Filterpaket sparar bara filter, intervall och gruppkrav. Spelfil sparar även kupong, grundram, historik och reduceringsinställningar.")
-        reducer_save_settings = {
-            'v12_matrix_limit': int(matrix_limit),
-            'v12_run_matrix': bool(run_matrix),
-            'v12_reducer_mode': reducer_mode,
-            'v12_target_13_pct': float(target_13_pct),
-        }
-        filter_payload = _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher)
-        game_payload = _build_spelfil_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher, input_text, top_n, pay_min, frame, v_m, filter_vec, reducer_settings=reducer_save_settings)
-        sc1, sc2 = st.columns(2)
-        with sc1:
-            tm_download_button("⬇️ Spara filterpaket", _payload_to_json_bytes(filter_payload), f"{_fmt_file_stem('filterpaket')}.json", "application/json", use_container_width=True)
-        with sc2:
-            tm_download_button("⬇️ Spara spelfil", _payload_to_json_bytes(game_payload), f"{_fmt_file_stem('spelfil')}.json", "application/json", use_container_width=True)
-        st.caption("Öppna filer görs i sidopanelen. En spelfil kan öppnas direkt utan att du behöver klicka i grundram/filter igen.")
+    reducer_save_settings = {
+        'v12_matrix_limit': int(matrix_limit),
+        'v12_run_matrix': bool(run_matrix),
+        'v12_reducer_mode': reducer_mode,
+        'v12_target_13_pct': float(target_13_pct),
+    }
+    filter_payload = _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher)
+    game_payload = _build_spelfil_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher, input_text, top_n, pay_min, frame, v_m, filter_vec, reducer_settings=reducer_save_settings)
+    with sidebar_save_slot.container():
+        st.markdown("**Spara spelfil/filterpaket**")
+        st.caption("Spelfil sparar kupong, grundram, filter, grupper och reduceringsinställningar. Filterpaket sparar bara filter/intervall/gruppkrav.")
+        tm_download_button(
+            "⬇️ Spara spelfil",
+            _payload_to_json_bytes(game_payload),
+            f"{_fmt_file_stem('spelfil')}.json",
+            "application/json",
+            use_container_width=True,
+            key="v12_sidebar_save_spelfil",
+        )
+        tm_download_button(
+            "⬇️ Spara filterpaket",
+            _payload_to_json_bytes(filter_payload),
+            f"{_fmt_file_stem('filterpaket')}.json",
+            "application/json",
+            use_container_width=True,
+            key="v12_sidebar_save_filterpaket",
+        )
+
+    st.caption("Spara/öppna spelfil och filterpaket ligger nu i sidomenyn.")
 
     go = st.button("🚀 Kör filtrering + reducering", use_container_width=True)
 
