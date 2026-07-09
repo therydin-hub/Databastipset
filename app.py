@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0ar – Toppfavoriter 3–6 + återställ filter"
+APP_VERSION = "v12.0az – FAT stigande/fallande"
 
 
 st.markdown("""
@@ -112,6 +112,162 @@ def get_fat(row_str, prob_vector):
         elif char == ranked[1][0]: a += 1; fs += 2
         else: t += 1; fs += 3
     return f, a, t, fs
+
+def get_fat_zone_indices(prob_vector, antal_matcher=None):
+    """Delar kupongen i tre svårighetszoner efter favoritens streck/procent.
+
+    Zon A = största favoriterna, Zon B = mittenmatcherna, Zon C = mest öppna/svåra.
+    För 13 matcher används 4/5/4, vilket matchar Stryktipset/Europatipset-logiken.
+    För 8 matcher används 3/3/2. Övriga storlekar delas så jämnt som möjligt.
+    """
+    try:
+        n = int(antal_matcher or (len(prob_vector) // 3))
+    except Exception:
+        n = len(prob_vector) // 3 if prob_vector is not None else 0
+    n = max(0, min(n, len(prob_vector or []) // 3))
+    if n <= 0:
+        return {'A': [], 'B': [], 'C': []}
+
+    fav_order = []
+    for m in range(n):
+        vals = [float(x) for x in (prob_vector[m*3:m*3+3] or [0, 0, 0])]
+        fav_order.append((max(vals), m))
+    fav_order.sort(key=lambda x: x[0], reverse=True)
+    ordered_idx = [m for _, m in fav_order]
+
+    if n >= 12:
+        a, b = 4, 5
+    elif n >= 8:
+        a, b = 3, 3
+    else:
+        a = max(1, int(np.ceil(n / 3.0)))
+        b = max(1, int(np.ceil((n - a) / 2.0))) if n - a > 0 else 0
+    a = min(a, n)
+    b = min(b, max(0, n - a))
+    return {
+        'A': ordered_idx[:a],
+        'B': ordered_idx[a:a+b],
+        'C': ordered_idx[a+b:],
+    }
+
+
+def get_fat_rank_for_match(row_str, prob_vector, match_idx):
+    """FAT-rank för valt tecken i en match: favorit=1, andratecken=2, tredjetecken=3."""
+    try:
+        c = str(row_str)[int(match_idx)]
+        idx = int(match_idx) * 3
+        ranked = sorted([('1', prob_vector[idx]), ('X', prob_vector[idx+1]), ('2', prob_vector[idx+2])], key=lambda x: x[1], reverse=True)
+        for rank, (sign, _) in enumerate(ranked, start=1):
+            if c == sign:
+                return int(rank)
+    except Exception:
+        pass
+    return 3
+
+
+def get_fat_zone_points(row_str, prob_vector, zone='A', antal_matcher=None):
+    """FAT-poäng per zon. Låg poäng = favorittyngd, hög poäng = mer andra-/tredjetecken."""
+    zones = get_fat_zone_indices(prob_vector, antal_matcher=antal_matcher)
+    idxs = zones.get(str(zone).upper(), [])
+    return int(sum(get_fat_rank_for_match(row_str, prob_vector, m) for m in idxs))
+
+
+def get_fat_step_counts(row_str, prob_vector, antal_matcher=None):
+    """Stigande/fallande FAT-poängsteg över matchordningen.
+
+    Poängtabell: favorit=1, andratecken=2, tredjetecken=3 per match.
+    Räknar övergångar mellan intilliggande matcher:
+    1→2 eller 2→3 = stigande 1 steg, 1→3 = stigande 2 steg,
+    3→2 eller 2→1 = fallande 1 steg, 3→1 = fallande 2 steg.
+    Lika värde räknas inte.
+    """
+    row_str = normalize_single_row_text(row_str) if 'normalize_single_row_text' in globals() else str(row_str or '').strip().upper()
+    n = int(antal_matcher or min(len(row_str), len(prob_vector or []) // 3))
+    points = [get_fat_rank_for_match(row_str, prob_vector, m) for m in range(min(n, len(row_str)))]
+    rise1 = rise2 = fall1 = fall2 = 0
+    for a, b in zip(points, points[1:]):
+        diff = int(b) - int(a)
+        if diff == 1:
+            rise1 += 1
+        elif diff == 2:
+            rise2 += 1
+        elif diff == -1:
+            fall1 += 1
+        elif diff == -2:
+            fall2 += 1
+    return int(rise1), int(rise2), int(fall1), int(fall2)
+
+
+def get_fat_point_sequence(row_str, prob_vector, antal_matcher=None):
+    """Returnerar radens FAT-poängföljd, t.ex. 1-1-2-3-1."""
+    row_str = normalize_single_row_text(row_str) if 'normalize_single_row_text' in globals() else str(row_str or '').strip().upper()
+    n = int(antal_matcher or min(len(row_str), len(prob_vector or []) // 3))
+    return [get_fat_rank_for_match(row_str, prob_vector, m) for m in range(min(n, len(row_str)))]
+
+
+def describe_fat_zone(prob_vector, zone='A', antal_matcher=None):
+    """Visar vilka matcher som ingår i zonen i aktuell kupong."""
+    zones = get_fat_zone_indices(prob_vector, antal_matcher=antal_matcher)
+    idxs = zones.get(str(zone).upper(), [])
+    if not idxs:
+        return "-"
+    return ", ".join([f"M{i+1}" for i in idxs])
+
+
+def get_abc_class_map(prob_vector, antal_matcher=None):
+    """Global ABC-klass för alla tecken på kupongen.
+
+    Alla 3*matcher tecken rankas efter streck/procent. För 13 matcher blir
+    global rank 1-13 = klass 1, 14-26 = klass 2, 27-39 = klass 3.
+    Detta skiljer sig från FAT, som rankar tecknen inom varje match.
+    """
+    prob_vector = list(prob_vector or [])
+    n = int(antal_matcher or (len(prob_vector) // 3))
+    signs = ['1', 'X', '2']
+    flat = []
+    for m in range(n):
+        idx = m * 3
+        for si, sign in enumerate(signs):
+            pct = float(prob_vector[idx + si]) if idx + si < len(prob_vector) else 0.0
+            # Stabil sortering vid lika streck: högre procent först, därefter matchordning, därefter 1-X-2.
+            flat.append({'pct': pct, 'match': m, 'sign': sign, 'sign_idx': si})
+    flat.sort(key=lambda x: (-x['pct'], x['match'], x['sign_idx']))
+    class_map = {}
+    for rank, item in enumerate(flat, start=1):
+        if rank <= n:
+            cls = 1
+        elif rank <= 2 * n:
+            cls = 2
+        else:
+            cls = 3
+        class_map[(int(item['match']), item['sign'])] = cls
+    return class_map
+
+
+def get_abc_counts(row_str, prob_vector, class_map=None, antal_matcher=None):
+    """ABC-räkning för en enkelrad: antal valda tecken i global klass 1/2/3 och ABC-summa."""
+    row_str = normalize_single_row_text(row_str) if 'normalize_single_row_text' in globals() else str(row_str or '').strip().upper()
+    prob_vector = list(prob_vector or [])
+    n = int(antal_matcher or min(len(row_str), len(prob_vector) // 3))
+    if class_map is None:
+        class_map = get_abc_class_map(prob_vector, n)
+    counts = {1: 0, 2: 0, 3: 0}
+    for m, sign in enumerate(row_str[:n]):
+        cls = int(class_map.get((m, sign), 3))
+        counts[cls] = counts.get(cls, 0) + 1
+    abc_sum = counts.get(1, 0) + counts.get(2, 0) * 2 + counts.get(3, 0) * 3
+    return counts.get(1, 0), counts.get(2, 0), counts.get(3, 0), int(abc_sum)
+
+
+def describe_abc_match_patterns(prob_vector, antal_matcher=None):
+    """Visar klassningen per match i ordningen 1-X-2, t.ex. M4:1-3-3."""
+    prob_vector = list(prob_vector or [])
+    n = int(antal_matcher or (len(prob_vector) // 3))
+    cmap = get_abc_class_map(prob_vector, n)
+    parts = []
+    for m in range(n):
+        parts.append(f"M{m+1}:{cmap.get((m, '1'), 3)}-{cmap.get((m, 'X'), 3)}-{cmap.get((m, '2'), 3)}")
+    return " | ".join(parts)
 
 def get_sft_sum(row_str, prob_vector):
     return sum(prob_vector[i*3] if c == '1' else prob_vector[i*3+1] if c == 'X' else prob_vector[i*3+2] for i, c in enumerate(row_str))
@@ -466,6 +622,63 @@ def get_shock_capacity(prob_vector, thresholds=(10, 15, 20)):
             if any(v < t for v in vals):
                 counts[int(t)] += 1
     return counts
+
+
+def get_favorite_threshold_details(prob_vector, threshold):
+    """Favorittecken på kupongen där favoritens streck är minst threshold."""
+    out = []
+    signs = ['1', 'X', '2']
+    matcher = len(prob_vector) // 3
+    for m in range(matcher):
+        vals = [float(x) for x in prob_vector[m*3:m*3+3]]
+        if not vals:
+            continue
+        fav_idx = int(np.argmax(vals))
+        fav_pct = vals[fav_idx]
+        if fav_pct >= float(threshold):
+            out.append({'match': m + 1, 'sign': signs[fav_idx], 'pct': fav_pct})
+    return out
+
+
+def get_shock_sign_details(prob_vector, threshold):
+    """Alla tecken på kupongen under given streckgräns."""
+    out = []
+    signs = ['1', 'X', '2']
+    matcher = len(prob_vector) // 3
+    for m in range(matcher):
+        vals = [float(x) for x in prob_vector[m*3:m*3+3]]
+        for idx, pct in enumerate(vals):
+            if pct < float(threshold):
+                out.append({'match': m + 1, 'sign': signs[idx], 'pct': pct})
+    return out
+
+
+def _details_covered_by_frame(details, frame):
+    """Filtrerar detail-lista till de tecken som faktiskt finns i manuell grundram."""
+    if not frame:
+        return list(details or [])
+    covered = []
+    for item in details or []:
+        try:
+            mi = int(item.get('match', 0)) - 1
+            sign = str(item.get('sign', '')).upper()
+            if 0 <= mi < len(frame) and sign in set(normalize_signs(frame[mi])):
+                covered.append(item)
+        except Exception:
+            continue
+    return covered
+
+
+def _format_match_sign_details(details, max_items=8):
+    parts = []
+    for item in (details or [])[:int(max_items)]:
+        try:
+            parts.append(f"M{int(item.get('match'))}:{item.get('sign')} {float(item.get('pct')):.0f}%")
+        except Exception:
+            pass
+    if len(details or []) > int(max_items):
+        parts.append(f"+{len(details)-int(max_items)} till")
+    return ", ".join(parts)
 
 
 def get_shock_strength(row_str, prob_vector):
@@ -1884,7 +2097,7 @@ def get_filter_family(filter_name, group_name=""):
         return "Skrällnivå"
     if any(k in name for k in ["u-rad", "utgångsrad", "utgångssystem", "utgångstips"]):
         return "Utgångssystem"
-    if grp == "struktur" or any(k in name for k in ["tecken 1x2", "sviter", "teckenföljd", "teckenlucka", "singlar", "dubbletter", "tripplar", "uppkomster"]):
+    if grp == "struktur" or any(k in name for k in ["tecken 1x2", "sviter", "följder", "teckenföljd", "teckenlucka", "luckor", "singlar", "dubbletter", "tripplar", "uppkomster"]):
         return "Struktur"
     if "super" in name or "grupp" in str(group_name).lower():
         return "Grupp/soft"
@@ -3093,6 +3306,206 @@ def _super_macro_count(row_str, prob_vector, bounds):
     return score
 
 
+def _sample_rows_for_macro(rows, max_items=60000):
+    """Deterministiskt urval för Super-Makro-rekommendation när grundramen är stor."""
+    rows = list(rows or [])
+    n = len(rows)
+    if n <= int(max_items):
+        return rows, False
+    step = n / float(max_items)
+    idxs = [min(n - 1, int(i * step)) for i in range(int(max_items))]
+    return [rows[i] for i in idxs], True
+
+
+def _recommend_super_macro_interval(hist_values, candidate_rows, filter_vec, macro_bounds, target_hist_pct=90):
+    """Väljer Super-Makro-nivå efter rationell effekt, inte bara högsta blockträff.
+
+    Testar 0-8, 1-8, ..., 8-8. För varje nivå räknas historisk träff och
+    kvarvarande andel av grundramen. Nivå 4-6 premieras eftersom Super-Makro
+    är tänkt som ett mjukt makrofilter; 7-8/8-8 ska bara väljas när de faktiskt
+    ger tydligt bättre rationell profil utan att bli ett överhårt normalitetslås.
+    """
+    hist_values = [int(v) for v in (hist_values or []) if not pd.isna(v)]
+    if not hist_values:
+        return (0, 8), pd.DataFrame(), False
+
+    cand_sample, sampled = _sample_rows_for_macro(candidate_rows or [], max_items=60000)
+    if cand_sample:
+        cand_values = [_super_macro_count(r, filter_vec, macro_bounds) for r in cand_sample]
+    else:
+        cand_values = []
+
+    hist_total = len(hist_values)
+    cand_total = len(cand_values)
+    rows_out = []
+    for req in range(0, 9):
+        interval = (req, 8)
+        hist_pass = sum(1 for v in hist_values if req <= v <= 8)
+        hist_pct = (hist_pass / hist_total) * 100.0 if hist_total else 0.0
+        if cand_total:
+            cand_pass = sum(1 for v in cand_values if req <= v <= 8)
+            keep_pct = (cand_pass / cand_total) * 100.0
+        else:
+            keep_pct = 100.0
+        reduction = 100.0 - keep_pct
+        lift = hist_pct - keep_pct
+
+        # Balanspremie: 4-6/8 är ofta den rationella zonen för makrofilter.
+        # Högre krav kan fortfarande vinna, men måste kompensera för att de
+        # lätt blir ett normalitetslås med låg robusthet.
+        if req == 4:
+            balance_bonus = 30.0
+        elif req == 5:
+            balance_bonus = 24.0
+        elif req == 6:
+            balance_bonus = 12.0
+        elif req == 3:
+            balance_bonus = 10.0
+        elif req == 7:
+            balance_bonus = -15.0
+        elif req == 8:
+            balance_bonus = -30.0
+        else:
+            balance_bonus = -8.0
+
+        score = lift + reduction * 0.25 + max(hist_pct - float(target_hist_pct), 0.0) * 0.10 + balance_bonus
+        rows_out.append({
+            'Intervall': f'{req}–8',
+            'Min block': int(req),
+            'Max block': 8,
+            'Historisk träff': f'{hist_pass}/{hist_total}',
+            'Historisk träff %': round(hist_pct, 1),
+            'Kvar rad %': round(keep_pct, 1),
+            'Reducerar %': round(reduction, 1),
+            'Rationell faktor': round(lift, 1),
+            'Balanspoäng': round(score, 2),
+        })
+
+    target = float(target_hist_pct or 90)
+    valid = [r for r in rows_out if r['Historisk träff %'] + 1e-9 >= target]
+    if not valid:
+        # Om användaren kräver t.ex. 100% och inget nivåintervall når dit väljer vi högsta
+        # historik först, därefter bästa balanspoäng.
+        valid = rows_out
+        best = max(valid, key=lambda r: (r['Historisk träff %'], r['Balanspoäng'], r['Reducerar %']))
+    else:
+        best = max(valid, key=lambda r: (r['Balanspoäng'], r['Rationell faktor'], r['Reducerar %']))
+
+    return (int(best['Min block']), 8), pd.DataFrame(rows_out), sampled
+
+
+
+def _macro_count_from_specs_row(row, macro_specs):
+    """Räknar hur många filter/specar som klaras med respektive rekommenderat intervall."""
+    count = 0
+    for spec in macro_specs or []:
+        try:
+            if in_range(_spec_value(row, spec), spec.get('default_interval', (0, 0))):
+                count += 1
+        except Exception:
+            continue
+    return int(count)
+
+
+def _macro_hist_values_from_specs(macro_specs):
+    """Bygger historiska makrovärden: antal underfilter som sitter per historisk omgång."""
+    macro_specs = list(macro_specs or [])
+    if not macro_specs:
+        return []
+    lengths = [len(s.get('hist_values', [])) for s in macro_specs if s.get('hist_values') is not None]
+    if not lengths:
+        return []
+    n = min(lengths)
+    vals = []
+    for i in range(n):
+        c = 0
+        for spec in macro_specs:
+            try:
+                hv = spec.get('hist_values', [])[i]
+                if in_range(hv, spec.get('default_interval', (0, 0))):
+                    c += 1
+            except Exception:
+                continue
+        vals.append(int(c))
+    return vals
+
+
+def _recommend_count_macro_interval(hist_values, candidate_rows, row_getter, max_score, target_hist_pct=90, preferred_low=None, preferred_high=None):
+    """Generisk rationell rekommendation för makron som räknar antal block/filter som sitter.
+
+    Testar 0-max, 1-max, ..., max-max. Väljer nivån efter historisk träff,
+    reducering och rationell faktor, inte bara efter högsta normalitetsnivå.
+    """
+    hist_values = [int(v) for v in (hist_values or []) if not pd.isna(v)]
+    max_score = int(max(0, max_score or 0))
+    if max_score <= 0:
+        return (0, 0), pd.DataFrame(), False
+    if not hist_values:
+        return (0, max_score), pd.DataFrame(), False
+
+    if preferred_low is None:
+        preferred_low = int(max(0, round(max_score * 0.45)))
+    if preferred_high is None:
+        preferred_high = int(max(preferred_low, round(max_score * 0.75)))
+    preferred_low = max(0, min(max_score, int(preferred_low)))
+    preferred_high = max(preferred_low, min(max_score, int(preferred_high)))
+
+    cand_sample, sampled = _sample_rows_for_macro(candidate_rows or [], max_items=60000)
+    cand_values = []
+    if cand_sample:
+        for r in cand_sample:
+            try:
+                cand_values.append(int(row_getter(r)))
+            except Exception:
+                continue
+
+    hist_total = len(hist_values)
+    cand_total = len(cand_values)
+    rows_out = []
+    target = float(target_hist_pct or 90)
+    for req in range(0, max_score + 1):
+        hist_pass = sum(1 for v in hist_values if req <= v <= max_score)
+        hist_pct = (hist_pass / hist_total) * 100.0 if hist_total else 0.0
+        if cand_total:
+            cand_pass = sum(1 for v in cand_values if req <= v <= max_score)
+            keep_pct = (cand_pass / cand_total) * 100.0
+        else:
+            keep_pct = 100.0
+        reduction = 100.0 - keep_pct
+        lift = hist_pct - keep_pct
+
+        if preferred_low <= req <= preferred_high:
+            # Störst bonus i mitten av den rationella zonen.
+            mid = (preferred_low + preferred_high) / 2.0
+            span = max(1.0, (preferred_high - preferred_low) / 2.0)
+            balance_bonus = 22.0 - 8.0 * abs(req - mid) / span
+        elif req > preferred_high:
+            balance_bonus = -10.0 * (req - preferred_high)
+        else:
+            balance_bonus = -4.0 * (preferred_low - req)
+
+        score = lift + reduction * 0.25 + max(hist_pct - target, 0.0) * 0.10 + balance_bonus
+        rows_out.append({
+            'Intervall': f'{req}–{max_score}',
+            'Min block': int(req),
+            'Max block': int(max_score),
+            'Historisk träff': f'{hist_pass}/{hist_total}',
+            'Historisk träff %': round(hist_pct, 1),
+            'Kvar rad %': round(keep_pct, 1),
+            'Reducerar %': round(reduction, 1),
+            'Rationell faktor': round(lift, 1),
+            'Balanspoäng': round(score, 2),
+        })
+
+    valid = [r for r in rows_out if r['Historisk träff %'] + 1e-9 >= target]
+    if not valid:
+        valid = rows_out
+        best = max(valid, key=lambda r: (r['Historisk träff %'], r['Balanspoäng'], r['Reducerar %']))
+    else:
+        best = max(valid, key=lambda r: (r['Balanspoäng'], r['Rationell faktor'], r['Reducerar %']))
+    return (int(best['Min block']), int(best['Max block'])), pd.DataFrame(rows_out), sampled
+
+
 @st.cache_data(show_spinner=False)
 def _cached_rows_from_frame(frame_tuple, antal_matcher, max_rows=None):
     frame = [list(x) for x in frame_tuple]
@@ -3103,7 +3516,7 @@ def _frame_cache_tuple(frame):
     return tuple(tuple(x) for x in frame)
 
 
-def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, target_hist_pct=90, u_rows=None, hist_df=None, max_shock_pct=22):
+def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, target_hist_pct=90, u_rows=None, hist_df=None, max_shock_pct=22, candidate_rows=None):
     """Bygger exakt en spec per filter. Inga AutoHard-varianter/dubbletter.
 
     target_hist_pct styr rekommenderat intervall/startvärde för varje filter.
@@ -3117,7 +3530,7 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
 
     target_hist_pct = int(max(50, min(100, target_hist_pct)))
 
-    def add_interval(name, category, values, getter, decimals=0, coverage=85, hard_min=None, hard_max=None, help_text="", key_override=None):
+    def add_interval(name, category, values, getter, decimals=0, coverage=85, hard_min=None, hard_max=None, help_text="", key_override=None, meta=None, default_interval_override=None):
         vals = [v for v in values if not pd.isna(v)]
         if not vals:
             return
@@ -3125,7 +3538,10 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
         # intervall/startvärde. Tidigare låg olika filter på 85/90/100, vilket gjorde
         # att vissa filter fortfarande kunde visa t.ex. 26/30 trots att användaren ville ha 100%.
         coverage = target_hist_pct
-        default_interval = get_best_interval(vals, coverage)
+        if default_interval_override is None:
+            default_interval = get_best_interval(vals, coverage)
+        else:
+            default_interval = default_interval_override
         bounds = _bounds_from_values(vals, default_interval, decimals=decimals, hard_min=hard_min, hard_max=hard_max)
         hist_pass, hist_total, hist_pct = _hist_pass_count(vals, default_interval)
         key_base = key_override or _slug(name)
@@ -3149,19 +3565,23 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
             'hist_total': hist_total,
             'hist_pct': hist_pct,
             'help': help_text,
+            'meta': meta or {},
         })
 
     # Historiska värden
     ai_ranks, delta_vals, total_diff_vals = [], [], []
     rank_sums, minus_sums, log_sums, sft_sums, points_vals = [], [], [], [], []
+    fat_zone_a, fat_zone_b, fat_zone_c = [], [], []
     fat_f, fat_a, fat_t, fat_sum = [], [], [], []
+    abc_1, abc_2, abc_3, abc_sum = [], [], [], []
+    fat_rise1, fat_rise2, fat_fall1, fat_fall2 = [], [], [], []
     fav_top_vals_by_n = {n: [] for n in range(3, 7)}
     fav_delta_vals = []
     fav70, fav60, fav50 = [], [], []
     sh10, sh15, sh20, sh_low = [], [], [], []
     ones, draws, twos = [], [], []
-    s1, sx, s2 = [], [], []
-    g1, gx, g2 = [], [], []
+    s1, sx, s2, stot = [], [], [], []
+    g1, gx, g2, gtot = [], [], [], []
     si1, six, si2, sit = [], [], [], []
     d1, dx, d2, dt = [], [], [], []
     tr1, trx, tr2, trt = [], [], [], []
@@ -3193,15 +3613,21 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
         log_sums.append(get_log_surprise_sum(row_str, p))
         sft_sums.append(get_sft_sum(row_str, p))
         points_vals.append(get_rank_points(row_str, p))
+        fat_zone_a.append(get_fat_zone_points(row_str, p, 'A', antal_matcher))
+        fat_zone_b.append(get_fat_zone_points(row_str, p, 'B', antal_matcher))
+        fat_zone_c.append(get_fat_zone_points(row_str, p, 'C', antal_matcher))
         f, a, t, fs = get_fat(row_str, p); fat_f.append(f); fat_a.append(a); fat_t.append(t); fat_sum.append(fs)
+        _fr1, _fr2, _ff1, _ff2 = get_fat_step_counts(row_str, p, antal_matcher); fat_rise1.append(_fr1); fat_rise2.append(_fr2); fat_fall1.append(_ff1); fat_fall2.append(_ff2)
+        _abc1, _abc2, _abc3, _abcs = get_abc_counts(row_str, p, antal_matcher=antal_matcher)
+        abc_1.append(_abc1); abc_2.append(_abc2); abc_3.append(_abc3); abc_sum.append(_abcs)
         for _n in range(3, 7):
             fav_top_vals_by_n[_n].append(get_top_n_favs_wins(row_str, p, _n))
         fav_delta_vals.append(get_favorite_delta(row_str, p))
         fp = get_favorite_pressure(row_str, p); fav70.append(fp['F70_Wins']); fav60.append(fp['F60_Wins']); fav50.append(fp['F50_Wins'])
         sh = get_shock_strength(row_str, p); sh10.append(sh['U10_Wins']); sh15.append(sh['U15_Wins']); sh20.append(sh['U20_Wins']); sh_low.append(sh['Lowest_Win_Pct'])
         ones.append(row_str.count('1')); draws.append(row_str.count('X')); twos.append(row_str.count('2'))
-        _s1, _sx, _s2, _ = get_streaks(row_str); s1.append(_s1); sx.append(_sx); s2.append(_s2)
-        _g1, _gx, _g2, _ = get_gaps(row_str); g1.append(_g1); gx.append(_gx); g2.append(_g2)
+        _s1, _sx, _s2, _stot = get_streaks(row_str); s1.append(_s1); sx.append(_sx); s2.append(_s2); stot.append(_stot)
+        _g1, _gx, _g2, _gtot = get_gaps(row_str); g1.append(_g1); gx.append(_gx); g2.append(_g2); gtot.append(_gtot)
         _si1, _six, _si2, _sit, _ = get_singles(row_str); si1.append(_si1); six.append(_six); si2.append(_si2); sit.append(_sit)
         _d1, _dx, _d2, _dt, _ = get_doublets(row_str); d1.append(_d1); dx.append(_dx); d2.append(_d2); dt.append(_dt)
         _tr1, _trx, _tr2, _trt, _ = get_triplets(row_str); tr1.append(_tr1); trx.append(_trx); tr2.append(_tr2); trt.append(_trt)
@@ -3216,13 +3642,79 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
     add_interval('100-minus Summa', 'Värde & svårighet', minus_sums, lambda r: get_100_minus_sum(r, filter_vec), 1, 85)
     add_interval('Skrälltryck Log Summa', 'Värde & svårighet', log_sums, lambda r: get_log_surprise_sum(r, filter_vec), 0, 85)
     add_interval('SFT Summa', 'Värde & svårighet', sft_sums, lambda r: get_sft_sum(r, filter_vec), 1, 85)
+    if sft_sums:
+        sft_hist_median = float(np.median([v for v in sft_sums if not pd.isna(v)]))
+        sft_dist_vals = [abs(float(v) - sft_hist_median) for v in sft_sums if not pd.isna(v)]
+        add_interval(
+            'SFT-avstånd från historik',
+            'Värde & svårighet',
+            sft_dist_vals,
+            lambda r, _med=sft_hist_median: abs(float(get_sft_sum(r, filter_vec)) - _med),
+            1,
+            85,
+            0,
+            None,
+            f"Avstånd från median-SFT i de liknande historiska omgångarna ({sft_hist_median:.1f}). Lägre värde = närmare historikens normala svårighetsnivå.",
+            key_override='sft_avstand_historik',
+        )
     add_interval('Poängfilter', 'Värde & svårighet', points_vals, lambda r: get_rank_points(r, filter_vec), 0, 85)
+
+    _cur_zones = get_fat_zone_indices(filter_vec, antal_matcher=antal_matcher)
+    _zone_defs = [
+        ('A', 'Poängzon A – toppfavoriter', fat_zone_a, 'Toppfavoritzon'),
+        ('B', 'Poängzon B – mittenmatcher', fat_zone_b, 'Mittenzon'),
+        ('C', 'Poängzon C – öppna matcher', fat_zone_c, 'Öppen/svår zon'),
+    ]
+    for _zone, _name, _vals, _label in _zone_defs:
+        _zsize = len(_cur_zones.get(_zone, []))
+        if _zsize <= 0:
+            continue
+        add_interval(
+            _name,
+            'Värde & svårighet',
+            _vals,
+            lambda r, _z=_zone: get_fat_zone_points(r, filter_vec, _z, antal_matcher),
+            0,
+            85,
+            _zsize,
+            _zsize * 3,
+            f"FAT-poäng i {_label}. Favorit=1, andratecken=2, tredjetecken=3. Aktuell zon: {describe_fat_zone(filter_vec, _zone, antal_matcher)}.",
+            key_override=f'fat_poangzon_{_zone.lower()}',
+        )
 
     # FAT
     add_interval('FAT F', 'FAT', fat_f, lambda r: get_fat(r, filter_vec)[0], 0, 85, 0, antal_matcher)
     add_interval('FAT A', 'FAT', fat_a, lambda r: get_fat(r, filter_vec)[1], 0, 85, 0, antal_matcher)
     add_interval('FAT T', 'FAT', fat_t, lambda r: get_fat(r, filter_vec)[2], 0, 85, 0, antal_matcher)
     add_interval('FAT Summa', 'FAT', fat_sum, lambda r: get_fat(r, filter_vec)[3], 0, 85)
+    if fat_sum:
+        fat_hist_median = float(np.median([v for v in fat_sum if not pd.isna(v)]))
+        fat_dist_vals = [abs(float(v) - fat_hist_median) for v in fat_sum if not pd.isna(v)]
+        add_interval(
+            'FAT-avstånd från historik',
+            'FAT',
+            fat_dist_vals,
+            lambda r, _med=fat_hist_median: abs(float(get_fat(r, filter_vec)[3]) - _med),
+            1,
+            85,
+            0,
+            None,
+            f"Avstånd från median-FAT-poängsumma i de liknande historiska omgångarna ({fat_hist_median:.1f}). Lägre värde = närmare historikens normala FAT-nivå.",
+            key_override='fat_avstand_historik',
+        )
+
+    _fat_step_help = "Stigande/fallande poängtabell med FAT-poäng per match: favorit=1, andratecken=2, tredjetecken=3. Räknar rörelser mellan intilliggande matcher i kupongordning; lika värden räknas inte."
+    add_interval('FAT stigande 1 steg', 'FAT', fat_rise1, lambda r: get_fat_step_counts(r, filter_vec, antal_matcher)[0], 0, 85, 0, max(0, antal_matcher - 1), _fat_step_help, key_override='fat_stigande_1_steg')
+    add_interval('FAT stigande 2 steg', 'FAT', fat_rise2, lambda r: get_fat_step_counts(r, filter_vec, antal_matcher)[1], 0, 85, 0, max(0, antal_matcher - 1), _fat_step_help, key_override='fat_stigande_2_steg')
+    add_interval('FAT fallande 1 steg', 'FAT', fat_fall1, lambda r: get_fat_step_counts(r, filter_vec, antal_matcher)[2], 0, 85, 0, max(0, antal_matcher - 1), _fat_step_help, key_override='fat_fallande_1_steg')
+    add_interval('FAT fallande 2 steg', 'FAT', fat_fall2, lambda r: get_fat_step_counts(r, filter_vec, antal_matcher)[3], 0, 85, 0, max(0, antal_matcher - 1), _fat_step_help, key_override='fat_fallande_2_steg')
+
+    _abc_current_map = get_abc_class_map(filter_vec, antal_matcher)
+    _abc_help = "Global ABC-rank: alla tecken rankas 1–39 efter streck. Rank 1–13 = klass 1, 14–26 = klass 2, 27–39 = klass 3. Matchkarta 1-X-2: " + describe_abc_match_patterns(filter_vec, antal_matcher)
+    add_interval('ABC 1', 'FAT', abc_1, lambda r, _m=_abc_current_map: get_abc_counts(r, filter_vec, _m, antal_matcher)[0], 0, 85, 0, antal_matcher, _abc_help, key_override='abc_1')
+    add_interval('ABC 2', 'FAT', abc_2, lambda r, _m=_abc_current_map: get_abc_counts(r, filter_vec, _m, antal_matcher)[1], 0, 85, 0, antal_matcher, _abc_help, key_override='abc_2')
+    add_interval('ABC 3', 'FAT', abc_3, lambda r, _m=_abc_current_map: get_abc_counts(r, filter_vec, _m, antal_matcher)[2], 0, 85, 0, antal_matcher, _abc_help, key_override='abc_3')
+    add_interval('ABC Summa', 'FAT', abc_sum, lambda r, _m=_abc_current_map: get_abc_counts(r, filter_vec, _m, antal_matcher)[3], 0, 85, antal_matcher, antal_matcher * 3, _abc_help, key_override='abc_summa')
 
     seq2 = _top_sequences_from_fat(fat_strings, 2, 5)
     if seq2:
@@ -3276,12 +3768,14 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
             f'Antal av kupongens {_n} högst streckade favoriter som vinner.',
             key_override=f'topp_{_n}_favoriter',
         )
-    add_interval('Favorittryck ≥70%', 'Favorit & skräll', fav70, lambda r: get_favorite_pressure(r, filter_vec)['F70_Wins'], 0, 85, 0, get_favorite_threshold_counts(filter_vec).get(70, 0))
-    add_interval('Favorittryck ≥60%', 'Favorit & skräll', fav60, lambda r: get_favorite_pressure(r, filter_vec)['F60_Wins'], 0, 85, 0, get_favorite_threshold_counts(filter_vec).get(60, 0))
-    add_interval('Favorittryck ≥50%', 'Favorit & skräll', fav50, lambda r: get_favorite_pressure(r, filter_vec)['F50_Wins'], 0, 85, 0, get_favorite_threshold_counts(filter_vec).get(50, 0))
-    add_interval('Skrällstyrka U10', 'Favorit & skräll', sh10, lambda r: get_shock_strength(r, filter_vec)['U10_Wins'], 0, 85, 0, get_shock_capacity(filter_vec).get(10, 0))
-    add_interval('Skrällstyrka U15', 'Favorit & skräll', sh15, lambda r: get_shock_strength(r, filter_vec)['U15_Wins'], 0, 85, 0, get_shock_capacity(filter_vec).get(15, 0))
-    add_interval('Skrällstyrka U20', 'Favorit & skräll', sh20, lambda r: get_shock_strength(r, filter_vec)['U20_Wins'], 0, 85, 0, get_shock_capacity(filter_vec).get(20, 0))
+    _fav_counts = get_favorite_threshold_counts(filter_vec)
+    add_interval('70%+ favoriter som sitter', 'Favorit & skräll', fav70, lambda r: get_favorite_pressure(r, filter_vec)['F70_Wins'], 0, 85, 0, _fav_counts.get(70, 0), 'Räknar hur många av kupongens favoriter på minst 70 % som vinner på raden. Historiken räknas på samma antal/favorittecken för respektive historisk omgång.', key_override='favorittryck_70', meta={'diag_type': 'favorite_threshold', 'threshold': 70})
+    add_interval('60%+ favoriter som sitter', 'Favorit & skräll', fav60, lambda r: get_favorite_pressure(r, filter_vec)['F60_Wins'], 0, 85, 0, _fav_counts.get(60, 0), 'Räknar hur många av kupongens favoriter på minst 60 % som vinner på raden. Historiken räknas på samma antal/favorittecken för respektive historisk omgång.', key_override='favorittryck_60', meta={'diag_type': 'favorite_threshold', 'threshold': 60})
+    add_interval('50%+ favoriter som sitter', 'Favorit & skräll', fav50, lambda r: get_favorite_pressure(r, filter_vec)['F50_Wins'], 0, 85, 0, _fav_counts.get(50, 0), 'Räknar hur många av kupongens favoriter på minst 50 % som vinner på raden. Historiken räknas på samma antal/favorittecken för respektive historisk omgång.', key_override='favorittryck_50', meta={'diag_type': 'favorite_threshold', 'threshold': 50})
+    _shock_caps = get_shock_capacity(filter_vec)
+    add_interval('Vinnare under 10%', 'Favorit & skräll', sh10, lambda r: get_shock_strength(r, filter_vec)['U10_Wins'], 0, 85, 0, _shock_caps.get(10, 0), 'Räknar hur många valda vinnartecken på raden som är streckade under 10 %. Grundramsdiagnosen varnar om intervallet blir en dold spik.', key_override='skrallstyrka_u10', meta={'diag_type': 'shock_threshold', 'threshold': 10})
+    add_interval('Vinnare under 15%', 'Favorit & skräll', sh15, lambda r: get_shock_strength(r, filter_vec)['U15_Wins'], 0, 85, 0, _shock_caps.get(15, 0), 'Räknar hur många valda vinnartecken på raden som är streckade under 15 %. Grundramsdiagnosen varnar om intervallet blir en dold spik.', key_override='skrallstyrka_u15', meta={'diag_type': 'shock_threshold', 'threshold': 15})
+    add_interval('Vinnare under 20%', 'Favorit & skräll', sh20, lambda r: get_shock_strength(r, filter_vec)['U20_Wins'], 0, 85, 0, _shock_caps.get(20, 0), 'Räknar hur många valda vinnartecken på raden som är streckade under 20 %. Grundramsdiagnosen varnar om intervallet blir en dold spik.', key_override='skrallstyrka_u20', meta={'diag_type': 'shock_threshold', 'threshold': 20})
     add_interval('Lägsta vinnande %', 'Favorit & skräll', sh_low, lambda r: get_shock_strength(r, filter_vec)['Lowest_Win_Pct'], 1, 85, 0, 100)
     add_interval('Favorit-delta', 'Favorit & skräll', fav_delta_vals, lambda r: get_favorite_delta(r, filter_vec), 2, 85)
 
@@ -3289,9 +3783,11 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
     add_interval('Tecken 1', 'Struktur', ones, lambda r: r.count('1'), 0, 100, 0, antal_matcher)
     add_interval('Tecken X', 'Struktur', draws, lambda r: r.count('X'), 0, 100, 0, antal_matcher)
     add_interval('Tecken 2', 'Struktur', twos, lambda r: r.count('2'), 0, 100, 0, antal_matcher)
-    add_interval('Sviter 1', 'Struktur', s1, lambda r: get_streaks(r)[0], 0, 100, 0, antal_matcher)
-    add_interval('Sviter X', 'Struktur', sx, lambda r: get_streaks(r)[1], 0, 100, 0, antal_matcher)
-    add_interval('Sviter 2', 'Struktur', s2, lambda r: get_streaks(r)[2], 0, 100, 0, antal_matcher)
+    add_interval('Följder 1', 'Struktur', s1, lambda r: get_streaks(r)[0], 0, 100, 0, antal_matcher, key_override='sviter_1')
+    add_interval('Följder X', 'Struktur', sx, lambda r: get_streaks(r)[1], 0, 100, 0, antal_matcher, key_override='sviter_x')
+    add_interval('Följder 2', 'Struktur', s2, lambda r: get_streaks(r)[2], 0, 100, 0, antal_matcher, key_override='sviter_2')
+    add_interval('Längsta följd totalt', 'Struktur', stot, lambda r: get_streaks(r)[3], 0, 100, 0, antal_matcher)
+    add_interval('Längsta lucka totalt', 'Struktur', gtot, lambda r: get_gaps(r)[3], 0, 100, 0, antal_matcher)
     add_interval('Luckor 1', 'Struktur', g1, lambda r: get_gaps(r)[0], 0, 100, 0, antal_matcher)
     add_interval('Luckor X', 'Struktur', gx, lambda r: get_gaps(r)[1], 0, 100, 0, antal_matcher)
     add_interval('Luckor 2', 'Struktur', g2, lambda r: get_gaps(r)[2], 0, 100, 0, antal_matcher)
@@ -3312,7 +3808,10 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
     add_interval('Uppkomster 2', 'Struktur', o2, lambda r: get_occurrences(r)[2], 0, 100, 0, antal_matcher)
     add_interval('Uppkomster total', 'Struktur', ot, lambda r: get_occurrences(r)[3], 0, 100, 0, antal_matcher)
 
-    # Super-makro som ett enda manuellt filter.
+    # Super-Makro: bygg flera synliga makron. Strukturmakrot är gamla Super-Makro-logiken.
+    value_macro_specs = [sp for sp in specs if sp.get('category') == 'Värde & svårighet']
+    favorite_macro_specs = [sp for sp in specs if sp.get('category') == 'Favorit & skräll']
+
     macro_bounds = {
         'ones': get_best_interval(ones, 90), 'draws': get_best_interval(draws, 90), 'twos': get_best_interval(twos, 90),
         's1': get_best_interval(s1, 90), 'sx': get_best_interval(sx, 90), 's2': get_best_interval(s2, 90),
@@ -3324,7 +3823,195 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
         'fat_f': get_best_interval(fat_f, 90), 'fat_a': get_best_interval(fat_a, 90), 'fat_t': get_best_interval(fat_t, 90),
     }
     macro_vals = [_super_macro_count(r, p, macro_bounds) for r, p in zip(rows, probs)]
-    add_interval('Super-Makro grupper', 'Super-Makro', macro_vals, lambda r, b=macro_bounds: _super_macro_count(r, filter_vec, b), 0, 90, 0, 8, 'Antal makrogrupper som klaras. Varje grupp räknas om minst 2 av 3 interna delar sitter.')
+    _macro_rec_interval, _macro_rec_table, _macro_sampled = _recommend_super_macro_interval(
+        macro_vals,
+        candidate_rows or [],
+        filter_vec,
+        macro_bounds,
+        target_hist_pct=target_hist_pct,
+    )
+    _macro_help = (
+        'Gamla Super-Makro-logiken, nu tydligare som Strukturmakro. Räknar 8 struktur/FAT-block: '
+        'teckenfördelning, följder, luckor, singlar, dubbletter, tripplar, uppkomster och FAT. '
+        'Varje block räknas om minst 2 av 3 interna delar sitter. Rekommendationen testar alla min-nivåer '
+        'och väljer rationell nivå utifrån historisk träff, kvarvarande grundram och balans.'
+    )
+    if _macro_sampled:
+        _macro_help += ' Kvar rad % i rekommendationstabellen bygger på ett deterministiskt urval av grundramen för att hålla appen snabb.'
+    add_interval(
+        'Super-Makro Struktur',
+        'Super-Makro',
+        macro_vals,
+        lambda r, b=macro_bounds: _super_macro_count(r, filter_vec, b),
+        0,
+        90,
+        0,
+        8,
+        _macro_help,
+        key_override='super_makro_grupper',
+        default_interval_override=_macro_rec_interval,
+        meta={
+            'diag_type': 'super_macro_rational',
+            'recommendation_table': _macro_rec_table.to_dict('records') if isinstance(_macro_rec_table, pd.DataFrame) else [],
+            'sampled_candidate_rows': bool(_macro_sampled),
+            'max_blocks': 8,
+        },
+    )
+
+    # Super-Makro Värde/Svårighet: räknar hur många av värde-/svårighetsfiltren som klarar sitt rekommenderade intervall.
+    value_macro_vals = _macro_hist_values_from_specs(value_macro_specs)
+    value_macro_max = len(value_macro_specs)
+    if value_macro_max > 0 and value_macro_vals:
+        _value_row_getter = lambda r, _specs=value_macro_specs: _macro_count_from_specs_row(r, _specs)
+        _value_rec_interval, _value_rec_table, _value_sampled = _recommend_count_macro_interval(
+            value_macro_vals,
+            candidate_rows or [],
+            _value_row_getter,
+            value_macro_max,
+            target_hist_pct=target_hist_pct,
+        )
+        _value_help = (
+            f'Räknar hur många av {value_macro_max} filter i Värde & svårighet som klarar sina rekommenderade intervall. '
+            'Detta är ett mjukt makrofilter: appen testar alla min-nivåer och väljer nivån med bäst rationell effekt, '
+            'inte bara högsta antal träffade filter.'
+        )
+        if _value_sampled:
+            _value_help += ' Kvar rad % bygger på ett deterministiskt urval av grundramen.'
+        add_interval(
+            'Super-Makro Värde/Svårighet',
+            'Super-Makro',
+            value_macro_vals,
+            _value_row_getter,
+            0,
+            90,
+            0,
+            value_macro_max,
+            _value_help,
+            key_override='super_makro_varde_svarighet',
+            default_interval_override=_value_rec_interval,
+            meta={
+                'diag_type': 'super_macro_rational',
+                'recommendation_table': _value_rec_table.to_dict('records') if isinstance(_value_rec_table, pd.DataFrame) else [],
+                'sampled_candidate_rows': bool(_value_sampled),
+                'max_blocks': value_macro_max,
+                'included_filters': [sp.get('name', '') for sp in value_macro_specs],
+            },
+        )
+    else:
+        _value_rec_interval = (0, 0)
+        _value_row_getter = lambda r: 0
+
+    # Super-Makro Favorit/Skräll: räknar hur många favorit-/skrällfilter som klarar sina rekommenderade intervall.
+    favorite_macro_vals = _macro_hist_values_from_specs(favorite_macro_specs)
+    favorite_macro_max = len(favorite_macro_specs)
+    if favorite_macro_max > 0 and favorite_macro_vals:
+        _fav_row_getter = lambda r, _specs=favorite_macro_specs: _macro_count_from_specs_row(r, _specs)
+        _fav_rec_interval, _fav_rec_table, _fav_sampled = _recommend_count_macro_interval(
+            favorite_macro_vals,
+            candidate_rows or [],
+            _fav_row_getter,
+            favorite_macro_max,
+            target_hist_pct=target_hist_pct,
+        )
+        _fav_help = (
+            f'Räknar hur många av {favorite_macro_max} filter i Favorit & skräll som klarar sina rekommenderade intervall. '
+            'Bra för att använda favorit-/skrällbilden mjukt i stället för att tvinga många överlappande filter samtidigt.'
+        )
+        if _fav_sampled:
+            _fav_help += ' Kvar rad % bygger på ett deterministiskt urval av grundramen.'
+        add_interval(
+            'Super-Makro Favorit/Skräll',
+            'Super-Makro',
+            favorite_macro_vals,
+            _fav_row_getter,
+            0,
+            90,
+            0,
+            favorite_macro_max,
+            _fav_help,
+            key_override='super_makro_favorit_skrall',
+            default_interval_override=_fav_rec_interval,
+            meta={
+                'diag_type': 'super_macro_rational',
+                'recommendation_table': _fav_rec_table.to_dict('records') if isinstance(_fav_rec_table, pd.DataFrame) else [],
+                'sampled_candidate_rows': bool(_fav_sampled),
+                'max_blocks': favorite_macro_max,
+                'included_filters': [sp.get('name', '') for sp in favorite_macro_specs],
+            },
+        )
+    else:
+        _fav_rec_interval = (0, 0)
+        _fav_row_getter = lambda r: 0
+
+    # Super-Makro Total: räknar hur många av de stora makrona som sitter.
+    total_macro_components = []
+    if macro_vals:
+        total_macro_components.append(('Struktur', macro_vals, _macro_rec_interval, lambda r, b=macro_bounds, _int=_macro_rec_interval: int(in_range(_super_macro_count(r, filter_vec, b), _int))))
+    if value_macro_vals and value_macro_max > 0:
+        total_macro_components.append(('Värde/Svårighet', value_macro_vals, _value_rec_interval, lambda r, _g=_value_row_getter, _int=_value_rec_interval: int(in_range(_g(r), _int))))
+    if favorite_macro_vals and favorite_macro_max > 0:
+        total_macro_components.append(('Favorit/Skräll', favorite_macro_vals, _fav_rec_interval, lambda r, _g=_fav_row_getter, _int=_fav_rec_interval: int(in_range(_g(r), _int))))
+
+    total_macro_max = len(total_macro_components)
+    if total_macro_max > 1:
+        min_len = min(len(comp[1]) for comp in total_macro_components)
+        total_macro_vals = []
+        for i in range(min_len):
+            c = 0
+            for _name, _vals, _intv, _getter in total_macro_components:
+                try:
+                    if in_range(_vals[i], _intv):
+                        c += 1
+                except Exception:
+                    continue
+            total_macro_vals.append(int(c))
+
+        def _total_macro_row_getter(r, _components=total_macro_components):
+            c = 0
+            for _name, _vals, _intv, _getter in _components:
+                try:
+                    c += int(_getter(r))
+                except Exception:
+                    continue
+            return int(c)
+
+        _total_rec_interval, _total_rec_table, _total_sampled = _recommend_count_macro_interval(
+            total_macro_vals,
+            candidate_rows or [],
+            _total_macro_row_getter,
+            total_macro_max,
+            target_hist_pct=target_hist_pct,
+            preferred_low=max(1, total_macro_max - 1),
+            preferred_high=total_macro_max,
+        )
+        _total_help = (
+            'Räknar hur många av de stora Super-Makrona som sitter: '
+            + ', '.join([c[0] for c in total_macro_components])
+            + '. Detta är den översta mjuka kontrollen och ska användas försiktigt så den inte dubbelstyr alla underfilter.'
+        )
+        if _total_sampled:
+            _total_help += ' Kvar rad % bygger på ett deterministiskt urval av grundramen.'
+        add_interval(
+            'Super-Makro Total',
+            'Super-Makro',
+            total_macro_vals,
+            _total_macro_row_getter,
+            0,
+            90,
+            0,
+            total_macro_max,
+            _total_help,
+            key_override='super_makro_total',
+            default_interval_override=_total_rec_interval,
+            meta={
+                'diag_type': 'super_macro_rational',
+                'recommendation_table': _total_rec_table.to_dict('records') if isinstance(_total_rec_table, pd.DataFrame) else [],
+                'sampled_candidate_rows': bool(_total_sampled),
+                'max_blocks': total_macro_max,
+                'included_filters': [c[0] for c in total_macro_components],
+            },
+        )
+
 
     return specs
 
@@ -4062,6 +4749,47 @@ def _render_info_cards(cards):
     parts.append("</div>")
     st.markdown("".join(parts), unsafe_allow_html=True)
 
+def _render_favorite_shock_diagnostics(spec, interval, frame, filter_vec, antal_matcher):
+    """Kort grundramsdiagnos för favorit-/skrällfilter så de inte blir dolda spikar."""
+    meta = spec.get('meta') or {}
+    dtype = meta.get('diag_type')
+    if dtype not in {'favorite_threshold', 'shock_threshold'}:
+        return
+    try:
+        low = float(interval[0]); high = float(interval[1])
+    except Exception:
+        return
+
+    threshold = float(meta.get('threshold', 0))
+    if dtype == 'favorite_threshold':
+        details = get_favorite_threshold_details(filter_vec, threshold)
+        covered = _details_covered_by_frame(details, frame)
+        txt = f"Kupongen har {len(details)} favoriter ≥{threshold:.0f} %. Grundramen täcker {len(covered)} av dem."
+        if details:
+            txt += " " + _format_match_sign_details(details)
+        st.caption(txt)
+        if low > len(covered):
+            st.warning(f"Det valda intervallet kräver minst {int(low)} träffar, men grundramen kan maximalt ge {len(covered)}. Filtret är omöjligt med nuvarande grundram.")
+        elif len(covered) > 0 and low >= len(covered):
+            st.warning(f"Intervallet kräver att alla {len(covered)} täckta favorittecken sitter. Det fungerar, men blir ett hårt favoritlås i grundramen.")
+        return
+
+    if dtype == 'shock_threshold':
+        details = get_shock_sign_details(filter_vec, threshold)
+        covered = _details_covered_by_frame(details, frame)
+        txt = f"Kupongen har {len(details)} tecken under {threshold:.0f} %. Grundramen innehåller {len(covered)} av dem."
+        if covered:
+            txt += " " + _format_match_sign_details(covered)
+        st.caption(txt)
+        if low > len(covered):
+            st.warning(f"Det valda intervallet kräver minst {int(low)} skrälltecken under {threshold:.0f} %, men grundramen kan maximalt ge {len(covered)}. Filtret är omöjligt med nuvarande grundram.")
+        elif len(covered) == 1 and low >= 1:
+            only = _format_match_sign_details(covered, max_items=1)
+            st.warning(f"Detta blir i praktiken en dold spik: för att få minst {int(low)} vinnare under {threshold:.0f} % måste {only} vara med på varje rad som passerar filtret.")
+        elif len(covered) > 1 and low >= len(covered):
+            st.warning(f"Intervallet kräver att alla {len(covered)} skrälltecken under {threshold:.0f} % i grundramen sitter. Det är ett mycket hårt grundramslås.")
+
+
 def _render_inline_filter_info(spec, interval, frame_rows, frame, antal_matcher):
     """Renderar statistik för ett filter.
 
@@ -4107,6 +4835,18 @@ def _render_inline_filter_info(spec, interval, frame_rows, frame, antal_matcher)
         ("Nuvarande träff", f"{hp}/{ht}", f"{pct:.1f}% av 30 liknande"),
         ("Grundram → filter", frame_txt, frame_sub),
     ])
+
+    meta = spec.get('meta') or {}
+    if meta.get('diag_type') == 'super_macro_rational':
+        rec_rows = meta.get('recommendation_table') or []
+        if rec_rows:
+            st.markdown("**Super-Makro nivåtest**")
+            st.caption("Tabellen visar varför rekommenderat intervall valdes. Den testar alla min-nivåer mot historiken och grundramen. Balanspoäng premierar rationell mjukzon så filtret inte automatiskt blir ett överhårt normalitetslås.")
+            st.dataframe(pd.DataFrame(rec_rows), use_container_width=True, hide_index=True)
+        included = meta.get('included_filters') or []
+        if included:
+            with st.expander('Ingår i detta Super-Makro', expanded=False):
+                st.write(', '.join([str(x) for x in included]))
 
     freq_df = _make_freq_df(spec['hist_values'], spec['decimals'])
     left, right = st.columns([1.0, 1.0])
@@ -5797,7 +6537,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         st.info("Filterintervallen uppdateras efter nytt träffmål…")
         st.rerun()
 
-    specs = build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=top_fav_count, target_hist_pct=filter_hist_target_pct, u_rows=None, hist_df=_streck_hist_db, max_shock_pct=max_shock_pct)
+    specs = build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=top_fav_count, target_hist_pct=filter_hist_target_pct, u_rows=None, hist_df=_streck_hist_db, max_shock_pct=max_shock_pct, candidate_rows=frame_rows)
     st.session_state['v12_specs'] = specs
     with ctrl_b:
         if st.button("Återställ alla filter till Av", use_container_width=True, key="v12_reset_all_filters_off"):
@@ -6080,6 +6820,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     else:
                         with st.expander("ℹ️", expanded=False):
                             _render_inline_filter_info(spec, rng, frame_rows, frame, antal_matcher)
+                _render_favorite_shock_diagnostics(spec, rng, frame, filter_vec, antal_matcher)
                 settings[k] = {'mode': mode, 'interval': rng}
                 st.divider()
     # Gruppkrav ligger i sidomenyn så de alltid är lätta att hitta när filter flyttas till Grupp 1–6.
