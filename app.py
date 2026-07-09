@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0ak – Utgångssystem / U-filter"
+APP_VERSION = "v12.0al – Streckrekommendationer"
 
 
 st.markdown("""
@@ -2320,6 +2320,280 @@ def load_database(filepath, antal_matcher):
         global_db['Payout'] = 0
         
     return global_db[valid_rows]
+
+
+# ==========================================
+# 2B. STRECKBASERADE REKOMMENDATIONER
+# ==========================================
+
+SIGN_ORDER = ['1', 'X', '2']
+PAIR_ORDER = ['1X', '12', 'X2']
+
+
+def _current_match_pct_dict(filter_vec, match_idx):
+    """Aktuella streck/procent för en match som dict 1/X/2."""
+    idx = int(match_idx) * 3
+    vals = list(filter_vec[idx:idx+3]) if filter_vec is not None else []
+    while len(vals) < 3:
+        vals.append(0.0)
+    return {'1': float(vals[0]), 'X': float(vals[1]), '2': float(vals[2])}
+
+
+def _pct_rank(vals, sign):
+    order = sorted(SIGN_ORDER, key=lambda s: float(vals.get(s, 0.0)), reverse=True)
+    try:
+        return order.index(sign) + 1
+    except Exception:
+        return 3
+
+
+def _empirical_streck_rate(df, signs, target_pct, antal_matcher, min_samples=25, start_band=4, require_same_rank=None):
+    """Historisk träfffrekvens för ett tecken/par vid ungefär samma strecknivå.
+
+    signs kan vara ['1'] eller ['1','X']. För varje historisk match jämförs
+    den historiska strecknivån för samma tecken/par med aktuell target_pct.
+    Bandet breddas stegvis tills stickprovet är tillräckligt stort.
+    """
+    signs = normalize_signs(signs)
+    if not signs or df is None or len(df) == 0:
+        return {'hit_pct': 0.0, 'samples': 0, 'expected_pct': 0.0, 'lift_pct': 0.0, 'band': None}
+    try:
+        target_pct = float(target_pct)
+    except Exception:
+        target_pct = 0.0
+
+    # Bredare fallback behövs främst för liknande-urvalet, eftersom 30 omgångar
+    # bara ger 390 matchobservationer på Stryktipset.
+    bands = []
+    for b in [start_band, 6, 8, 10, 12, 15, 20, 30, 100]:
+        if b not in bands:
+            bands.append(b)
+
+    best = {'hit_pct': 0.0, 'samples': 0, 'expected_pct': 0.0, 'lift_pct': 0.0, 'band': None}
+    for band in bands:
+        hits = 0
+        samples = 0
+        exp_sum = 0.0
+        for _, row in df.iterrows():
+            corr = normalize_single_row_text(row.get('Correct_Row', ''))
+            pvec = row.get('Prob_Vector', [])
+            if len(corr) != int(antal_matcher) or not isinstance(pvec, list) or len(pvec) < int(antal_matcher) * 3:
+                continue
+            for m in range(int(antal_matcher)):
+                vals = {'1': float(pvec[m*3]), 'X': float(pvec[m*3+1]), '2': float(pvec[m*3+2])}
+                hist_pct = float(sum(vals.get(s, 0.0) for s in signs))
+                if abs(hist_pct - target_pct) > float(band):
+                    continue
+                if require_same_rank is not None and len(signs) == 1:
+                    if _pct_rank(vals, signs[0]) != int(require_same_rank):
+                        continue
+                samples += 1
+                exp_sum += hist_pct
+                if corr[m] in signs:
+                    hits += 1
+        if samples > 0:
+            hit_pct = 100.0 * hits / samples
+            expected_pct = exp_sum / samples
+            best = {
+                'hit_pct': round(hit_pct, 1),
+                'samples': int(samples),
+                'expected_pct': round(expected_pct, 1),
+                'lift_pct': round(hit_pct - expected_pct, 1),
+                'band': int(band),
+            }
+        if samples >= int(min_samples) or band == 100:
+            return best
+    return best
+
+
+def _blend_hist_rate(sim_meta, all_meta):
+    """Vägd historikträff: liknande omgångar väger mest, full historik stabiliserar."""
+    s_n = float(sim_meta.get('samples', 0) or 0)
+    a_n = float(all_meta.get('samples', 0) or 0)
+    if s_n <= 0 and a_n <= 0:
+        return 0.0
+    # Liknande historik får hög vikt men begränsas av stickprovsstorlek.
+    sim_weight = 0.65 * min(1.0, s_n / 20.0)
+    all_weight = 0.35 * min(1.0, a_n / 60.0)
+    if sim_weight + all_weight <= 0:
+        return 0.0
+    return (float(sim_meta.get('hit_pct', 0.0)) * sim_weight + float(all_meta.get('hit_pct', 0.0)) * all_weight) / (sim_weight + all_weight)
+
+
+def _recommendation_label(kind, current_pct, sim_meta, all_meta):
+    """Kort manuell varnings-/styrtext, inte ett automatiskt beslut."""
+    hit = _blend_hist_rate(sim_meta, all_meta)
+    lift = float(all_meta.get('lift_pct', 0.0) or 0.0)
+    if kind == 'spik':
+        if hit >= current_pct - 3 and float(sim_meta.get('hit_pct', 0.0)) >= current_pct - 6:
+            return 'Stark'
+        if hit >= current_pct - 8:
+            return 'OK'
+        return 'Varning'
+    if kind == 'halv':
+        if hit >= current_pct - 2:
+            return 'Stark'
+        if hit >= current_pct - 7:
+            return 'OK'
+        return 'Varning'
+    # Skräll: positiv historisk lift är viktigare än absolut träff.
+    if lift >= 4 or hit >= current_pct + 4:
+        return 'Värde'
+    if lift >= 0:
+        return 'Möjlig'
+    return 'Tunn'
+
+
+def _recommendation_score(kind, current_pct, sim_meta, all_meta):
+    hist = _blend_hist_rate(sim_meta, all_meta)
+    lift = float(all_meta.get('lift_pct', 0.0) or 0.0)
+    sim_n = min(1.0, float(sim_meta.get('samples', 0) or 0) / 20.0)
+    all_n = min(1.0, float(all_meta.get('samples', 0) or 0) / 60.0)
+    reliability = 0.55 * sim_n + 0.45 * all_n
+    if kind == 'spik':
+        return hist * 0.55 + float(current_pct) * 0.35 + max(lift, -20) * 0.10 + reliability * 5
+    if kind == 'halv':
+        return hist * 0.58 + float(current_pct) * 0.32 + max(lift, -20) * 0.10 + reliability * 5
+    # Skrällar rankas inte bara på högst sannolikhet; historisk överprestation/lift ska synas.
+    return hist * 0.42 + max(lift, -20) * 1.35 + float(current_pct) * 0.12 + reliability * 4
+
+
+def _format_band(meta):
+    b = meta.get('band')
+    if b is None:
+        return '-'
+    if int(b) >= 100:
+        return 'alla'
+    return f'±{int(b)} pp'
+
+
+def build_streck_recommendation_tables(filter_vec, hist_df, similar_df, antal_matcher, max_shock_pct=25):
+    """Bygger 5 bästa spikar, halvor och skrällar mot aktuell streckbild.
+
+    Princip:
+    - Kandidaterna skapas från aktuell streck/procent.
+    - Träfffrekvensen kontrolleras historiskt mot liknande strecknivåer.
+    - Både de mest liknande omgångarna och hela statistikfilen visas.
+    """
+    if filter_vec is None or len(filter_vec) < int(antal_matcher) * 3:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    hist_df = hist_df if hist_df is not None else pd.DataFrame()
+    similar_df = similar_df if similar_df is not None else pd.DataFrame()
+
+    spik_rows = []
+    half_rows = []
+    shock_rows = []
+    for m in range(int(antal_matcher)):
+        vals = _current_match_pct_dict(filter_vec, m)
+        order = sorted(SIGN_ORDER, key=lambda s: vals[s], reverse=True)
+
+        # Spik: bästa enkeltecken enligt aktuell streckbild, verifierat historiskt.
+        fav = order[0]
+        fav_pct = vals[fav]
+        sim = _empirical_streck_rate(similar_df, [fav], fav_pct, antal_matcher, min_samples=8, start_band=4, require_same_rank=1)
+        allh = _empirical_streck_rate(hist_df, [fav], fav_pct, antal_matcher, min_samples=35, start_band=3, require_same_rank=1)
+        spik_rows.append({
+            '_score': _recommendation_score('spik', fav_pct, sim, allh),
+            'Match': f'M{m+1}',
+            'Spik': fav,
+            'Streck %': round(fav_pct, 1),
+            'Liknande träff %': sim['hit_pct'],
+            'Liknande n': sim['samples'],
+            'Liknande band': _format_band(sim),
+            'Historik träff %': allh['hit_pct'],
+            'Historik n': allh['samples'],
+            'Hist. lift %': allh['lift_pct'],
+            'Rek': _recommendation_label('spik', fav_pct, sim, allh),
+        })
+
+        # Halva: testa alla 3 halvgarderingar, men visa bara bästa per match
+        # så listan inte fylls av flera nästan identiska alternativ från samma match.
+        match_halves = []
+        for pair in PAIR_ORDER:
+            signs = list(pair)
+            pair_pct = sum(vals[s] for s in signs)
+            sim = _empirical_streck_rate(similar_df, signs, pair_pct, antal_matcher, min_samples=10, start_band=4)
+            allh = _empirical_streck_rate(hist_df, signs, pair_pct, antal_matcher, min_samples=45, start_band=3)
+            match_halves.append({
+                '_score': _recommendation_score('halv', pair_pct, sim, allh),
+                'Match': f'M{m+1}',
+                'Halv': pair,
+                'Strecksumma %': round(pair_pct, 1),
+                'Liknande träff %': sim['hit_pct'],
+                'Liknande n': sim['samples'],
+                'Liknande band': _format_band(sim),
+                'Historik träff %': allh['hit_pct'],
+                'Historik n': allh['samples'],
+                'Hist. lift %': allh['lift_pct'],
+                'Rek': _recommendation_label('halv', pair_pct, sim, allh),
+            })
+        if match_halves:
+            half_rows.append(max(match_halves, key=lambda r: r['_score']))
+
+        # Skräll: icke-favorittecken under vald maxgräns.
+        for s in order[1:]:
+            p = vals[s]
+            if p > float(max_shock_pct):
+                continue
+            rank = _pct_rank(vals, s)
+            sim = _empirical_streck_rate(similar_df, [s], p, antal_matcher, min_samples=6, start_band=4, require_same_rank=rank)
+            allh = _empirical_streck_rate(hist_df, [s], p, antal_matcher, min_samples=25, start_band=3, require_same_rank=rank)
+            shock_rows.append({
+                '_score': _recommendation_score('skrall', p, sim, allh),
+                'Match': f'M{m+1}',
+                'Skräll': s,
+                'Rank': int(rank),
+                'Streck %': round(p, 1),
+                'Liknande träff %': sim['hit_pct'],
+                'Liknande n': sim['samples'],
+                'Liknande band': _format_band(sim),
+                'Historik träff %': allh['hit_pct'],
+                'Historik n': allh['samples'],
+                'Hist. lift %': allh['lift_pct'],
+                'Rek': _recommendation_label('skrall', p, sim, allh),
+            })
+
+    def _finalize(rows, n=5):
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows).sort_values('_score', ascending=False).head(int(n)).reset_index(drop=True)
+        return df.drop(columns=['_score'], errors='ignore')
+
+    return _finalize(spik_rows, 5), _finalize(half_rows, 5), _finalize(shock_rows, 5)
+
+
+def _recommendation_frame_text(spik_df, half_df, shock_df, antal_matcher):
+    """Bygger en enkel text som kan användas som stöd för grundramen."""
+    frame = {i: set() for i in range(1, int(antal_matcher) + 1)}
+    if isinstance(spik_df, pd.DataFrame) and not spik_df.empty:
+        for _, r in spik_df.iterrows():
+            try:
+                m = int(str(r['Match']).replace('M', ''))
+                frame[m].add(str(r['Spik']))
+            except Exception:
+                pass
+    if isinstance(half_df, pd.DataFrame) and not half_df.empty:
+        for _, r in half_df.iterrows():
+            try:
+                m = int(str(r['Match']).replace('M', ''))
+                for s in str(r['Halv']):
+                    if s in SIGN_ORDER:
+                        frame[m].add(s)
+            except Exception:
+                pass
+    if isinstance(shock_df, pd.DataFrame) and not shock_df.empty:
+        for _, r in shock_df.iterrows():
+            try:
+                m = int(str(r['Match']).replace('M', ''))
+                frame[m].add(str(r['Skräll']))
+            except Exception:
+                pass
+    parts = []
+    for m in range(1, int(antal_matcher) + 1):
+        signs = normalize_signs(list(frame[m]))
+        parts.append(_sort_signs_display(signs) if signs else '-')
+    return ' / '.join(parts)
+
 
 @st.cache_data(show_spinner=False)
 def run_core_analysis(input_text, spelform, antal_matcher, krav_odds, cb_structure, slider_top_n, cb_payout, pay_min, pay_max):
@@ -5144,6 +5418,34 @@ if run_analysis:
         st.session_state['v12_filter_saved'] = False
         st.success(f"Klart: {len(v_m)} liknande omgångar hittades.")
 st.markdown("</div>", unsafe_allow_html=True)
+
+# Streckrekommendationer – spikar/halvor/skrällar
+if st.session_state.get('v12_analysis_ready'):
+    _rec_v_m = st.session_state.get('v12_v_m')
+    _rec_filter_vec = st.session_state.get('v12_filter_vec')
+    _rec_db_path = find_local_database(spelform)
+    _rec_hist_db = load_database(_rec_db_path, antal_matcher) if _rec_db_path else pd.DataFrame()
+    with st.expander("🎯 Streckrekommendationer – 5 spikar, 5 halvor, 5 skrällar", expanded=True):
+        st.caption("Förslagen utgår från aktuell streck/procentbild men kontrolleras mot hur ofta motsvarande strecknivå faktiskt satt i historiken. Liknande träff = de historiskt mest liknande omgångarna. Historik träff = hela statistikfilen.")
+        c_shock, c_info = st.columns([0.8, 2.2])
+        with c_shock:
+            max_shock_pct = st.slider("Maxstreck för skräll", min_value=5, max_value=40, value=int(st.session_state.get('v12_max_shock_pct', 25)), step=1, key='v12_max_shock_pct')
+        with c_info:
+            st.info("Detta är beslutsstöd, inte auto-filter. Titta särskilt på skillnaden mellan streck %, historisk träff % och Hist. lift %. Lågt stickprov markeras genom låg n/bredare band.")
+        spik_df, half_df, shock_df = build_streck_recommendation_tables(_rec_filter_vec, _rec_hist_db, _rec_v_m, antal_matcher, max_shock_pct=max_shock_pct)
+        t1, t2, t3 = st.tabs(["5 bästa spikar", "5 bästa halvor", "5 bästa skrällar"])
+        with t1:
+            st.dataframe(spik_df, use_container_width=True, hide_index=True)
+        with t2:
+            st.dataframe(half_df, use_container_width=True, hide_index=True)
+        with t3:
+            if shock_df.empty:
+                st.info("Inga skrällkandidater under vald maxgräns.")
+            else:
+                st.dataframe(shock_df, use_container_width=True, hide_index=True)
+        frame_hint = _recommendation_frame_text(spik_df, half_df, shock_df, antal_matcher)
+        st.caption("Snabbskiss för grundram från visade rekommendationer:")
+        st.code(frame_hint, language=None)
 
 # Step 2 – ground frame
 st.markdown("<div class='v12-card'>", unsafe_allow_html=True)
