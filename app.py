@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0am – U-val med streck/historik"
+APP_VERSION = "v12.0an – U-val med direktintervall"
 
 
 st.markdown("""
@@ -1665,6 +1665,10 @@ def _collect_u_rows_from_session(antal_matcher):
             'name': name,
             'manual_system': signs,
             'raw_text': raw_text,
+            # Direktstyrning från Utgångssystem-panelen för huvudfiltret
+            # "Antalet utgångstips". Filtercentralen speglar dessa värden.
+            'utips_mode': str(st.session_state.get(f'v12_us_{slot}_utips_mode', 'Av') or 'Av'),
+            'utips_interval': list(st.session_state.get(f'v12_us_{slot}_utips_interval', (0, int(antal_matcher))) or (0, int(antal_matcher))),
         })
     return out
 
@@ -1689,6 +1693,15 @@ def _apply_u_rows_to_session(u_payload):
             st.session_state[f'v12_us_{slot}_name'] = str(item.get('name') or f'Utgångssystem {slot}')
             if item.get('raw_text') is not None:
                 st.session_state[f'v12_us_{slot}_text'] = str(item.get('raw_text') or '')
+            if item.get('utips_mode') is not None:
+                st.session_state[f'v12_us_{slot}_utips_mode'] = str(item.get('utips_mode') or 'Av')
+            if item.get('utips_interval') is not None:
+                try:
+                    _iv = item.get('utips_interval') or []
+                    if len(_iv) >= 2:
+                        st.session_state[f'v12_us_{slot}_utips_interval'] = (int(float(_iv[0])), int(float(_iv[1])))
+                except Exception:
+                    pass
             manual = item.get('manual_system') or []
             for m, signs in enumerate(manual[:13]):
                 st.session_state[f'v12_us_{slot}_m{m}'] = _u_signs_display(signs)
@@ -2660,6 +2673,89 @@ def _short_u_interval_summary(system, hist_rows, antal_matcher, target_pct=90.0)
         'total': ht,
         'pct': pct,
     }
+
+
+
+
+def _u_total_filter_key(slot):
+    """Filtercentralnyckel för ett utgångssystems huvudfilter: Antalet utgångstips."""
+    return f"u_sys_us{int(slot)}_utips"
+
+
+def _u_total_filter_mode_key(slot):
+    return f"filter_mode_{_u_total_filter_key(slot)}"
+
+
+def _u_total_filter_range_key(slot, target_pct, top_fav_count):
+    return f"filter_range_{_u_total_filter_key(slot)}_h{int(target_pct)}_tf{int(top_fav_count)}"
+
+
+def _normalize_int_interval(interval, low, high, fallback):
+    try:
+        a, b = interval
+        a = int(round(float(a)))
+        b = int(round(float(b)))
+    except Exception:
+        a, b = fallback
+    a = max(int(low), min(int(a), int(high)))
+    b = max(int(low), min(int(b), int(high)))
+    if a > b:
+        a, b = b, a
+    return (a, b)
+
+
+def _render_u_total_filter_controls(slot, system, rec_interval, filter_hist_target_pct, top_fav_count):
+    """Direktkontroll i U-panelen för "x-y av utgångstips ska sitta".
+
+    Samma värden skrivs till Filtercentralens session_state-nycklar, så användaren
+    slipper leta upp raden "Utgångssystem N – Antalet utgångstips" längre ner.
+    """
+    marked = max(0, int(u_system_marked_count(system)))
+    if marked <= 0:
+        return {'mode': 'Av', 'interval': (0, 0)}
+
+    mode_options = ['Av', 'Tvingat'] + [f'Grupp {i}' for i in range(1, 7)]
+    u_mode_key = f'v12_us_{int(slot)}_utips_mode'
+    u_range_key = f'v12_us_{int(slot)}_utips_interval'
+
+    default_interval = _normalize_int_interval(rec_interval or (0, marked), 0, marked, (0, marked))
+    if u_mode_key not in st.session_state:
+        st.session_state[u_mode_key] = 'Av'
+    if u_range_key not in st.session_state:
+        st.session_state[u_range_key] = default_interval
+    else:
+        st.session_state[u_range_key] = _normalize_int_interval(st.session_state[u_range_key], 0, marked, default_interval)
+
+    c_mode, c_range, c_apply = st.columns([0.9, 2.0, 0.8])
+    with c_mode:
+        mode = st.selectbox(
+            "Filterläge",
+            mode_options,
+            index=mode_options.index(st.session_state.get(u_mode_key, 'Av')) if st.session_state.get(u_mode_key, 'Av') in mode_options else 0,
+            key=u_mode_key,
+            help="Av = bara visning. Tvingat = detta intervall måste sitta. Grupp = räknas i valt gruppkrav.",
+        )
+    with c_range:
+        interval = st.slider(
+            f"Spela antal utgångstips som ska sitta, 0–{marked}",
+            0,
+            marked,
+            st.session_state[u_range_key],
+            step=1,
+            key=u_range_key,
+            help="Exempel 1–4 betyder att en rad får passera om 1 till 4 av de markerade utgångstipsen sitter.",
+        )
+    with c_apply:
+        st.markdown("&nbsp;", unsafe_allow_html=True)
+        if st.button("Rek.", key=f'v12_us_{int(slot)}_utips_use_rec', help="Återställ till rekommenderat historikintervall", use_container_width=True):
+            st.session_state[u_range_key] = default_interval
+            st.rerun()
+
+    # Spegla direkt till Filtercentralen. Den byggs senare i samma körning.
+    st.session_state[_u_total_filter_mode_key(slot)] = mode
+    st.session_state[_u_total_filter_range_key(slot, filter_hist_target_pct, top_fav_count)] = interval
+
+    return {'mode': mode, 'interval': interval}
 
 
 def _compact_rec_preview_df(df, source):
@@ -5608,7 +5704,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
 
     with st.expander("🎯 Utgångssystem – Antal tecken", expanded=False):
         st.caption("Helgardering-liknande U-filter: välj färdiga utgångssystem eller mata in ett eget med 1/X/2 per match. Appen skapar fem transparenta filter i filtercentralen: Antalet utgångstips, Antalet ettor, Antalet kryss, Antalet tvåor och Antal 1/X/2.")
-        st.info("Streckvalen ligger här som färdiga U-val. Intervallen, t.ex. 2–5 eller 1–3, visas i diagnosen och blir startvärden i filtercentralen där varje rad kan sättas Av, Tvingat eller Grupp.")
+        st.info('Streckvalen ligger här som färdiga U-val. Sätt direkt här om t.ex. 1–4 eller 2–5 av utgångstipsen ska sitta. Samma värde speglas även i filtercentralen under "Antalet utgångstips".')
         cshock, cinfo = st.columns([0.8, 2.2])
         with cshock:
             _u_max_shock_pct = st.slider("Maxstreck för skräll-U", min_value=5, max_value=40, value=_u_max_shock_pct, step=1, key='v12_max_shock_pct')
@@ -5652,6 +5748,9 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                         st.code(u_system_to_text(_this.get('system', [])), language=None)
                         _summary = _short_u_interval_summary(_this.get('system', []), list(v_m['Correct_Row']), antal_matcher, target_pct=filter_hist_target_pct)
                         st.success(_summary['text'])
+                        _ctrl = _render_u_total_filter_controls(_slot, _this.get('system', []), _summary.get('interval'), filter_hist_target_pct, top_fav_count)
+                        if _ctrl.get('mode') != 'Av':
+                            st.caption(f"Aktivt huvudfilter: {_ctrl.get('mode')} · spela {_ctrl.get('interval')[0]}–{_ctrl.get('interval')[1]} av {_this.get('marked', u_system_marked_count(_this.get('system', [])))} utgångstips.")
                         if _src in STRECK_U_SOURCES:
                             _sys, _rec_table = _u_system_from_streck_source(_src, filter_vec, _u_hist_db, v_m, antal_matcher, max_shock_pct=_u_max_shock_pct)
                             _compact = _compact_rec_preview_df(_rec_table, _src)
@@ -5663,7 +5762,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         _preview_u_rows = build_u_rows_for_filtercentral(v_m, filter_vec, antal_matcher, hist_df=_u_hist_db, max_shock_pct=_u_max_shock_pct)
         if _preview_u_rows:
             st.dataframe(u_row_diag_df(_preview_u_rows, list(v_m['Correct_Row']), antal_matcher, target_pct=filter_hist_target_pct), use_container_width=True, hide_index=True)
-            st.caption("Rek. intervall blir startvärde i filtercentralen. Garantin är villkorad på att facit överlever utgångsfilter och övriga filter.")
+            st.caption("Direktvalen ovan speglas i filtercentralen. Övriga U-filter, t.ex. Antalet ettor/kryss/tvåor och Antal 1/X/2, kan fortfarande sättas i filtercentralen. Garantin är villkorad på att facit överlever utgångsfilter och övriga filter.")
         else:
             st.info("Inga aktiva utgångssystem finns.")
 
