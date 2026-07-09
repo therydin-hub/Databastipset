@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0az – FAT stigande/fallande"
+APP_VERSION = "v12.0ba – Prestandafix"
 
 
 st.markdown("""
@@ -3306,7 +3306,7 @@ def _super_macro_count(row_str, prob_vector, bounds):
     return score
 
 
-def _sample_rows_for_macro(rows, max_items=60000):
+def _sample_rows_for_macro(rows, max_items=12000):
     """Deterministiskt urval för Super-Makro-rekommendation när grundramen är stor."""
     rows = list(rows or [])
     n = len(rows)
@@ -3329,7 +3329,7 @@ def _recommend_super_macro_interval(hist_values, candidate_rows, filter_vec, mac
     if not hist_values:
         return (0, 8), pd.DataFrame(), False
 
-    cand_sample, sampled = _sample_rows_for_macro(candidate_rows or [], max_items=60000)
+    cand_sample, sampled = _sample_rows_for_macro(candidate_rows or [], max_items=12000)
     if cand_sample:
         cand_values = [_super_macro_count(r, filter_vec, macro_bounds) for r in cand_sample]
     else:
@@ -3450,7 +3450,7 @@ def _recommend_count_macro_interval(hist_values, candidate_rows, row_getter, max
     preferred_low = max(0, min(max_score, int(preferred_low)))
     preferred_high = max(preferred_low, min(max_score, int(preferred_high)))
 
-    cand_sample, sampled = _sample_rows_for_macro(candidate_rows or [], max_items=60000)
+    cand_sample, sampled = _sample_rows_for_macro(candidate_rows or [], max_items=12000)
     cand_values = []
     if cand_sample:
         for r in cand_sample:
@@ -6537,8 +6537,20 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         st.info("Filterintervallen uppdateras efter nytt träffmål…")
         st.rerun()
 
-    specs = build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=top_fav_count, target_hist_pct=filter_hist_target_pct, u_rows=None, hist_df=_streck_hist_db, max_shock_pct=max_shock_pct, candidate_rows=frame_rows)
+    # Prestandafix v12.0ba:
+    # Filterrekommendationerna, särskilt flera Super-Makron, behöver bara ett
+    # stabilt urval av grundramen för att uppskatta kvarvarande rad %. Att skicka
+    # hela grundramen här gjorde sidan mycket seg när grundramen var stor.
+    # Själva filtreringen/reduceringen längre ned använder fortfarande hela frame_rows.
+    spec_candidate_rows = frame_rows
+    spec_sampled_for_specs = False
+    if frame_rows is not None and len(frame_rows) > 20000:
+        spec_candidate_rows, spec_sampled_for_specs = _sample_rows_for_macro(frame_rows, max_items=12000)
+
+    specs = build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=top_fav_count, target_hist_pct=filter_hist_target_pct, u_rows=None, hist_df=_streck_hist_db, max_shock_pct=max_shock_pct, candidate_rows=spec_candidate_rows)
     st.session_state['v12_specs'] = specs
+    if spec_sampled_for_specs:
+        st.caption(f"Prestandaläge: filterrekommendationer/Super-Makro uppskattar kvarvarande radmassa på ett stabilt urval av {len(spec_candidate_rows):,} av {len(frame_rows):,} grundrader. Själva filtreringen och TipsetMatrix använder hela grundramen.".replace(',', ' '))
     with ctrl_b:
         if st.button("Återställ alla filter till Av", use_container_width=True, key="v12_reset_all_filters_off"):
             for _k in list(st.session_state.keys()):
