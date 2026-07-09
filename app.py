@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0al – Streckrekommendationer"
+APP_VERSION = "v12.0am – U-val med streck/historik"
 
 
 st.markdown("""
@@ -1646,8 +1646,8 @@ def _collect_u_rows_from_session(antal_matcher):
     """
     out = {'version': 'utgangssystem_v2', 'slots': []}
     choices = ['', '1', 'X', '2', '1X', '12', 'X2', '1X2']
-    default_modes = {1: 'Favorit/procent', 2: 'Historik/AI', 3: 'Manuell'}
-    for slot in range(1, 4):
+    default_modes = {1: 'Favorit/procent', 2: 'Historik/AI', 3: '5 bästa spikar', 4: '5 bästa halvor', 5: '5 bästa skrällar', 6: 'Manuell'}
+    for slot in range(1, 7):
         enabled = bool(st.session_state.get(f'v12_us_{slot}_enabled', slot in [1, 2]))
         mode = str(st.session_state.get(f'v12_us_{slot}_source', default_modes.get(slot, 'Manuell')) or 'Manuell')
         name = str(st.session_state.get(f'v12_us_{slot}_name', f'Utgångssystem {slot}') or f'Utgångssystem {slot}').strip()
@@ -1682,7 +1682,7 @@ def _apply_u_rows_to_session(u_payload):
                 slot = int(item.get('slot', 0))
             except Exception:
                 slot = 0
-            if not (1 <= slot <= 3):
+            if not (1 <= slot <= 6):
                 continue
             st.session_state[f'v12_us_{slot}_enabled'] = bool(item.get('enabled', False))
             st.session_state[f'v12_us_{slot}_source'] = str(item.get('source') or 'Manuell')
@@ -1714,7 +1714,7 @@ def _apply_u_rows_to_session(u_payload):
         row = parse_u_row_text(item.get('row') or item.get('raw') or '', 13)
         if not row:
             continue
-        for slot in range(1, 4):
+        for slot in range(1, 7):
             if not bool(st.session_state.get(f'v12_us_{slot}_enabled', False)):
                 st.session_state[f'v12_us_{slot}_enabled'] = True
                 st.session_state[f'v12_us_{slot}_source'] = 'Manuell'
@@ -1724,11 +1724,12 @@ def _apply_u_rows_to_session(u_payload):
                 break
 
 
-def build_u_rows_for_filtercentral(v_m, filter_vec, antal_matcher):
+def build_u_rows_for_filtercentral(v_m, filter_vec, antal_matcher, hist_df=None, max_shock_pct=25):
     """Bygger aktiva utgångssystem som sedan blir fem filter per system."""
     systems = []
-    default_modes = {1: 'Favorit/procent', 2: 'Historik/AI', 3: 'Manuell'}
-    for slot in range(1, 4):
+    hist_df = hist_df if isinstance(hist_df, pd.DataFrame) and not hist_df.empty else v_m
+    default_modes = {1: 'Favorit/procent', 2: 'Historik/AI', 3: '5 bästa spikar', 4: '5 bästa halvor', 5: '5 bästa skrällar', 6: 'Manuell'}
+    for slot in range(1, 7):
         enabled = bool(st.session_state.get(f'v12_us_{slot}_enabled', slot in [1, 2]))
         if not enabled:
             continue
@@ -1744,6 +1745,9 @@ def build_u_rows_for_filtercentral(v_m, filter_vec, antal_matcher):
         elif mode == 'Andrahand':
             system = build_pct_second_u_system(filter_vec, antal_matcher)
             source = 'Näst högsta aktuella procent per match'
+        elif mode in STRECK_U_SOURCES:
+            system, _rec_df = _u_system_from_streck_source(mode, filter_vec, hist_df, v_m, antal_matcher, max_shock_pct=max_shock_pct)
+            source = f'{mode} – baserat på aktuell streckbild och verifierat mot historiken'
         else:
             system = []
             for m in range(int(antal_matcher)):
@@ -2593,6 +2597,86 @@ def _recommendation_frame_text(spik_df, half_df, shock_df, antal_matcher):
         signs = normalize_signs(list(frame[m]))
         parts.append(_sort_signs_display(signs) if signs else '-')
     return ' / '.join(parts)
+
+
+STRECK_U_SOURCES = ['5 bästa spikar', '5 bästa halvor', '5 bästa skrällar']
+
+
+def _match_no_from_label(value):
+    try:
+        return int(str(value).upper().replace('MATCH', '').replace('M', '').strip())
+    except Exception:
+        return None
+
+
+def _system_from_recommendation_df(df, value_col, antal_matcher):
+    """Gör rekommendationstabell till ett Helgardering-liknande utgångssystem."""
+    system = [[] for _ in range(int(antal_matcher))]
+    if not isinstance(df, pd.DataFrame) or df.empty or value_col not in df.columns:
+        return system
+    for _, r in df.iterrows():
+        m = _match_no_from_label(r.get('Match'))
+        if m is None or not (1 <= m <= int(antal_matcher)):
+            continue
+        system[m - 1] = normalize_signs(str(r.get(value_col, '')))
+    return system
+
+
+def _streck_rec_tables_for_u(filter_vec, hist_df, similar_df, antal_matcher, max_shock_pct=25):
+    hist_df = hist_df if isinstance(hist_df, pd.DataFrame) and not hist_df.empty else pd.DataFrame()
+    similar_df = similar_df if isinstance(similar_df, pd.DataFrame) and not similar_df.empty else pd.DataFrame()
+    return build_streck_recommendation_tables(
+        filter_vec,
+        hist_df,
+        similar_df,
+        int(antal_matcher),
+        max_shock_pct=int(max_shock_pct or 25),
+    )
+
+
+def _u_system_from_streck_source(source, filter_vec, hist_df, similar_df, antal_matcher, max_shock_pct=25):
+    spik_df, half_df, shock_df = _streck_rec_tables_for_u(filter_vec, hist_df, similar_df, antal_matcher, max_shock_pct=max_shock_pct)
+    if source == '5 bästa spikar':
+        return _system_from_recommendation_df(spik_df, 'Spik', antal_matcher), spik_df
+    if source == '5 bästa halvor':
+        return _system_from_recommendation_df(half_df, 'Halv', antal_matcher), half_df
+    if source == '5 bästa skrällar':
+        return _system_from_recommendation_df(shock_df, 'Skräll', antal_matcher), shock_df
+    return [[] for _ in range(int(antal_matcher))], pd.DataFrame()
+
+
+def _short_u_interval_summary(system, hist_rows, antal_matcher, target_pct=90.0):
+    clean_hist = [normalize_single_row_text(r) for r in (hist_rows or []) if len(normalize_single_row_text(r)) == int(antal_matcher)]
+    vals = [_u_system_metric(r, system, 'utips') for r in clean_hist]
+    if not vals:
+        return {'text': 'Rek. intervall saknas', 'interval': None, 'hits': 0, 'total': 0, 'pct': 0.0}
+    rec = get_best_interval(vals, target_pct)
+    hp, ht, pct = _hist_pass_count(vals, rec)
+    marked = u_system_marked_count(system)
+    return {
+        'text': f"Rek. spela {int(rec[0])}–{int(rec[1])} av {marked} utgångstips · historik {hp}/{ht} ({pct:.1f}%)",
+        'interval': rec,
+        'hits': hp,
+        'total': ht,
+        'pct': pct,
+    }
+
+
+def _compact_rec_preview_df(df, source):
+    """Visar rekommendationer inne i U-panelen utan separat modul."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame()
+    cols = ['Match']
+    if source == '5 bästa spikar':
+        cols += ['Spik', 'Streck %']
+    elif source == '5 bästa halvor':
+        cols += ['Halv', 'Strecksumma %']
+    elif source == '5 bästa skrällar':
+        cols += ['Skräll', 'Rank', 'Streck %']
+    for c in ['Liknande träff %', 'Liknande n', 'Historik träff %', 'Historik n', 'Hist. lift %', 'Rek']:
+        if c in df.columns:
+            cols.append(c)
+    return df[[c for c in cols if c in df.columns]].copy()
 
 
 @st.cache_data(show_spinner=False)
@@ -5419,33 +5503,7 @@ if run_analysis:
         st.success(f"Klart: {len(v_m)} liknande omgångar hittades.")
 st.markdown("</div>", unsafe_allow_html=True)
 
-# Streckrekommendationer – spikar/halvor/skrällar
-if st.session_state.get('v12_analysis_ready'):
-    _rec_v_m = st.session_state.get('v12_v_m')
-    _rec_filter_vec = st.session_state.get('v12_filter_vec')
-    _rec_db_path = find_local_database(spelform)
-    _rec_hist_db = load_database(_rec_db_path, antal_matcher) if _rec_db_path else pd.DataFrame()
-    with st.expander("🎯 Streckrekommendationer – 5 spikar, 5 halvor, 5 skrällar", expanded=True):
-        st.caption("Förslagen utgår från aktuell streck/procentbild men kontrolleras mot hur ofta motsvarande strecknivå faktiskt satt i historiken. Liknande träff = de historiskt mest liknande omgångarna. Historik träff = hela statistikfilen.")
-        c_shock, c_info = st.columns([0.8, 2.2])
-        with c_shock:
-            max_shock_pct = st.slider("Maxstreck för skräll", min_value=5, max_value=40, value=int(st.session_state.get('v12_max_shock_pct', 25)), step=1, key='v12_max_shock_pct')
-        with c_info:
-            st.info("Detta är beslutsstöd, inte auto-filter. Titta särskilt på skillnaden mellan streck %, historisk träff % och Hist. lift %. Lågt stickprov markeras genom låg n/bredare band.")
-        spik_df, half_df, shock_df = build_streck_recommendation_tables(_rec_filter_vec, _rec_hist_db, _rec_v_m, antal_matcher, max_shock_pct=max_shock_pct)
-        t1, t2, t3 = st.tabs(["5 bästa spikar", "5 bästa halvor", "5 bästa skrällar"])
-        with t1:
-            st.dataframe(spik_df, use_container_width=True, hide_index=True)
-        with t2:
-            st.dataframe(half_df, use_container_width=True, hide_index=True)
-        with t3:
-            if shock_df.empty:
-                st.info("Inga skrällkandidater under vald maxgräns.")
-            else:
-                st.dataframe(shock_df, use_container_width=True, hide_index=True)
-        frame_hint = _recommendation_frame_text(spik_df, half_df, shock_df, antal_matcher)
-        st.caption("Snabbskiss för grundram från visade rekommendationer:")
-        st.code(frame_hint, language=None)
+# Streckrekommendationer används nu som färdiga källval inne i Utgångssystem – Antal tecken.
 
 # Step 2 – ground frame
 st.markdown("<div class='v12-card'>", unsafe_allow_html=True)
@@ -5532,7 +5590,10 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     for _slot, _defaults in {
         1: {'enabled': True, 'source': 'Favorit/procent', 'name': 'Utgångssystem 1'},
         2: {'enabled': True, 'source': 'Historik/AI', 'name': 'Utgångssystem 2'},
-        3: {'enabled': False, 'source': 'Manuell', 'name': 'Utgångssystem 3'},
+        3: {'enabled': False, 'source': '5 bästa spikar', 'name': 'U – 5 bästa spikar'},
+        4: {'enabled': False, 'source': '5 bästa halvor', 'name': 'U – 5 bästa halvor'},
+        5: {'enabled': False, 'source': '5 bästa skrällar', 'name': 'U – 5 bästa skrällar'},
+        6: {'enabled': False, 'source': 'Manuell', 'name': 'Manuellt utgångssystem'},
     }.items():
         st.session_state.setdefault(f'v12_us_{_slot}_enabled', _defaults['enabled'])
         st.session_state.setdefault(f'v12_us_{_slot}_source', _defaults['source'])
@@ -5541,12 +5602,21 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         for _m in range(antal_matcher):
             st.session_state.setdefault(f'v12_us_{_slot}_m{_m}', '')
 
+    _u_db_path = find_local_database(spelform)
+    _u_hist_db = load_database(_u_db_path, antal_matcher) if _u_db_path else pd.DataFrame()
+    _u_max_shock_pct = int(st.session_state.get('v12_max_shock_pct', 25))
+
     with st.expander("🎯 Utgångssystem – Antal tecken", expanded=False):
-        st.caption("Helgardering-liknande U-filter: mata in ett utgångssystem med 1/X/2 per match. Appen skapar fem transparenta filter i filtercentralen: Antalet utgångstips, Antalet ettor, Antalet kryss, Antalet tvåor och Antal 1/X/2.")
-        st.info("Filtervärdena väljs inte här. De visas under kategorin 'Utgångssystem – Antal tecken' i filtercentralen där varje rad kan sättas Av, Tvingat eller Grupp med min/max-intervall.")
+        st.caption("Helgardering-liknande U-filter: välj färdiga utgångssystem eller mata in ett eget med 1/X/2 per match. Appen skapar fem transparenta filter i filtercentralen: Antalet utgångstips, Antalet ettor, Antalet kryss, Antalet tvåor och Antal 1/X/2.")
+        st.info("Streckvalen ligger här som färdiga U-val. Intervallen, t.ex. 2–5 eller 1–3, visas i diagnosen och blir startvärden i filtercentralen där varje rad kan sättas Av, Tvingat eller Grupp.")
+        cshock, cinfo = st.columns([0.8, 2.2])
+        with cshock:
+            _u_max_shock_pct = st.slider("Maxstreck för skräll-U", min_value=5, max_value=40, value=_u_max_shock_pct, step=1, key='v12_max_shock_pct')
+        with cinfo:
+            st.caption("5 bästa spikar/halvor/skrällar baseras på aktuell streckbild men verifieras mot liknande historik och hela statistikfilen.")
         sign_choices = ['', '1', 'X', '2', '1X', '12', 'X2', '1X2']
-        source_choices = ['Favorit/procent', 'Historik/AI', 'Andrahand', 'Manuell']
-        for _slot in range(1, 4):
+        source_choices = ['Favorit/procent', 'Historik/AI', 'Andrahand', '5 bästa spikar', '5 bästa halvor', '5 bästa skrällar', 'Manuell']
+        for _slot in range(1, 7):
             with st.container(border=True):
                 h1, h2, h3 = st.columns([0.9, 1.25, 1.5])
                 with h1:
@@ -5576,21 +5646,28 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                         with grid_cols[_m]:
                             st.selectbox(f"M{_m+1}", sign_choices, key=f'v12_us_{_slot}_m{_m}')
                 else:
-                    _preview_single = build_u_rows_for_filtercentral(v_m, filter_vec, antal_matcher)
+                    _preview_single = build_u_rows_for_filtercentral(v_m, filter_vec, antal_matcher, hist_df=_u_hist_db, max_shock_pct=_u_max_shock_pct)
                     _this = next((x for x in _preview_single if int(x.get('slot', 0)) == _slot), None)
                     if _this:
                         st.code(u_system_to_text(_this.get('system', [])), language=None)
+                        _summary = _short_u_interval_summary(_this.get('system', []), list(v_m['Correct_Row']), antal_matcher, target_pct=filter_hist_target_pct)
+                        st.success(_summary['text'])
+                        if _src in STRECK_U_SOURCES:
+                            _sys, _rec_table = _u_system_from_streck_source(_src, filter_vec, _u_hist_db, v_m, antal_matcher, max_shock_pct=_u_max_shock_pct)
+                            _compact = _compact_rec_preview_df(_rec_table, _src)
+                            if not _compact.empty:
+                                st.dataframe(_compact, use_container_width=True, hide_index=True)
                     else:
                         st.caption("Systemet visas när det är aktivt.")
 
-        _preview_u_rows = build_u_rows_for_filtercentral(v_m, filter_vec, antal_matcher)
+        _preview_u_rows = build_u_rows_for_filtercentral(v_m, filter_vec, antal_matcher, hist_df=_u_hist_db, max_shock_pct=_u_max_shock_pct)
         if _preview_u_rows:
             st.dataframe(u_row_diag_df(_preview_u_rows, list(v_m['Correct_Row']), antal_matcher, target_pct=filter_hist_target_pct), use_container_width=True, hide_index=True)
             st.caption("Rek. intervall blir startvärde i filtercentralen. Garantin är villkorad på att facit överlever utgångsfilter och övriga filter.")
         else:
             st.info("Inga aktiva utgångssystem finns.")
 
-    u_rows = build_u_rows_for_filtercentral(v_m, filter_vec, antal_matcher)
+    u_rows = build_u_rows_for_filtercentral(v_m, filter_vec, antal_matcher, hist_df=_u_hist_db, max_shock_pct=_u_max_shock_pct)
 
     # Viktigt: kontrollen ovan måste läsas INNAN specs/sliders byggs.
     # Dessutom har varje intervallslider en nyckel som innehåller träffmålet.
