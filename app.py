@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0aq – Gruppkrav i sidomeny + historikantal"
+APP_VERSION = "v12.0ar – Toppfavoriter 3–6 + återställ filter"
 
 
 st.markdown("""
@@ -1739,7 +1739,7 @@ def _apply_u_rows_to_session(u_payload):
                 break
 
 
-def build_u_rows_for_filtercentral(v_m, filter_vec, antal_matcher, hist_df=None, max_shock_pct=25):
+def build_u_rows_for_filtercentral(v_m, filter_vec, antal_matcher, hist_df=None, max_shock_pct=22):
     """Bygger aktiva utgångssystem som sedan blir fem filter per system."""
     systems = []
     hist_df = hist_df if isinstance(hist_df, pd.DataFrame) and not hist_df.empty else v_m
@@ -2486,7 +2486,7 @@ def _format_band(meta):
     return f'±{int(b)} pp'
 
 
-def build_streck_recommendation_tables(filter_vec, hist_df, similar_df, antal_matcher, max_shock_pct=25):
+def build_streck_recommendation_tables(filter_vec, hist_df, similar_df, antal_matcher, max_shock_pct=22):
     """Bygger 5 bästa spikar, halvor och skrällar mot aktuell streckbild.
 
     Princip:
@@ -2617,7 +2617,7 @@ def _recommendation_frame_text(spik_df, half_df, shock_df, antal_matcher):
 STRECK_U_SOURCES = ['5 bästa spikar', '5 bästa halvor', '5 bästa skrällar']
 
 
-def _build_streck_filter_systems(filter_vec, hist_df, similar_df, antal_matcher, max_shock_pct=25):
+def _build_streck_filter_systems(filter_vec, hist_df, similar_df, antal_matcher, max_shock_pct=22):
     """Skapar tre färdiga filter från aktuell streckbild, verifierade mot historiken.
 
     Filtren används direkt i Favorit & skräll. De är inte U-system i UI:t:
@@ -2629,7 +2629,7 @@ def _build_streck_filter_systems(filter_vec, hist_df, similar_df, antal_matcher,
         hist_src,
         similar_df,
         int(antal_matcher),
-        max_shock_pct=int(max_shock_pct or 25),
+        max_shock_pct=int(max_shock_pct or 22),
     )
     items = []
     for name, df, col, key in [
@@ -2700,7 +2700,7 @@ def _system_from_recommendation_df(df, value_col, antal_matcher):
     return system
 
 
-def _streck_rec_tables_for_u(filter_vec, hist_df, similar_df, antal_matcher, max_shock_pct=25):
+def _streck_rec_tables_for_u(filter_vec, hist_df, similar_df, antal_matcher, max_shock_pct=22):
     hist_df = hist_df if isinstance(hist_df, pd.DataFrame) and not hist_df.empty else pd.DataFrame()
     similar_df = similar_df if isinstance(similar_df, pd.DataFrame) and not similar_df.empty else pd.DataFrame()
     return build_streck_recommendation_tables(
@@ -2708,11 +2708,11 @@ def _streck_rec_tables_for_u(filter_vec, hist_df, similar_df, antal_matcher, max
         hist_df,
         similar_df,
         int(antal_matcher),
-        max_shock_pct=int(max_shock_pct or 25),
+        max_shock_pct=int(max_shock_pct or 22),
     )
 
 
-def _u_system_from_streck_source(source, filter_vec, hist_df, similar_df, antal_matcher, max_shock_pct=25):
+def _u_system_from_streck_source(source, filter_vec, hist_df, similar_df, antal_matcher, max_shock_pct=22):
     spik_df, half_df, shock_df = _streck_rec_tables_for_u(filter_vec, hist_df, similar_df, antal_matcher, max_shock_pct=max_shock_pct)
     if source == '5 bästa spikar':
         return _system_from_recommendation_df(spik_df, 'Spik', antal_matcher), spik_df
@@ -3103,7 +3103,7 @@ def _frame_cache_tuple(frame):
     return tuple(tuple(x) for x in frame)
 
 
-def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, target_hist_pct=90, u_rows=None, hist_df=None, max_shock_pct=25):
+def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, target_hist_pct=90, u_rows=None, hist_df=None, max_shock_pct=22):
     """Bygger exakt en spec per filter. Inga AutoHard-varianter/dubbletter.
 
     target_hist_pct styr rekommenderat intervall/startvärde för varje filter.
@@ -3155,7 +3155,8 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
     ai_ranks, delta_vals, total_diff_vals = [], [], []
     rank_sums, minus_sums, log_sums, sft_sums, points_vals = [], [], [], [], []
     fat_f, fat_a, fat_t, fat_sum = [], [], [], []
-    fav_top_vals, fav_delta_vals = [], []
+    fav_top_vals_by_n = {n: [] for n in range(3, 7)}
+    fav_delta_vals = []
     fav70, fav60, fav50 = [], [], []
     sh10, sh15, sh20, sh_low = [], [], [], []
     ones, draws, twos = [], [], []
@@ -3193,7 +3194,8 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
         sft_sums.append(get_sft_sum(row_str, p))
         points_vals.append(get_rank_points(row_str, p))
         f, a, t, fs = get_fat(row_str, p); fat_f.append(f); fat_a.append(a); fat_t.append(t); fat_sum.append(fs)
-        fav_top_vals.append(get_top_n_favs_wins(row_str, p, slider_u_count))
+        for _n in range(3, 7):
+            fav_top_vals_by_n[_n].append(get_top_n_favs_wins(row_str, p, _n))
         fav_delta_vals.append(get_favorite_delta(row_str, p))
         fp = get_favorite_pressure(row_str, p); fav70.append(fp['F70_Wins']); fav60.append(fp['F60_Wins']); fav50.append(fp['F50_Wins'])
         sh = get_shock_strength(row_str, p); sh10.append(sh['U10_Wins']); sh15.append(sh['U15_Wins']); sh20.append(sh['U20_Wins']); sh_low.append(sh['Lowest_Win_Pct'])
@@ -3261,7 +3263,19 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
             key_override=_item.get('key'),
         )
 
-    add_interval(f'Topp {slider_u_count} favoriter', 'Favorit & skräll', fav_top_vals, lambda r: get_top_n_favs_wins(r, filter_vec, slider_u_count), 0, 90, 0, slider_u_count, key_override='topp_favoriter')
+    for _n in range(3, 7):
+        add_interval(
+            f'Topp {_n} favoriter',
+            'Favorit & skräll',
+            fav_top_vals_by_n.get(_n, []),
+            lambda r, _nn=_n: get_top_n_favs_wins(r, filter_vec, _nn),
+            0,
+            90,
+            0,
+            _n,
+            f'Antal av kupongens {_n} högst streckade favoriter som vinner.',
+            key_override=f'topp_{_n}_favoriter',
+        )
     add_interval('Favorittryck ≥70%', 'Favorit & skräll', fav70, lambda r: get_favorite_pressure(r, filter_vec)['F70_Wins'], 0, 85, 0, get_favorite_threshold_counts(filter_vec).get(70, 0))
     add_interval('Favorittryck ≥60%', 'Favorit & skräll', fav60, lambda r: get_favorite_pressure(r, filter_vec)['F60_Wins'], 0, 85, 0, get_favorite_threshold_counts(filter_vec).get(60, 0))
     add_interval('Favorittryck ≥50%', 'Favorit & skräll', fav50, lambda r: get_favorite_pressure(r, filter_vec)['F50_Wins'], 0, 85, 0, get_favorite_threshold_counts(filter_vec).get(50, 0))
@@ -3761,7 +3775,7 @@ def _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fa
         'spelform': spelform,
         'antal_matcher': int(antal_matcher),
         'filter_hist_target_pct': int(filter_hist_target_pct),
-        'top_fav_count': int(top_fav_count),
+        'top_fav_filters': 'Topp 3/4/5/6',
         'filters': _collect_filter_settings_for_save(specs, filter_hist_target_pct, top_fav_count),
         'group_reqs': _json_safe_value(group_reqs),
         'u_rows': {},
@@ -3808,11 +3822,10 @@ def _apply_spelfil_payload(payload):
         st.session_state['v12_pay_min'] = int(payload.get('pay_min') or 0)
     if payload.get('filter_hist_target_pct') is not None:
         st.session_state['v12_filter_hist_target_pct'] = int(payload.get('filter_hist_target_pct') or 90)
-    if payload.get('top_fav_count') is not None:
-        st.session_state['v12_top_fav_count'] = int(payload.get('top_fav_count') or 3)
-
+    # top_fav_count är borttaget i v12.0ar. Toppfavoriter finns som fasta filter 3/4/5/6.
+    # Använd fast bakåtkompatibel slidernyckel så gamla sparade intervall kan läsas in stabilt.
     fhp = int(st.session_state.get('v12_filter_hist_target_pct', payload.get('filter_hist_target_pct', 90)) or 90)
-    tfc = int(st.session_state.get('v12_top_fav_count', payload.get('top_fav_count', 3)) or 3)
+    tfc = 3
     _apply_u_rows_to_session(payload.get('u_rows', {}))
     _apply_filter_settings_to_session(payload.get('filters', {}), fhp, tfc)
     _apply_group_reqs_to_session(payload.get('group_reqs', {}))
@@ -5745,17 +5758,18 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         st.error(frame_msg)
         st.stop()
 
-    top_fav_count = int(st.session_state.get('v12_top_fav_count', 3))
-    top_fav_count = max(1, min(6, top_fav_count))
+    # Toppfavoritfiltret finns nu som fasta filter: Topp 3, 4, 5 och 6 favoriter.
+    # 5 bästa skrällar använder fast maxstreck 22% enligt standardvalet.
+    top_fav_count = 3  # behålls bara för bakåtkompatibla sparnycklar
+    max_shock_pct = 22
     filter_hist_target_pct = int(st.session_state.get('v12_filter_hist_target_pct', 90))
     filter_hist_target_pct = max(50, min(100, filter_hist_target_pct))
 
     st.markdown("<div class='v12-card'>", unsafe_allow_html=True)
     st.markdown("<div class='v12-step'>Steg 3</div><div class='v12-title'>Filtercentral</div>", unsafe_allow_html=True)
-    st.caption("Ett filter finns bara en gång. Välj Av, Tvingat eller Grupp. Du styr intervallen själv med sliders.")
+    st.caption("Ett filter finns bara en gång. Välj Av, Tvingat eller Grupp. Du styr intervallen själv med sliders. 5 bästa skrällar använder maxstreck 22%.")
 
-    max_shock_pct = int(st.session_state.get('v12_max_shock_pct', 25))
-    ctrl_a, ctrl_b, ctrl_c = st.columns([1.2, 1.0, 1.0])
+    ctrl_a, ctrl_b = st.columns([1.4, 1.0])
     with ctrl_a:
         filter_hist_target_pct = st.slider(
             "Minsta historiska träff på filterintervall",
@@ -5766,36 +5780,34 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             key="v12_filter_hist_target_pct",
             help="Styr rekommenderat intervall och startvärde för varje filter. 90% = ungefär 27/30 vid 30 historiska omgångar. 100% = intervallet täcker alla 30.",
         )
-    with ctrl_b:
-        top_fav_count = st.number_input("Toppfavoriter-filter: antal favoriter", min_value=1, max_value=6, value=top_fav_count, step=1, key="v12_top_fav_count", help="Styr filtret Topp N favoriter. Du kan välja 1–6.")
-    with ctrl_c:
-        max_shock_pct = st.slider("Maxstreck för 5 bästa skrällar", min_value=5, max_value=40, value=max_shock_pct, step=1, key="v12_max_shock_pct", help="Används när appen väljer fem skrälltecken som filter under Favorit & skräll.")
     filter_hist_target_pct = int(max(50, min(100, filter_hist_target_pct)))
-    top_fav_count = int(max(1, min(6, top_fav_count)))
-    max_shock_pct = int(max(5, min(40, max_shock_pct)))
 
     # Statistikfilen används för de färdiga streckfiltren under Favorit & skräll.
     _streck_db_path = find_local_database(spelform)
     _streck_hist_db = load_database(_streck_db_path, antal_matcher) if _streck_db_path else pd.DataFrame()
-    max_shock_pct = int(st.session_state.get('v12_max_shock_pct', 25))
 
     # Varje intervallslider har en nyckel som innehåller träffmålet.
     # Annars återanvänder Streamlit gamla slider-värden och ignorerar nya defaultintervall.
     prev_target = st.session_state.get('v12_filter_hist_target_prev')
-    prev_topfav = st.session_state.get('v12_top_fav_count_prev')
-    prev_maxshock = st.session_state.get('v12_max_shock_pct_prev')
-    if prev_target != filter_hist_target_pct or prev_topfav != top_fav_count or prev_maxshock != max_shock_pct:
+    if prev_target != filter_hist_target_pct:
         for _k in list(st.session_state.keys()):
             if str(_k).startswith('filter_range_'):
                 del st.session_state[_k]
         st.session_state['v12_filter_hist_target_prev'] = filter_hist_target_pct
-        st.session_state['v12_top_fav_count_prev'] = top_fav_count
-        st.session_state['v12_max_shock_pct_prev'] = max_shock_pct
-        st.info("Filterintervallen uppdateras efter nytt träffmål/toppfavoritval…")
+        st.info("Filterintervallen uppdateras efter nytt träffmål…")
         st.rerun()
 
     specs = build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=top_fav_count, target_hist_pct=filter_hist_target_pct, u_rows=None, hist_df=_streck_hist_db, max_shock_pct=max_shock_pct)
     st.session_state['v12_specs'] = specs
+    with ctrl_b:
+        if st.button("Återställ alla filter till Av", use_container_width=True, key="v12_reset_all_filters_off"):
+            for _k in list(st.session_state.keys()):
+                if str(_k).startswith('filter_mode_'):
+                    st.session_state[_k] = 'Av'
+            for _spec in specs:
+                st.session_state[f"filter_mode_{_spec.get('key')}"] = 'Av'
+            st.success("Alla filter är satta till Av.")
+            st.rerun()
     st.caption("När du ändrar minsta historiska träff får varje filter nya slider-nycklar och startar på sitt rekommenderade intervall. 100% ska därför ge startintervall med 30/30 där det är möjligt.")
 
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
@@ -5901,7 +5913,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             st.session_state['v12_recommended_meta'] = {
                 'package_engine': 'pareto_multilevel_progress_posttrim_group_visible_diagnostics',
                 'manual_hist_target_pct': int(filter_hist_target_pct),
-                'top_fav_count': int(top_fav_count),
+                'top_fav_filters': 'Topp 3/4/5/6',
                 'frame_rows': int(len(frame_rows)),
                 'min_step': float(rec_min_step),
                 'max_filters': int(rec_max_filters),
@@ -6018,7 +6030,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             for spec in cat_specs:
                 k = spec['key']
                 mode_key = f'filter_mode_{k}'
-                # Viktigt: range_key innehåller träffmål/toppfavoritval.
+                # Viktigt: range_key innehåller träffmålet.
                 # Streamlit återanvänder annars gamla slider-värden från session_state och ignorerar nytt default-value.
                 # Det var därför "Rek. intervall" kunde vara 95/100%, medan "Nu valt" låg kvar på gammalt 90%-intervall.
                 range_key = f'filter_range_{k}_h{filter_hist_target_pct}_tf{top_fav_count}'
