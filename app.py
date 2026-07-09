@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0aj – U-rader & villkorad garanti"
+APP_VERSION = "v12.0ak – Utgångssystem / U-filter"
 
 
 st.markdown("""
@@ -1497,173 +1497,306 @@ def evaluate_u_row(u_row, hist_rows, antal_matcher, target_pct=90.0):
 
 
 
-def build_pct_favorite_u_row(prob_vector, antal_matcher):
-    """U-rad med högsta aktuella procent/streck per match."""
-    out = []
-    for m in range(int(antal_matcher)):
-        idx = m * 3
-        vals = list(prob_vector[idx:idx+3]) if prob_vector is not None else []
-        if len(vals) < 3:
-            out.append('1')
-            continue
-        out.append(['1', 'X', '2'][int(np.argmax(vals))])
-    return ''.join(out)
+
+def _u_signs_from_text(value):
+    """Normaliserar ett utgångssystemfält. Tomt fält är tillåtet och betyder ingen markering i matchen."""
+    return normalize_signs(value)
 
 
-def build_pct_second_u_row(prob_vector, antal_matcher):
-    """U-rad med näst högsta aktuella procent/streck per match."""
-    out = []
-    for m in range(int(antal_matcher)):
-        idx = m * 3
-        vals = list(prob_vector[idx:idx+3]) if prob_vector is not None else []
-        if len(vals) < 3:
-            out.append('X')
-            continue
-        order = sorted(range(3), key=lambda i: float(vals[i]), reverse=True)
-        out.append(['1', 'X', '2'][order[1]])
-    return ''.join(out)
+def _u_signs_display(signs):
+    signs = _u_signs_from_text(signs)
+    return _sort_signs_display(signs) if signs else ""
+
+
+def u_system_to_text(system):
+    """Kompakt visning av ett utgångssystem, t.ex. 1X / 1 / X2 / -."""
+    parts = []
+    for signs in (system or []):
+        s = _u_signs_display(signs)
+        parts.append(s if s else "-")
+    return " / ".join(parts)
+
+
+def u_system_marked_count(system):
+    """Antal matcher i utgångssystemet där minst ett tecken är markerat."""
+    return int(sum(1 for signs in (system or []) if len(_u_signs_from_text(signs)) > 0))
+
+
+def u_system_from_single_row(row, antal_matcher):
+    """Gör en enkel U-rad till ett utgångssystem med ett markerat tecken per match."""
+    row = normalize_single_row_text(row)
+    if len(row) != int(antal_matcher):
+        return [[] for _ in range(int(antal_matcher))]
+    return [[c] for c in row]
 
 
 def parse_u_row_text(text, antal_matcher):
-    """Läser en U-rad/utgångsrad. Returnerar ren rad eller tom sträng vid fel."""
+    """Bakåtkompatibel läsning av gammal U-rad. Returnerar ren rad eller tom sträng."""
     row = normalize_single_row_text(text)
     if len(row) != int(antal_matcher):
         return ''
     return row
 
 
-def u_row_hit_count(row_str, u_row):
+def parse_u_system_text(text, antal_matcher):
+    """Läser textad utgångsram: 1X / 12 / - / 2 ...  Tomma/- blir omarkerade matcher."""
+    raw = str(text or '').strip().upper()
+    if not raw:
+        return None, "Ingen utgångsram angiven."
+    tokens = re.findall(r'[1X2x]{1,3}|[-–—.]', raw)
+    if len(tokens) != int(antal_matcher):
+        return None, f"Utgångsramen måste innehålla exakt {antal_matcher} fält. Hittade {len(tokens)}."
+    system = []
+    for tok in tokens:
+        if tok in ['-', '–', '—', '.']:
+            system.append([])
+        else:
+            system.append(_u_signs_from_text(tok))
+    return system, ""
+
+
+def build_pct_favorite_u_system(prob_vector, antal_matcher):
+    """Utgångssystem med högsta aktuella procent/streck per match."""
+    out = []
+    for m in range(int(antal_matcher)):
+        idx = m * 3
+        vals = list(prob_vector[idx:idx+3]) if prob_vector is not None else []
+        if len(vals) < 3:
+            out.append(['1'])
+            continue
+        out.append([['1', 'X', '2'][int(np.argmax(vals))]])
+    return out
+
+
+def build_pct_second_u_system(prob_vector, antal_matcher):
+    """Utgångssystem med näst högsta aktuella procent/streck per match."""
+    out = []
+    for m in range(int(antal_matcher)):
+        idx = m * 3
+        vals = list(prob_vector[idx:idx+3]) if prob_vector is not None else []
+        if len(vals) < 3:
+            out.append(['X'])
+            continue
+        order = sorted(range(3), key=lambda i: float(vals[i]), reverse=True)
+        out.append([['1', 'X', '2'][order[1]]])
+    return out
+
+
+def build_history_ai_u_system(v_m, filter_vec, antal_matcher):
+    """Utgångssystem med historiskt starkaste tecken bland liknande omgångar."""
+    match_stats = build_match_ai_stats(v_m, filter_vec, antal_matcher)
+    return [[ms.get('Top1', '1')] for ms in match_stats]
+
+
+def u_system_counts(row_str, u_system):
+    """Räknar Helgardering-liknande Antal tecken mot ett utgångssystem.
+
+    total = antalet utgångstips som sitter.
+    ones/draws/twos = träffar uppdelade på faktiskt tecken.
+    any_1x2 = högsta av ones/draws/twos, dvs filtret Antal 1/X/2 som
+    fångar om minst en teckentyp ligger i valt intervall i en kontrollerbar form.
+    """
     row_str = normalize_single_row_text(row_str)
-    u_row = normalize_single_row_text(u_row)
-    if not row_str or not u_row:
-        return 0
-    n = min(len(row_str), len(u_row))
-    return int(sum(1 for i in range(n) if row_str[i] == u_row[i]))
+    total = ones = draws = twos = 0
+    for i, c in enumerate(row_str):
+        if i >= len(u_system):
+            break
+        allowed = set(_u_signs_from_text(u_system[i]))
+        if c in allowed:
+            total += 1
+            if c == '1':
+                ones += 1
+            elif c == 'X':
+                draws += 1
+            elif c == '2':
+                twos += 1
+    return {
+        'utips': int(total),
+        'ones': int(ones),
+        'draws': int(draws),
+        'twos': int(twos),
+        'any_1x2': int(max(ones, draws, twos)),
+    }
 
 
-def _u_row_signature(u_rows):
+def u_row_hit_count(row_str, u_row):
+    """Bakåtkompatibel helper: antal träffar mot en enkel U-rad."""
+    return u_system_counts(row_str, u_system_from_single_row(u_row, len(normalize_single_row_text(u_row))))['utips']
+
+
+def _u_system_metric(row_str, u_system, metric):
+    return u_system_counts(row_str, u_system).get(metric, 0)
+
+
+def _u_system_signature(u_systems):
     parts = []
-    for u in u_rows or []:
+    for u in u_systems or []:
         if not isinstance(u, dict):
             continue
-        parts.append((str(u.get('id','')), str(u.get('name','')), normalize_single_row_text(u.get('row',''))))
+        frame_txt = u_system_to_text(u.get('system', []))
+        parts.append((str(u.get('id','')), str(u.get('name','')), frame_txt))
     return tuple(parts)
 
 
 def _collect_u_rows_from_session(antal_matcher):
-    """Aktuella U-radsinställningar som ska sparas i spelfil/filterpaket."""
-    out = {
-        'include_favorite': bool(st.session_state.get('v12_u_include_favorite', True)),
-        'include_history': bool(st.session_state.get('v12_u_include_history', True)),
-        'include_second': bool(st.session_state.get('v12_u_include_second', False)),
-        'manual': [],
-    }
-    for i in range(1, 4):
-        name = str(st.session_state.get(f'v12_u_manual_{i}_name', f'Manuell U-rad {i}') or f'Manuell U-rad {i}').strip()
-        raw = str(st.session_state.get(f'v12_u_manual_{i}_row', '') or '').strip().upper()
-        row = parse_u_row_text(raw, antal_matcher) if raw else ''
-        out['manual'].append({'slot': i, 'name': name, 'row': row, 'raw': raw})
+    """Sparar utgångssystem/U-filter i spelfil och filterpaket.
+
+    Namnet behålls avsiktligt för bakåtkompatibilitet med tidigare v12.0aj-spelfiler,
+    men innehållet är nu Helgardering-liknande utgångssystem i stället för enkla U-rader.
+    """
+    out = {'version': 'utgangssystem_v2', 'slots': []}
+    choices = ['', '1', 'X', '2', '1X', '12', 'X2', '1X2']
+    default_modes = {1: 'Favorit/procent', 2: 'Historik/AI', 3: 'Manuell'}
+    for slot in range(1, 4):
+        enabled = bool(st.session_state.get(f'v12_us_{slot}_enabled', slot in [1, 2]))
+        mode = str(st.session_state.get(f'v12_us_{slot}_source', default_modes.get(slot, 'Manuell')) or 'Manuell')
+        name = str(st.session_state.get(f'v12_us_{slot}_name', f'Utgångssystem {slot}') or f'Utgångssystem {slot}').strip()
+        signs = []
+        for m in range(int(antal_matcher)):
+            val = str(st.session_state.get(f'v12_us_{slot}_m{m}', '') or '')
+            if val not in choices:
+                val = _u_signs_display(val)
+            signs.append(_u_signs_from_text(val))
+        raw_text = str(st.session_state.get(f'v12_us_{slot}_text', '') or '')
+        out['slots'].append({
+            'slot': slot,
+            'enabled': enabled,
+            'source': mode,
+            'name': name,
+            'manual_system': signs,
+            'raw_text': raw_text,
+        })
     return out
 
 
 def _apply_u_rows_to_session(u_payload):
-    """Återställer U-radsval innan filtercentralens widgets byggs."""
+    """Återställer utgångssystem/U-filter innan filtercentralens widgets byggs."""
     if not isinstance(u_payload, dict):
         return
+    # Nytt format från v12.0ak.
+    if u_payload.get('version') == 'utgangssystem_v2' or u_payload.get('slots'):
+        for item in u_payload.get('slots', []) or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                slot = int(item.get('slot', 0))
+            except Exception:
+                slot = 0
+            if not (1 <= slot <= 3):
+                continue
+            st.session_state[f'v12_us_{slot}_enabled'] = bool(item.get('enabled', False))
+            st.session_state[f'v12_us_{slot}_source'] = str(item.get('source') or 'Manuell')
+            st.session_state[f'v12_us_{slot}_name'] = str(item.get('name') or f'Utgångssystem {slot}')
+            if item.get('raw_text') is not None:
+                st.session_state[f'v12_us_{slot}_text'] = str(item.get('raw_text') or '')
+            manual = item.get('manual_system') or []
+            for m, signs in enumerate(manual[:13]):
+                st.session_state[f'v12_us_{slot}_m{m}'] = _u_signs_display(signs)
+        return
+
+    # Bakåtkompatibilitet: tidigare v12.0aj sparade include_favorite/history/second + manuella U-rader.
     if 'include_favorite' in u_payload:
-        st.session_state['v12_u_include_favorite'] = bool(u_payload.get('include_favorite'))
+        st.session_state['v12_us_1_enabled'] = bool(u_payload.get('include_favorite'))
+        st.session_state['v12_us_1_source'] = 'Favorit/procent'
+        st.session_state['v12_us_1_name'] = 'Utgångssystem 1'
     if 'include_history' in u_payload:
-        st.session_state['v12_u_include_history'] = bool(u_payload.get('include_history'))
+        st.session_state['v12_us_2_enabled'] = bool(u_payload.get('include_history'))
+        st.session_state['v12_us_2_source'] = 'Historik/AI'
+        st.session_state['v12_us_2_name'] = 'Utgångssystem 2'
     if 'include_second' in u_payload:
-        st.session_state['v12_u_include_second'] = bool(u_payload.get('include_second'))
+        st.session_state['v12_us_3_enabled'] = bool(u_payload.get('include_second'))
+        st.session_state['v12_us_3_source'] = 'Andrahand'
+        st.session_state['v12_us_3_name'] = 'Utgångssystem 3'
+    # Lägg första gamla manuella U-raden i första lediga manuella slot.
     for item in u_payload.get('manual', []) or []:
         if not isinstance(item, dict):
             continue
-        try:
-            i = int(item.get('slot', 0))
-        except Exception:
-            i = 0
-        if 1 <= i <= 3:
-            if item.get('name') is not None:
-                st.session_state[f'v12_u_manual_{i}_name'] = str(item.get('name') or f'Manuell U-rad {i}')
-            # Spara raw om den finns, annars ren rad. Då försvinner inte användarens text vid filterpaket.
-            if item.get('raw') is not None or item.get('row') is not None:
-                st.session_state[f'v12_u_manual_{i}_row'] = str(item.get('raw') or item.get('row') or '')
+        row = parse_u_row_text(item.get('row') or item.get('raw') or '', 13)
+        if not row:
+            continue
+        for slot in range(1, 4):
+            if not bool(st.session_state.get(f'v12_us_{slot}_enabled', False)):
+                st.session_state[f'v12_us_{slot}_enabled'] = True
+                st.session_state[f'v12_us_{slot}_source'] = 'Manuell'
+                st.session_state[f'v12_us_{slot}_name'] = str(item.get('name') or f'Utgångssystem {slot}')
+                for m, c in enumerate(row):
+                    st.session_state[f'v12_us_{slot}_m{m}'] = c
+                break
 
 
 def build_u_rows_for_filtercentral(v_m, filter_vec, antal_matcher):
-    """Bygger de U-rader som ska visas som vanliga filterrader."""
-    match_stats = build_match_ai_stats(v_m, filter_vec, antal_matcher)
-    u_rows = []
-    if bool(st.session_state.get('v12_u_include_favorite', True)):
-        u_rows.append({
-            'id': 'favorite',
-            'name': 'U-rad Favorit/procent',
-            'row': build_pct_favorite_u_row(filter_vec, antal_matcher),
-            'source': 'Högsta aktuella procent per match',
-            'locked': True,
-        })
-    if bool(st.session_state.get('v12_u_include_history', True)):
-        u_rows.append({
-            'id': 'history',
-            'name': 'U-rad Historik/AI',
-            'row': build_ai_u_row(match_stats),
-            'source': 'Vanligaste historiska tecken bland liknande omgångar',
-            'locked': True,
-        })
-    if bool(st.session_state.get('v12_u_include_second', False)):
-        u_rows.append({
-            'id': 'second',
-            'name': 'U-rad Andrahand',
-            'row': build_pct_second_u_row(filter_vec, antal_matcher),
-            'source': 'Näst högsta aktuella procent per match',
-            'locked': True,
-        })
-    for i in range(1, 4):
-        name = str(st.session_state.get(f'v12_u_manual_{i}_name', f'Manuell U-rad {i}') or f'Manuell U-rad {i}').strip()
-        row = parse_u_row_text(st.session_state.get(f'v12_u_manual_{i}_row', ''), antal_matcher)
-        if row:
-            u_rows.append({
-                'id': f'manual_{i}',
-                'name': name or f'Manuell U-rad {i}',
-                'row': row,
-                'source': 'Manuell utgångsrad',
-                'locked': False,
-            })
-    # Avduplicera identiska rader men behåll första namnet. Identiska U-rader ger annars dubbelräkning.
-    seen = set()
-    clean = []
-    for u in u_rows:
-        row = normalize_single_row_text(u.get('row', ''))
-        if len(row) != int(antal_matcher) or row in seen:
+    """Bygger aktiva utgångssystem som sedan blir fem filter per system."""
+    systems = []
+    default_modes = {1: 'Favorit/procent', 2: 'Historik/AI', 3: 'Manuell'}
+    for slot in range(1, 4):
+        enabled = bool(st.session_state.get(f'v12_us_{slot}_enabled', slot in [1, 2]))
+        if not enabled:
             continue
-        seen.add(row)
-        u = dict(u)
-        u['row'] = row
-        clean.append(u)
-    return clean
-
-
-def u_row_diag_df(u_rows, hist_rows, antal_matcher, target_pct=90.0):
-    rows = []
-    for u in u_rows or []:
-        ev = evaluate_u_row(u.get('row', ''), hist_rows, antal_matcher, target_pct=target_pct)
-        hits = ev.get('hits', []) or []
-        if hits:
-            default_interval = get_best_interval(hits, target_pct)
-            hp, ht, pct = _hist_pass_count(hits, default_interval)
-            dist_txt = f"min {min(hits)} · median {float(np.median(hits)):.1f} · max {max(hits)}"
-            rec = f"{int(default_interval[0])}–{int(default_interval[1])}"
+        mode = str(st.session_state.get(f'v12_us_{slot}_source', default_modes.get(slot, 'Manuell')) or 'Manuell')
+        name = str(st.session_state.get(f'v12_us_{slot}_name', f'Utgångssystem {slot}') or f'Utgångssystem {slot}').strip()
+        source = mode
+        if mode == 'Favorit/procent':
+            system = build_pct_favorite_u_system(filter_vec, antal_matcher)
+            source = 'Högsta aktuella procent per match'
+        elif mode == 'Historik/AI':
+            system = build_history_ai_u_system(v_m, filter_vec, antal_matcher)
+            source = 'Vanligaste historiska tecken bland liknande omgångar'
+        elif mode == 'Andrahand':
+            system = build_pct_second_u_system(filter_vec, antal_matcher)
+            source = 'Näst högsta aktuella procent per match'
         else:
-            hp, ht, pct, dist_txt, rec = 0, 0, 0.0, '—', '—'
-        rows.append({
-            'U-rad': u.get('name', ''),
-            'Rad': u.get('row', ''),
-            'Källa': u.get('source', ''),
-            'Rek. intervall': rec,
-            'Historisk träff': f"{hp}/{ht}",
-            'Träffbild': dist_txt,
+            system = []
+            for m in range(int(antal_matcher)):
+                system.append(_u_signs_from_text(st.session_state.get(f'v12_us_{slot}_m{m}', '')))
+            source = 'Manuellt utgångssystem'
+        if len(system) != int(antal_matcher):
+            continue
+        if u_system_marked_count(system) <= 0:
+            continue
+        systems.append({
+            'id': f'us{slot}',
+            'slot': slot,
+            'name': name or f'Utgångssystem {slot}',
+            'system': system,
+            'source': source,
+            'mode': mode,
+            'marked': u_system_marked_count(system),
         })
+    return systems
+
+
+def u_row_diag_df(u_systems, hist_rows, antal_matcher, target_pct=90.0):
+    """Diagnos för utgångssystem: visar fem Helgardering-liknande Antal tecken-värden."""
+    rows = []
+    metric_labels = {
+        'utips': 'Antalet utgångstips',
+        'ones': 'Antalet ettor',
+        'draws': 'Antalet kryss',
+        'twos': 'Antalet tvåor',
+        'any_1x2': 'Antal 1/X/2',
+    }
+    clean_hist = [normalize_single_row_text(r) for r in (hist_rows or []) if len(normalize_single_row_text(r)) == int(antal_matcher)]
+    for u in u_systems or []:
+        system = u.get('system', [])
+        for metric, label in metric_labels.items():
+            vals = [_u_system_metric(r, system, metric) for r in clean_hist]
+            if vals:
+                rec = get_best_interval(vals, target_pct)
+                hp, ht, pct = _hist_pass_count(vals, rec)
+                dist_txt = f"min {min(vals)} · median {float(np.median(vals)):.1f} · max {max(vals)}"
+                rec_txt = f"{int(rec[0])}–{int(rec[1])}"
+            else:
+                hp = ht = 0; pct = 0.0; dist_txt = '—'; rec_txt = '—'
+            rows.append({
+                'System': u.get('name', ''),
+                'Filter': label,
+                'Systemtecken': u_system_to_text(system),
+                'Markerade matcher': u.get('marked', u_system_marked_count(system)),
+                'Källa': u.get('source', ''),
+                'Rek. intervall': rec_txt,
+                'Historisk träff': f"{hp}/{ht}",
+                'Träffbild': dist_txt,
+            })
     return pd.DataFrame(rows)
 
 def pass_super_macro_row(row_str, prob_vector, bounds, req_groups):
@@ -1730,8 +1863,8 @@ def get_filter_family(filter_name, group_name=""):
         return "FAT/favorit"
     if any(k in name for k in ["skrällstyrka"]):
         return "Skrällnivå"
-    if any(k in name for k in ["u-rad", "utgångsrad"]):
-        return "U-rader"
+    if any(k in name for k in ["u-rad", "utgångsrad", "utgångssystem", "utgångstips"]):
+        return "Utgångssystem"
     if grp == "struktur" or any(k in name for k in ["tecken 1x2", "sviter", "teckenföljd", "teckenlucka", "singlar", "dubbletter", "tripplar", "uppkomster"]):
         return "Struktur"
     if "super" in name or "grupp" in str(group_name).lower():
@@ -2512,30 +2645,39 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
     o1, ox, o2, ot = [], [], [], []
     fat_strings = []
 
-    # U-rader / utgångsrader: varje U-rad blir ett vanligt intervallfilter
-    # där värdet är antal matchande tecken mot referensraden. Garantin är
-    # villkorad: TipsetMatrix-garantin gäller bara om facit överlever dessa
-    # filter precis som övriga filter.
+    # Utgångssystem / U-filter: varje system blir fem Helgardering-liknande
+    # Antal tecken-filter: utgångstips, ettor, kryss, tvåor och 1/X/2.
+    # Garantin är villkorad: TipsetMatrix-garantin gäller bara om facit
+    # överlever dessa filter precis som övriga filter.
+    metric_defs = [
+        ('utips', 'Antalet utgångstips', 'antal matchande tecken mot hela utgångssystemet'),
+        ('ones', 'Antalet ettor', 'antal ettor i enkelraden som också finns markerade i utgångssystemet'),
+        ('draws', 'Antalet kryss', 'antal kryss i enkelraden som också finns markerade i utgångssystemet'),
+        ('twos', 'Antalet tvåor', 'antal tvåor i enkelraden som också finns markerade i utgångssystemet'),
+        ('any_1x2', 'Antal 1/X/2', 'högsta av ettor/kryss/tvåor; motsvarar minst en teckentyp i intervallet'),
+    ]
     for u in (u_rows or []):
-        urow = normalize_single_row_text(u.get('row', ''))
-        if len(urow) != int(antal_matcher):
+        system = u.get('system', [])
+        if len(system) != int(antal_matcher) or u_system_marked_count(system) <= 0:
             continue
-        uvals = [u_row_hit_count(str(r), urow) for r in rows if len(str(r)) == int(antal_matcher)]
-        uname = str(u.get('name', 'U-rad')).strip() or 'U-rad'
+        uname = str(u.get('name', 'Utgångssystem')).strip() or 'Utgångssystem'
         usource = str(u.get('source', '') or '')
-        help_txt = f"Rad: {urow}" + (f" · Källa: {usource}" if usource else '') + " · Värdet är antal tecken som enkelraden träffar mot U-raden."
-        add_interval(
-            uname,
-            'U-rader / utgångsrader',
-            uvals,
-            lambda r, _u=urow: u_row_hit_count(r, _u),
-            0,
-            90,
-            0,
-            antal_matcher,
-            help_txt,
-            key_override=f"u_rad_{_slug(u.get('id', uname))}",
-        )
+        system_txt = u_system_to_text(system)
+        for metric, label, metric_help in metric_defs:
+            vals = [_u_system_metric(str(r), system, metric) for r in rows if len(str(r)) == int(antal_matcher)]
+            help_txt = f"{uname}: {system_txt}. {metric_help}." + (f" Källa: {usource}." if usource else "")
+            add_interval(
+                f"{uname} – {label}",
+                'Utgångssystem – Antal tecken',
+                vals,
+                lambda r, _sys=system, _metric=metric: _u_system_metric(r, _sys, _metric),
+                0,
+                90,
+                0,
+                antal_matcher,
+                help_txt,
+                key_override=f"u_sys_{_slug(u.get('id', uname))}_{metric}",
+            )
 
     for row_str, p in zip(rows, probs):
         if len(str(row_str)) != antal_matcher:
@@ -5083,44 +5225,68 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     filter_hist_target_pct = int(max(50, min(100, filter_hist_target_pct)))
     top_fav_count = int(max(1, min(6, top_fav_count)))
 
-    # U-rader/utgångsrader byggs innan specs, så varje vald U-rad blir en vanlig
-    # filterrad med Av/Tvingat/Grupp och min/max-intervall.
-    if 'v12_u_include_favorite' not in st.session_state:
-        st.session_state['v12_u_include_favorite'] = True
-    if 'v12_u_include_history' not in st.session_state:
-        st.session_state['v12_u_include_history'] = True
-    if 'v12_u_include_second' not in st.session_state:
-        st.session_state['v12_u_include_second'] = False
+    # Utgångssystem byggs innan specs, så varje system kan bli fem filterrader
+    # med Av/Tvingat/Grupp och min/max-intervall.
+    for _slot, _defaults in {
+        1: {'enabled': True, 'source': 'Favorit/procent', 'name': 'Utgångssystem 1'},
+        2: {'enabled': True, 'source': 'Historik/AI', 'name': 'Utgångssystem 2'},
+        3: {'enabled': False, 'source': 'Manuell', 'name': 'Utgångssystem 3'},
+    }.items():
+        st.session_state.setdefault(f'v12_us_{_slot}_enabled', _defaults['enabled'])
+        st.session_state.setdefault(f'v12_us_{_slot}_source', _defaults['source'])
+        st.session_state.setdefault(f'v12_us_{_slot}_name', _defaults['name'])
+        st.session_state.setdefault(f'v12_us_{_slot}_text', '')
+        for _m in range(antal_matcher):
+            st.session_state.setdefault(f'v12_us_{_slot}_m{_m}', '')
 
-    with st.expander("🎯 U-rader / utgångsrader", expanded=False):
-        st.caption("U-rader är transparenta utgångsfilter: värdet är antal tecken som en enkelrad matchar mot U-raden. Välj sedan Av/Tvingat/Grupp och intervall i filtercentralen.")
-        ua, ub, uc = st.columns(3)
-        with ua:
-            st.checkbox("Visa U-rad Favorit/procent", key='v12_u_include_favorite')
-        with ub:
-            st.checkbox("Visa U-rad Historik/AI", key='v12_u_include_history')
-        with uc:
-            st.checkbox("Visa U-rad Andrahand", key='v12_u_include_second')
+    with st.expander("🎯 Utgångssystem – Antal tecken", expanded=False):
+        st.caption("Helgardering-liknande U-filter: mata in ett utgångssystem med 1/X/2 per match. Appen skapar fem transparenta filter i filtercentralen: Antalet utgångstips, Antalet ettor, Antalet kryss, Antalet tvåor och Antal 1/X/2.")
+        st.info("Filtervärdena väljs inte här. De visas under kategorin 'Utgångssystem – Antal tecken' i filtercentralen där varje rad kan sättas Av, Tvingat eller Grupp med min/max-intervall.")
+        sign_choices = ['', '1', 'X', '2', '1X', '12', 'X2', '1X2']
+        source_choices = ['Favorit/procent', 'Historik/AI', 'Andrahand', 'Manuell']
+        for _slot in range(1, 4):
+            with st.container(border=True):
+                h1, h2, h3 = st.columns([0.9, 1.25, 1.5])
+                with h1:
+                    st.checkbox(f"Aktivera system {_slot}", key=f'v12_us_{_slot}_enabled')
+                with h2:
+                    st.selectbox("Källa", source_choices, key=f'v12_us_{_slot}_source', label_visibility='collapsed')
+                with h3:
+                    st.text_input("Namn", key=f'v12_us_{_slot}_name', label_visibility='collapsed')
 
-        st.markdown("**Manuella U-rader**")
-        st.caption(f"Skriv exakt {antal_matcher} tecken. Tomma manuella rader ignoreras.")
-        for _i in range(1, 4):
-            if f'v12_u_manual_{_i}_name' not in st.session_state:
-                st.session_state[f'v12_u_manual_{_i}_name'] = f'Manuell U-rad {_i}'
-            if f'v12_u_manual_{_i}_row' not in st.session_state:
-                st.session_state[f'v12_u_manual_{_i}_row'] = ''
-            ncol, rcol = st.columns([1.0, 2.2])
-            with ncol:
-                st.text_input("Namn", key=f'v12_u_manual_{_i}_name', label_visibility='collapsed')
-            with rcol:
-                st.text_input("Rad", key=f'v12_u_manual_{_i}_row', placeholder='Exempel: 1X211X2X12112', label_visibility='collapsed')
+                _src = st.session_state.get(f'v12_us_{_slot}_source', 'Manuell')
+                if _src == 'Manuell':
+                    st.caption("Manuellt system: tomt fält = matchen räknas inte i utgångssystemet. Klistra gärna som 13 grupper, t.ex. 1X / 1 / 12 / - / X2 ...")
+                    txt_col, btn_col = st.columns([3.0, 1.0])
+                    with txt_col:
+                        st.text_input("Textgrundram", key=f'v12_us_{_slot}_text', placeholder='Exempel: 1X / 1 / 12 / - / X2 / 2 / 1 / 1X2 / X / 12 / 1 / X2 / 2', label_visibility='collapsed')
+                    with btn_col:
+                        if st.button("Läs text", key=f'v12_us_{_slot}_parse_text', use_container_width=True):
+                            parsed, msg = parse_u_system_text(st.session_state.get(f'v12_us_{_slot}_text', ''), antal_matcher)
+                            if parsed is None:
+                                st.warning(msg)
+                            else:
+                                for _m, _signs in enumerate(parsed):
+                                    st.session_state[f'v12_us_{_slot}_m{_m}'] = _u_signs_display(_signs)
+                                st.rerun()
+                    grid_cols = st.columns(antal_matcher)
+                    for _m in range(antal_matcher):
+                        with grid_cols[_m]:
+                            st.selectbox(f"M{_m+1}", sign_choices, key=f'v12_us_{_slot}_m{_m}')
+                else:
+                    _preview_single = build_u_rows_for_filtercentral(v_m, filter_vec, antal_matcher)
+                    _this = next((x for x in _preview_single if int(x.get('slot', 0)) == _slot), None)
+                    if _this:
+                        st.code(u_system_to_text(_this.get('system', [])), language=None)
+                    else:
+                        st.caption("Systemet visas när det är aktivt.")
 
         _preview_u_rows = build_u_rows_for_filtercentral(v_m, filter_vec, antal_matcher)
         if _preview_u_rows:
             st.dataframe(u_row_diag_df(_preview_u_rows, list(v_m['Correct_Row']), antal_matcher, target_pct=filter_hist_target_pct), use_container_width=True, hide_index=True)
-            st.caption("Rek. intervall blir startvärde i filtercentralen. Garantin är villkorad på att facit överlever U-radsfilter och övriga filter.")
+            st.caption("Rek. intervall blir startvärde i filtercentralen. Garantin är villkorad på att facit överlever utgångsfilter och övriga filter.")
         else:
-            st.info("Inga U-rader är valda eller giltiga.")
+            st.info("Inga aktiva utgångssystem finns.")
 
     u_rows = build_u_rows_for_filtercentral(v_m, filter_vec, antal_matcher)
 
@@ -5490,9 +5656,9 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
 
     if active_count:
         st.caption("Samlad historikträff är hela aktiva paketet räknat mot de liknande historiska omgångarna: alla Tvingade filter måste sitta och varje Grupp måste klara sitt min/max-krav. Det är inte ett snitt av individuella filterträffar.")
-        active_u_count = sum(1 for s in specs if s.get('category') == 'U-rader / utgångsrader' and settings.get(s.get('key'), {}).get('mode') != 'Av')
+        active_u_count = sum(1 for s in specs if s.get('category') == 'Utgångssystem – Antal tecken' and settings.get(s.get('key'), {}).get('mode') != 'Av')
         if active_u_count:
-            st.info(f"{active_u_count} U-radsfilter är aktiva. Reduceringsgarantin är villkorad på att facit klarar U-radsintervallen och övriga filter innan TipsetMatrix körs.")
+            st.info(f"{active_u_count} utgångssystemfilter är aktiva. Reduceringsgarantin är villkorad på att facit klarar utgångssystemens intervall och övriga filter innan TipsetMatrix körs.")
     if active_count and hpkg <= max(3, int(0.25 * max(1, htot))):
         st.warning("Samlad historikträff är mycket låg. Det betyder oftast att för många filter är Tvingade samtidigt. Lägg över närliggande filter i Grupp eller bredda intervallen.")
 
