@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0ap – Streckfilter utan U-rader"
+APP_VERSION = "v12.0aq – Gruppkrav i sidomeny + historikantal"
 
 
 st.markdown("""
@@ -5633,7 +5633,17 @@ with col_run:
     run_analysis = st.button("📥 Läs in kupong", use_container_width=True)
 with col_status:
     if st.session_state.get('v12_analysis_ready'):
-        st.success(f"Historik klar: {len(st.session_state['v12_v_m'])} liknande omgångar från {st.session_state.get('v12_db_name','databas')}.")
+        _hist_n = len(st.session_state['v12_v_m'])
+        _db_name = st.session_state.get('v12_db_name', 'databas')
+        _db_total = st.session_state.get('v12_db_total_rows')
+        _db_after = st.session_state.get('v12_db_after_payout_rows')
+        if _db_total is not None:
+            if _db_after is not None and int(_db_after) != int(_db_total):
+                st.success(f"Historik klar: {_hist_n} liknande omgångar från {_db_name}. Läste igenom {int(_db_total):,} giltiga omgångar · {int(_db_after):,} kvar efter utdelningskrav.".replace(',', ' '))
+            else:
+                st.success(f"Historik klar: {_hist_n} liknande omgångar från {_db_name}. Läste igenom {int(_db_total):,} giltiga omgångar i statistikfilen.".replace(',', ' '))
+        else:
+            st.success(f"Historik klar: {_hist_n} liknande omgångar från {_db_name}.")
 
 if run_analysis:
     with st.spinner("Läser databas och hittar liknande omgångar..."):
@@ -5657,8 +5667,25 @@ if run_analysis:
         st.session_state['v12_v_m'] = v_m
         st.session_state['v12_filter_vec'] = filter_vec
         st.session_state['v12_db_name'] = db_name
+        # Visa hur stor historikbas appen faktiskt läste igenom innan top-N valdes.
+        try:
+            _db_path_now = find_local_database(spelform)
+            _db_all_now = load_database(_db_path_now, antal_matcher) if _db_path_now else pd.DataFrame()
+            _db_total_now = int(len(_db_all_now))
+            _db_after_now = _db_total_now
+            if isinstance(_db_all_now, pd.DataFrame) and not _db_all_now.empty and 'Payout' in _db_all_now.columns:
+                _db_after_now = int(len(_db_all_now[(_db_all_now['Payout'] >= int(pay_min)) & (_db_all_now['Payout'] <= 10000000)]))
+            st.session_state['v12_db_total_rows'] = _db_total_now
+            st.session_state['v12_db_after_payout_rows'] = _db_after_now
+        except Exception:
+            st.session_state['v12_db_total_rows'] = None
+            st.session_state['v12_db_after_payout_rows'] = None
         st.session_state['v12_filter_saved'] = False
-        st.success(f"Klart: {len(v_m)} liknande omgångar hittades.")
+        _db_total_msg = st.session_state.get('v12_db_total_rows')
+        if _db_total_msg is not None:
+            st.success(f"Klart: {len(v_m)} liknande omgångar hittades. Läste igenom {int(_db_total_msg):,} giltiga omgångar i statistikfilen.".replace(',', ' '))
+        else:
+            st.success(f"Klart: {len(v_m)} liknande omgångar hittades.")
 st.markdown("</div>", unsafe_allow_html=True)
 
 # Streckrekommendationer används nu som vanliga intervallfilter under Favorit & skräll.
@@ -6043,39 +6070,49 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                             _render_inline_filter_info(spec, rng, frame_rows, frame, antal_matcher)
                 settings[k] = {'mode': mode, 'interval': rng}
                 st.divider()
-    st.markdown("---")
-    st.markdown("**Gruppkrav – min/max**")
-    st.caption("Min/max styr hur många filter i respektive grupp som måste träffa. Exempel: 5–7 av 8 betyder att raden ska klara minst 5 men inte nödvändigtvis alla 8. Max kan även användas för att stoppa för extrema rader som klarar för många filter i samma familj.")
-    gc = st.columns(6)
+    # Gruppkrav ligger i sidomenyn så de alltid är lätta att hitta när filter flyttas till Grupp 1–6.
     group_reqs = {}
-    for i in range(1, 7):
-        gname = f'Grupp {i}'
-        n_in_group = sum(1 for v in settings.values() if v.get('mode') == gname)
-        old_req = int(st.session_state.get(f'group_req_{i}', 0) or 0)
-        default_min = int(st.session_state.get(f'group_req_min_{i}', old_req) or 0)
-        default_max = int(st.session_state.get(f'group_req_max_{i}', max(1, n_in_group)) or max(1, n_in_group))
-        default_min = max(0, min(default_min, max(40, n_in_group)))
-        default_max = max(default_min, min(default_max, max(40, n_in_group)))
-        with gc[i-1]:
-            st.caption(f"{gname} · {n_in_group} filter")
-            mn = st.number_input(
-                "Min",
-                min_value=0,
-                max_value=40,
-                value=default_min,
-                step=1,
-                key=f"group_req_min_{i}",
-                help="0 = inget min-krav. Gruppen påverkar bara om min eller max faktiskt begränsar.",
-            )
-            mx = st.number_input(
-                "Max",
-                min_value=0,
-                max_value=40,
-                value=default_max,
-                step=1,
-                key=f"group_req_max_{i}",
-                help="Max antal filter som får träffa i gruppen. Sätt max till antal filter i gruppen om du inte vill ha övre spärr.",
-            )
+    with st.sidebar:
+        st.markdown("---")
+        st.subheader("Gruppkrav – min/max")
+        st.caption("Styr hur många filter i varje grupp som måste träffa. Exempel: 5–7 av 8 betyder minst 5 och högst 7 träffade filter.")
+        for i in range(1, 7):
+            gname = f'Grupp {i}'
+            n_in_group = int(sum(1 for v in settings.values() if v.get('mode') == gname))
+            st.markdown(f"**{gname}** · {n_in_group} filter")
+            if n_in_group <= 0:
+                st.caption("Inga filter i gruppen")
+                group_reqs[gname] = {'min': 0, 'max': 0}
+                st.session_state[f'group_req_{i}'] = 0
+                st.session_state[f'group_req_min_{i}'] = 0
+                st.session_state[f'group_req_max_{i}'] = 0
+                continue
+            old_req = int(st.session_state.get(f'group_req_{i}', 0) or 0)
+            default_min = int(st.session_state.get(f'group_req_min_{i}', old_req) or 0)
+            default_max = int(st.session_state.get(f'group_req_max_{i}', n_in_group) or n_in_group)
+            default_min = max(0, min(default_min, n_in_group))
+            default_max = max(default_min, min(default_max, n_in_group))
+            cmin, cmax = st.columns(2)
+            with cmin:
+                mn = st.number_input(
+                    "Min",
+                    min_value=0,
+                    max_value=n_in_group,
+                    value=default_min,
+                    step=1,
+                    key=f"group_req_min_{i}",
+                    help="0 = inget min-krav.",
+                )
+            with cmax:
+                mx = st.number_input(
+                    "Max",
+                    min_value=0,
+                    max_value=n_in_group,
+                    value=default_max,
+                    step=1,
+                    key=f"group_req_max_{i}",
+                    help="Sätt max till antal filter i gruppen om du inte vill ha övre spärr.",
+                )
             if int(mx) < int(mn):
                 st.warning("Max < min")
             group_reqs[gname] = {'min': int(mn), 'max': int(mx)}
