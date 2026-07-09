@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0ah – Spara/öppna i sidomeny"
+APP_VERSION = "v12.0aj – U-rader & villkorad garanti"
 
 
 st.markdown("""
@@ -1495,6 +1495,177 @@ def evaluate_u_row(u_row, hist_rows, antal_matcher, target_pct=90.0):
     ])
     return {'hits': hits, 'recommended_min': recommended, 'coverage': round(coverage, 1), 'dist': dist}
 
+
+
+def build_pct_favorite_u_row(prob_vector, antal_matcher):
+    """U-rad med högsta aktuella procent/streck per match."""
+    out = []
+    for m in range(int(antal_matcher)):
+        idx = m * 3
+        vals = list(prob_vector[idx:idx+3]) if prob_vector is not None else []
+        if len(vals) < 3:
+            out.append('1')
+            continue
+        out.append(['1', 'X', '2'][int(np.argmax(vals))])
+    return ''.join(out)
+
+
+def build_pct_second_u_row(prob_vector, antal_matcher):
+    """U-rad med näst högsta aktuella procent/streck per match."""
+    out = []
+    for m in range(int(antal_matcher)):
+        idx = m * 3
+        vals = list(prob_vector[idx:idx+3]) if prob_vector is not None else []
+        if len(vals) < 3:
+            out.append('X')
+            continue
+        order = sorted(range(3), key=lambda i: float(vals[i]), reverse=True)
+        out.append(['1', 'X', '2'][order[1]])
+    return ''.join(out)
+
+
+def parse_u_row_text(text, antal_matcher):
+    """Läser en U-rad/utgångsrad. Returnerar ren rad eller tom sträng vid fel."""
+    row = normalize_single_row_text(text)
+    if len(row) != int(antal_matcher):
+        return ''
+    return row
+
+
+def u_row_hit_count(row_str, u_row):
+    row_str = normalize_single_row_text(row_str)
+    u_row = normalize_single_row_text(u_row)
+    if not row_str or not u_row:
+        return 0
+    n = min(len(row_str), len(u_row))
+    return int(sum(1 for i in range(n) if row_str[i] == u_row[i]))
+
+
+def _u_row_signature(u_rows):
+    parts = []
+    for u in u_rows or []:
+        if not isinstance(u, dict):
+            continue
+        parts.append((str(u.get('id','')), str(u.get('name','')), normalize_single_row_text(u.get('row',''))))
+    return tuple(parts)
+
+
+def _collect_u_rows_from_session(antal_matcher):
+    """Aktuella U-radsinställningar som ska sparas i spelfil/filterpaket."""
+    out = {
+        'include_favorite': bool(st.session_state.get('v12_u_include_favorite', True)),
+        'include_history': bool(st.session_state.get('v12_u_include_history', True)),
+        'include_second': bool(st.session_state.get('v12_u_include_second', False)),
+        'manual': [],
+    }
+    for i in range(1, 4):
+        name = str(st.session_state.get(f'v12_u_manual_{i}_name', f'Manuell U-rad {i}') or f'Manuell U-rad {i}').strip()
+        raw = str(st.session_state.get(f'v12_u_manual_{i}_row', '') or '').strip().upper()
+        row = parse_u_row_text(raw, antal_matcher) if raw else ''
+        out['manual'].append({'slot': i, 'name': name, 'row': row, 'raw': raw})
+    return out
+
+
+def _apply_u_rows_to_session(u_payload):
+    """Återställer U-radsval innan filtercentralens widgets byggs."""
+    if not isinstance(u_payload, dict):
+        return
+    if 'include_favorite' in u_payload:
+        st.session_state['v12_u_include_favorite'] = bool(u_payload.get('include_favorite'))
+    if 'include_history' in u_payload:
+        st.session_state['v12_u_include_history'] = bool(u_payload.get('include_history'))
+    if 'include_second' in u_payload:
+        st.session_state['v12_u_include_second'] = bool(u_payload.get('include_second'))
+    for item in u_payload.get('manual', []) or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            i = int(item.get('slot', 0))
+        except Exception:
+            i = 0
+        if 1 <= i <= 3:
+            if item.get('name') is not None:
+                st.session_state[f'v12_u_manual_{i}_name'] = str(item.get('name') or f'Manuell U-rad {i}')
+            # Spara raw om den finns, annars ren rad. Då försvinner inte användarens text vid filterpaket.
+            if item.get('raw') is not None or item.get('row') is not None:
+                st.session_state[f'v12_u_manual_{i}_row'] = str(item.get('raw') or item.get('row') or '')
+
+
+def build_u_rows_for_filtercentral(v_m, filter_vec, antal_matcher):
+    """Bygger de U-rader som ska visas som vanliga filterrader."""
+    match_stats = build_match_ai_stats(v_m, filter_vec, antal_matcher)
+    u_rows = []
+    if bool(st.session_state.get('v12_u_include_favorite', True)):
+        u_rows.append({
+            'id': 'favorite',
+            'name': 'U-rad Favorit/procent',
+            'row': build_pct_favorite_u_row(filter_vec, antal_matcher),
+            'source': 'Högsta aktuella procent per match',
+            'locked': True,
+        })
+    if bool(st.session_state.get('v12_u_include_history', True)):
+        u_rows.append({
+            'id': 'history',
+            'name': 'U-rad Historik/AI',
+            'row': build_ai_u_row(match_stats),
+            'source': 'Vanligaste historiska tecken bland liknande omgångar',
+            'locked': True,
+        })
+    if bool(st.session_state.get('v12_u_include_second', False)):
+        u_rows.append({
+            'id': 'second',
+            'name': 'U-rad Andrahand',
+            'row': build_pct_second_u_row(filter_vec, antal_matcher),
+            'source': 'Näst högsta aktuella procent per match',
+            'locked': True,
+        })
+    for i in range(1, 4):
+        name = str(st.session_state.get(f'v12_u_manual_{i}_name', f'Manuell U-rad {i}') or f'Manuell U-rad {i}').strip()
+        row = parse_u_row_text(st.session_state.get(f'v12_u_manual_{i}_row', ''), antal_matcher)
+        if row:
+            u_rows.append({
+                'id': f'manual_{i}',
+                'name': name or f'Manuell U-rad {i}',
+                'row': row,
+                'source': 'Manuell utgångsrad',
+                'locked': False,
+            })
+    # Avduplicera identiska rader men behåll första namnet. Identiska U-rader ger annars dubbelräkning.
+    seen = set()
+    clean = []
+    for u in u_rows:
+        row = normalize_single_row_text(u.get('row', ''))
+        if len(row) != int(antal_matcher) or row in seen:
+            continue
+        seen.add(row)
+        u = dict(u)
+        u['row'] = row
+        clean.append(u)
+    return clean
+
+
+def u_row_diag_df(u_rows, hist_rows, antal_matcher, target_pct=90.0):
+    rows = []
+    for u in u_rows or []:
+        ev = evaluate_u_row(u.get('row', ''), hist_rows, antal_matcher, target_pct=target_pct)
+        hits = ev.get('hits', []) or []
+        if hits:
+            default_interval = get_best_interval(hits, target_pct)
+            hp, ht, pct = _hist_pass_count(hits, default_interval)
+            dist_txt = f"min {min(hits)} · median {float(np.median(hits)):.1f} · max {max(hits)}"
+            rec = f"{int(default_interval[0])}–{int(default_interval[1])}"
+        else:
+            hp, ht, pct, dist_txt, rec = 0, 0, 0.0, '—', '—'
+        rows.append({
+            'U-rad': u.get('name', ''),
+            'Rad': u.get('row', ''),
+            'Källa': u.get('source', ''),
+            'Rek. intervall': rec,
+            'Historisk träff': f"{hp}/{ht}",
+            'Träffbild': dist_txt,
+        })
+    return pd.DataFrame(rows)
+
 def pass_super_macro_row(row_str, prob_vector, bounds, req_groups):
     c1, cx, c2 = row_str.count('1'), row_str.count('X'), row_str.count('2')
     s1_c, sx_c, s2_c, _ = get_streaks(row_str)
@@ -1559,6 +1730,8 @@ def get_filter_family(filter_name, group_name=""):
         return "FAT/favorit"
     if any(k in name for k in ["skrällstyrka"]):
         return "Skrällnivå"
+    if any(k in name for k in ["u-rad", "utgångsrad"]):
+        return "U-rader"
     if grp == "struktur" or any(k in name for k in ["tecken 1x2", "sviter", "teckenföljd", "teckenlucka", "singlar", "dubbletter", "tripplar", "uppkomster"]):
         return "Struktur"
     if "super" in name or "grupp" in str(group_name).lower():
@@ -2275,7 +2448,7 @@ def _frame_cache_tuple(frame):
     return tuple(tuple(x) for x in frame)
 
 
-def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, target_hist_pct=90):
+def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, target_hist_pct=90, u_rows=None):
     """Bygger exakt en spec per filter. Inga AutoHard-varianter/dubbletter.
 
     target_hist_pct styr rekommenderat intervall/startvärde för varje filter.
@@ -2338,6 +2511,31 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
     tr1, trx, tr2, trt = [], [], [], []
     o1, ox, o2, ot = [], [], [], []
     fat_strings = []
+
+    # U-rader / utgångsrader: varje U-rad blir ett vanligt intervallfilter
+    # där värdet är antal matchande tecken mot referensraden. Garantin är
+    # villkorad: TipsetMatrix-garantin gäller bara om facit överlever dessa
+    # filter precis som övriga filter.
+    for u in (u_rows or []):
+        urow = normalize_single_row_text(u.get('row', ''))
+        if len(urow) != int(antal_matcher):
+            continue
+        uvals = [u_row_hit_count(str(r), urow) for r in rows if len(str(r)) == int(antal_matcher)]
+        uname = str(u.get('name', 'U-rad')).strip() or 'U-rad'
+        usource = str(u.get('source', '') or '')
+        help_txt = f"Rad: {urow}" + (f" · Källa: {usource}" if usource else '') + " · Värdet är antal tecken som enkelraden träffar mot U-raden."
+        add_interval(
+            uname,
+            'U-rader / utgångsrader',
+            uvals,
+            lambda r, _u=urow: u_row_hit_count(r, _u),
+            0,
+            90,
+            0,
+            antal_matcher,
+            help_txt,
+            key_override=f"u_rad_{_slug(u.get('id', uname))}",
+        )
 
     for row_str, p in zip(rows, probs):
         if len(str(row_str)) != antal_matcher:
@@ -2557,9 +2755,172 @@ def _hist_package_passes(v_m, specs, settings, group_reqs):
     return int(passed), int(htot)
 
 
-def _settings_package_signature(settings):
-    """Stabil signatur för att se om valt paket fortfarande ligger aktivt."""
+
+
+def _hist_total_for_specs(v_m, specs):
+    """Antal historiska observationer som filterpaketet ska räknas mot."""
+    try:
+        return int(max([len(s.get('hist_values', [])) for s in (specs or [])] + [len(v_m)]))
+    except Exception:
+        try:
+            return int(len(v_m))
+        except Exception:
+            return 0
+
+
+def _hist_value_pass_for_spec(spec, idx, settings):
+    vals = spec.get('hist_values', []) or []
+    if idx >= len(vals):
+        return False, None
+    val = vals[idx]
+    interval = settings.get(spec.get('key'), {}).get('interval', spec.get('default_interval'))
+    try:
+        return bool(in_range(val, interval)), val
+    except Exception:
+        return False, val
+
+
+def _active_specs_by_mode(specs, settings):
+    forced_specs = []
+    group_specs = {f'Grupp {i}': [] for i in range(1, 7)}
+    for spec in specs or []:
+        mode = settings.get(spec.get('key'), {}).get('mode', 'Av')
+        if mode == 'Tvingat':
+            forced_specs.append(spec)
+        elif mode in group_specs:
+            group_specs[mode].append(spec)
+    return forced_specs, group_specs
+
+
+def _active_package_diagnostic_df(v_m, specs, settings, group_reqs, antal_matcher, max_rows=100):
+    """Rad-för-rad-diagnos för samlad historikträff.
+
+    Detta är kontrollvyn som visar varför många starka individuella filter kan
+    ge låg samlad träff när de kombineras med AND och gruppkrav.
+    """
+    htot = _hist_total_for_specs(v_m, specs)
+    if htot <= 0:
+        return pd.DataFrame()
+    forced_specs, group_specs = _active_specs_by_mode(specs, settings)
+    out = []
+    for idx in range(min(int(htot), int(max_rows))):
+        try:
+            hist_row = normalize_single_row_text(v_m.iloc[idx].get('Correct_Row', '')) if idx < len(v_m) else ''
+        except Exception:
+            hist_row = ''
+        ok = True
+        forced_hits = 0
+        forced_misses = []
+        for spec in forced_specs:
+            passed, val = _hist_value_pass_for_spec(spec, idx, settings)
+            if passed:
+                forced_hits += 1
+            else:
+                ok = False
+                try:
+                    val_txt = _format_filter_value(val, spec.get('decimals', 0))
+                except Exception:
+                    val_txt = '-'
+                forced_misses.append(f"{spec.get('name','')}={val_txt}")
+
+        group_parts = []
+        group_misses = []
+        for gname, gs in group_specs.items():
+            if not gs:
+                continue
+            mn, mx = _group_req_bounds(group_reqs, gname, len(gs))
+            if mn <= 0 and mx >= len(gs):
+                continue
+            hits = 0
+            for spec in gs:
+                passed, _ = _hist_value_pass_for_spec(spec, idx, settings)
+                if passed:
+                    hits += 1
+            gok = (mn <= hits <= mx)
+            if not gok:
+                ok = False
+                group_misses.append(f"{gname} {hits}/{len(gs)}")
+            group_parts.append(f"{gname}: {hits}/{len(gs)} krav {mn}–{mx} {'OK' if gok else 'MISS'}")
+
+        miss_txt = '; '.join(forced_misses[:6] + group_misses[:6])
+        if len(forced_misses) + len(group_misses) > 12:
+            miss_txt += ' …'
+        out.append({
+            'Historik #': idx + 1,
+            'Rad': hist_row if hist_row else '-',
+            'Paketstatus': '✅ Träff' if ok else '❌ Miss',
+            'Tvingade': f"{forced_hits}/{len(forced_specs)}",
+            'Grupper': ' | '.join(group_parts) if group_parts else '—',
+            'Missar': miss_txt if miss_txt else '—',
+        })
+    return pd.DataFrame(out)
+
+
+def _active_group_diagnostic_df(specs, settings, group_reqs, frame_rows=None):
+    """Synlig gruppdiagnos för aktuell filtercentral."""
+    _, group_specs = _active_specs_by_mode(specs, settings)
+    htot = _hist_total_for_specs(pd.DataFrame(), specs)
+    rows = []
+    for gname, gs in group_specs.items():
+        n = len(gs)
+        if n <= 0:
+            continue
+        mn, mx = _group_req_bounds(group_reqs, gname, n)
+        hist_scores = []
+        hist_pass = 0
+        for idx in range(htot):
+            hits = 0
+            for spec in gs:
+                passed, _ = _hist_value_pass_for_spec(spec, idx, settings)
+                if passed:
+                    hits += 1
+            hist_scores.append(hits)
+            if mn <= hits <= mx:
+                hist_pass += 1
+
+        frame_keep_txt = '—'
+        frame_red_txt = '—'
+        if frame_rows is not None and len(frame_rows) <= 30000:
+            try:
+                keep = 0
+                for r in frame_rows:
+                    hits = 0
+                    for spec in gs:
+                        interval = settings.get(spec.get('key'), {}).get('interval', spec.get('default_interval'))
+                        if _spec_pass(r, spec, interval):
+                            hits += 1
+                    if mn <= hits <= mx:
+                        keep += 1
+                frame_keep_txt = f"{keep}/{len(frame_rows)}"
+                frame_red_txt = f"{100.0 - 100.0 * keep / max(1, len(frame_rows)):.1f}%"
+            except Exception:
+                pass
+
+        if hist_scores:
+            score_txt = f"min {min(hist_scores)} · median {float(np.median(hist_scores)):.1f} · max {max(hist_scores)}"
+        else:
+            score_txt = '—'
+        rows.append({
+            'Grupp': gname,
+            'Filter i grupp': int(n),
+            'Krav': _group_req_label(group_reqs, gname, n),
+            'Historisk gruppträff': f"{hist_pass}/{htot}" if htot else '0/0',
+            'Träffar i historik': score_txt,
+            'Grundram kvar': frame_keep_txt,
+            'Reducerar grundram': frame_red_txt,
+            'Status': 'Aktiv' if not (mn <= 0 and mx >= n) else 'Påverkar inte',
+        })
+    return pd.DataFrame(rows)
+
+def _settings_package_signature(settings, group_reqs=None):
+    """Stabil signatur för aktiv filtercentral.
+
+    v12.0ai: Gruppkrav ingår i signaturen. Annars kunde ett applicerat
+    hårt grupppaket visa falsk mismatch: filterlägena stämde, men aktuell
+    signatur saknade Grupp min/max som paketmotorn räknade med.
+    """
     sig = []
+    active_group_counts = {f'Grupp {i}': 0 for i in range(1, 7)}
     for k, v in sorted((settings or {}).items()):
         mode = v.get('mode', 'Av')
         if mode == 'Av':
@@ -2570,7 +2931,15 @@ def _settings_package_signature(settings):
         except Exception:
             iv = tuple(interval) if isinstance(interval, (list, tuple)) else interval
         sig.append((k, mode, iv))
-    return tuple(sig)
+        if mode in active_group_counts:
+            active_group_counts[mode] += 1
+
+    for gname, n in active_group_counts.items():
+        if n <= 0:
+            continue
+        mn, mx = _group_req_bounds(group_reqs or {}, gname, n)
+        sig.append((gname, 'REQ', int(mn), int(mx), int(n)))
+    return tuple(sorted(sig))
 
 
 def _package_signature(package):
@@ -2737,6 +3106,7 @@ def _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fa
         'top_fav_count': int(top_fav_count),
         'filters': _collect_filter_settings_for_save(specs, filter_hist_target_pct, top_fav_count),
         'group_reqs': _json_safe_value(group_reqs),
+        'u_rows': _json_safe_value(_collect_u_rows_from_session(antal_matcher)),
     }
 
 
@@ -2785,6 +3155,7 @@ def _apply_spelfil_payload(payload):
 
     fhp = int(st.session_state.get('v12_filter_hist_target_pct', payload.get('filter_hist_target_pct', 90)) or 90)
     tfc = int(st.session_state.get('v12_top_fav_count', payload.get('top_fav_count', 3)) or 3)
+    _apply_u_rows_to_session(payload.get('u_rows', {}))
     _apply_filter_settings_to_session(payload.get('filters', {}), fhp, tfc)
     _apply_group_reqs_to_session(payload.get('group_reqs', {}))
 
@@ -4712,6 +5083,47 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     filter_hist_target_pct = int(max(50, min(100, filter_hist_target_pct)))
     top_fav_count = int(max(1, min(6, top_fav_count)))
 
+    # U-rader/utgångsrader byggs innan specs, så varje vald U-rad blir en vanlig
+    # filterrad med Av/Tvingat/Grupp och min/max-intervall.
+    if 'v12_u_include_favorite' not in st.session_state:
+        st.session_state['v12_u_include_favorite'] = True
+    if 'v12_u_include_history' not in st.session_state:
+        st.session_state['v12_u_include_history'] = True
+    if 'v12_u_include_second' not in st.session_state:
+        st.session_state['v12_u_include_second'] = False
+
+    with st.expander("🎯 U-rader / utgångsrader", expanded=False):
+        st.caption("U-rader är transparenta utgångsfilter: värdet är antal tecken som en enkelrad matchar mot U-raden. Välj sedan Av/Tvingat/Grupp och intervall i filtercentralen.")
+        ua, ub, uc = st.columns(3)
+        with ua:
+            st.checkbox("Visa U-rad Favorit/procent", key='v12_u_include_favorite')
+        with ub:
+            st.checkbox("Visa U-rad Historik/AI", key='v12_u_include_history')
+        with uc:
+            st.checkbox("Visa U-rad Andrahand", key='v12_u_include_second')
+
+        st.markdown("**Manuella U-rader**")
+        st.caption(f"Skriv exakt {antal_matcher} tecken. Tomma manuella rader ignoreras.")
+        for _i in range(1, 4):
+            if f'v12_u_manual_{_i}_name' not in st.session_state:
+                st.session_state[f'v12_u_manual_{_i}_name'] = f'Manuell U-rad {_i}'
+            if f'v12_u_manual_{_i}_row' not in st.session_state:
+                st.session_state[f'v12_u_manual_{_i}_row'] = ''
+            ncol, rcol = st.columns([1.0, 2.2])
+            with ncol:
+                st.text_input("Namn", key=f'v12_u_manual_{_i}_name', label_visibility='collapsed')
+            with rcol:
+                st.text_input("Rad", key=f'v12_u_manual_{_i}_row', placeholder='Exempel: 1X211X2X12112', label_visibility='collapsed')
+
+        _preview_u_rows = build_u_rows_for_filtercentral(v_m, filter_vec, antal_matcher)
+        if _preview_u_rows:
+            st.dataframe(u_row_diag_df(_preview_u_rows, list(v_m['Correct_Row']), antal_matcher, target_pct=filter_hist_target_pct), use_container_width=True, hide_index=True)
+            st.caption("Rek. intervall blir startvärde i filtercentralen. Garantin är villkorad på att facit överlever U-radsfilter och övriga filter.")
+        else:
+            st.info("Inga U-rader är valda eller giltiga.")
+
+    u_rows = build_u_rows_for_filtercentral(v_m, filter_vec, antal_matcher)
+
     # Viktigt: kontrollen ovan måste läsas INNAN specs/sliders byggs.
     # Dessutom har varje intervallslider en nyckel som innehåller träffmålet.
     # Annars återanvänder Streamlit gamla slider-värden och ignorerar nya defaultintervall.
@@ -4726,7 +5138,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         st.info("Filterintervallen uppdateras efter nytt träffmål/toppfavoritval…")
         st.rerun()
 
-    specs = build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=top_fav_count, target_hist_pct=filter_hist_target_pct)
+    specs = build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=top_fav_count, target_hist_pct=filter_hist_target_pct, u_rows=u_rows)
     st.session_state['v12_specs'] = specs
     st.caption("När du ändrar minsta historiska träff får varje filter nya slider-nycklar och startar på sitt rekommenderade intervall. 100% ska därför ge startintervall med 30/30 där det är möjligt.")
 
@@ -5065,7 +5477,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
 
     applied_meta = st.session_state.get('v12_applied_package_meta')
     if applied_meta and active_count:
-        current_sig = _settings_package_signature(settings)
+        current_sig = _settings_package_signature(settings, group_reqs)
         if current_sig == applied_meta.get('signature'):
             pkg_txt = f"{int(applied_meta.get('hist_hit', 0))}/{int(applied_meta.get('hist_total', 0))}"
             cur_txt = f"{hpkg}/{htot}"
@@ -5076,8 +5488,32 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         else:
             st.caption("Filtercentralen har ändrats efter att paketet applicerades; paketkontrollen är därför inte längre aktiv.")
 
+    if active_count:
+        st.caption("Samlad historikträff är hela aktiva paketet räknat mot de liknande historiska omgångarna: alla Tvingade filter måste sitta och varje Grupp måste klara sitt min/max-krav. Det är inte ett snitt av individuella filterträffar.")
+        active_u_count = sum(1 for s in specs if s.get('category') == 'U-rader / utgångsrader' and settings.get(s.get('key'), {}).get('mode') != 'Av')
+        if active_u_count:
+            st.info(f"{active_u_count} U-radsfilter är aktiva. Reduceringsgarantin är villkorad på att facit klarar U-radsintervallen och övriga filter innan TipsetMatrix körs.")
     if active_count and hpkg <= max(3, int(0.25 * max(1, htot))):
         st.warning("Samlad historikträff är mycket låg. Det betyder oftast att för många filter är Tvingade samtidigt. Lägg över närliggande filter i Grupp eller bredda intervallen.")
+
+    with st.expander("🔬 Samlad historikträff – rad-för-rad diagnos", expanded=False):
+        if active_count:
+            diag_df = _active_package_diagnostic_df(v_m, specs, settings, group_reqs, antal_matcher, max_rows=htot)
+            if not diag_df.empty:
+                st.dataframe(diag_df, use_container_width=True, hide_index=True)
+                st.caption("✅ Träff betyder att den historiska vinnarraden klarade hela aktiva filterpaketet. ❌ Miss visar vilket tvingat filter eller gruppkrav som stoppade raden.")
+            else:
+                st.info("Ingen historikdiagnos kunde byggas.")
+        else:
+            st.info("Aktivera minst ett filter för att se samlad historikdiagnos.")
+
+    with st.expander("🧩 Gruppdiagnos – min/max och faktisk effekt", expanded=False):
+        group_diag_df = _active_group_diagnostic_df(specs, settings, group_reqs, frame_rows=frame_rows)
+        if not group_diag_df.empty:
+            st.dataframe(group_diag_df, use_container_width=True, hide_index=True)
+            st.caption("Gruppdiagnosen räknar gruppens min/max-krav separat från tvingade filter. Grundramseffekt visas exakt när grundramen är högst 30 000 rader.")
+        else:
+            st.info("Inga filter ligger i Grupp 1–6 just nu.")
 
     with st.expander("📋 Filteröversikt", expanded=False):
         st.dataframe(_build_filter_summary_df(specs, settings, group_reqs, rows=frame_rows), use_container_width=True, hide_index=True)
@@ -5151,7 +5587,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     if go:
         with st.spinner("Filtrerar exakt grundram..."):
             filtered_rows = _apply_manual_filters(frame_rows, specs, settings, group_reqs)
-        st.session_state['v12_last_result'] = {'filtered_rows': filtered_rows, 'reduced_rows': [], 'settings': settings, 'group_reqs': group_reqs}
+        st.session_state['v12_last_result'] = {'filtered_rows': filtered_rows, 'reduced_rows': [], 'settings': settings, 'group_reqs': group_reqs, 'hist_package': {'hit': int(hpkg), 'total': int(htot)}}
         st.success(f"Filtrering klar: {len(frame_rows):,} → {len(filtered_rows):,} rader.".replace(',', ' '))
         miss = selected_signs_missing(filtered_rows, frame, antal_matcher)
         if miss:
@@ -5203,7 +5639,8 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             base_12_rows = int(tm_meta_display.get('base_12_rows', len(reduced_rows)) or len(reduced_rows))
             extra_13_rows = int(tm_meta_display.get('extra_13_rows', 0) or 0)
             c3.metric("Efter TipsetMatrix", f"{len(reduced_rows):,}".replace(',', ' '), f"-{(100-100*len(reduced_rows)/max(1,len(filtered_rows))):.1f}%")
-            c4.metric("13-chans", f"{100*len(reduced_rows)/max(1,len(filtered_rows)):.2f}%")
+            weighted_13_pct = weighted_13_share(filtered_rows, reduced_rows, filter_vec)
+            c4.metric("13-chans", f"{100*len(reduced_rows)/max(1,len(filtered_rows)):.2f}%", f"viktad {weighted_13_pct:.2f}%")
             if extra_13_rows > 0:
                 st.info(f"Reduceringsval: minsta hittade 12-garanti gav {base_12_rows:,} rader. Därefter lades {extra_13_rows:,} extra rader till för att höja 13-chansen.".replace(',', ' '))
             else:
