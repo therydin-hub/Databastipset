@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0ba – Prestandafix"
+APP_VERSION = "v12.0bc – Super-Makro utan Total"
 
 
 st.markdown("""
@@ -3306,7 +3306,7 @@ def _super_macro_count(row_str, prob_vector, bounds):
     return score
 
 
-def _sample_rows_for_macro(rows, max_items=12000):
+def _sample_rows_for_macro(rows, max_items=3000):
     """Deterministiskt urval för Super-Makro-rekommendation när grundramen är stor."""
     rows = list(rows or [])
     n = len(rows)
@@ -3516,7 +3516,7 @@ def _frame_cache_tuple(frame):
     return tuple(tuple(x) for x in frame)
 
 
-def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, target_hist_pct=90, u_rows=None, hist_df=None, max_shock_pct=22, candidate_rows=None):
+def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, target_hist_pct=90, u_rows=None, hist_df=None, max_shock_pct=22, candidate_rows=None, include_supermakro=False):
     """Bygger exakt en spec per filter. Inga AutoHard-varianter/dubbletter.
 
     target_hist_pct styr rekommenderat intervall/startvärde för varje filter.
@@ -3808,6 +3808,12 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
     add_interval('Uppkomster 2', 'Struktur', o2, lambda r: get_occurrences(r)[2], 0, 100, 0, antal_matcher)
     add_interval('Uppkomster total', 'Struktur', ot, lambda r: get_occurrences(r)[3], 0, 100, 0, antal_matcher)
 
+    # v12.0bb: Super-Makro är dyrt att rekommendera live eftersom det räknar många
+    # underfilter per rad. Därför byggs Super-Makro-filter bara när användaren
+    # aktivt slår på dem i sidomenyn. Alla övriga filter påverkas inte.
+    if not include_supermakro:
+        return specs
+
     # Super-Makro: bygg flera synliga makron. Strukturmakrot är gamla Super-Makro-logiken.
     value_macro_specs = [sp for sp in specs if sp.get('category') == 'Värde & svårighet']
     favorite_macro_specs = [sp for sp in specs if sp.get('category') == 'Favorit & skräll']
@@ -3943,74 +3949,10 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
         _fav_rec_interval = (0, 0)
         _fav_row_getter = lambda r: 0
 
-    # Super-Makro Total: räknar hur många av de stora makrona som sitter.
-    total_macro_components = []
-    if macro_vals:
-        total_macro_components.append(('Struktur', macro_vals, _macro_rec_interval, lambda r, b=macro_bounds, _int=_macro_rec_interval: int(in_range(_super_macro_count(r, filter_vec, b), _int))))
-    if value_macro_vals and value_macro_max > 0:
-        total_macro_components.append(('Värde/Svårighet', value_macro_vals, _value_rec_interval, lambda r, _g=_value_row_getter, _int=_value_rec_interval: int(in_range(_g(r), _int))))
-    if favorite_macro_vals and favorite_macro_max > 0:
-        total_macro_components.append(('Favorit/Skräll', favorite_macro_vals, _fav_rec_interval, lambda r, _g=_fav_row_getter, _int=_fav_rec_interval: int(in_range(_g(r), _int))))
-
-    total_macro_max = len(total_macro_components)
-    if total_macro_max > 1:
-        min_len = min(len(comp[1]) for comp in total_macro_components)
-        total_macro_vals = []
-        for i in range(min_len):
-            c = 0
-            for _name, _vals, _intv, _getter in total_macro_components:
-                try:
-                    if in_range(_vals[i], _intv):
-                        c += 1
-                except Exception:
-                    continue
-            total_macro_vals.append(int(c))
-
-        def _total_macro_row_getter(r, _components=total_macro_components):
-            c = 0
-            for _name, _vals, _intv, _getter in _components:
-                try:
-                    c += int(_getter(r))
-                except Exception:
-                    continue
-            return int(c)
-
-        _total_rec_interval, _total_rec_table, _total_sampled = _recommend_count_macro_interval(
-            total_macro_vals,
-            candidate_rows or [],
-            _total_macro_row_getter,
-            total_macro_max,
-            target_hist_pct=target_hist_pct,
-            preferred_low=max(1, total_macro_max - 1),
-            preferred_high=total_macro_max,
-        )
-        _total_help = (
-            'Räknar hur många av de stora Super-Makrona som sitter: '
-            + ', '.join([c[0] for c in total_macro_components])
-            + '. Detta är den översta mjuka kontrollen och ska användas försiktigt så den inte dubbelstyr alla underfilter.'
-        )
-        if _total_sampled:
-            _total_help += ' Kvar rad % bygger på ett deterministiskt urval av grundramen.'
-        add_interval(
-            'Super-Makro Total',
-            'Super-Makro',
-            total_macro_vals,
-            _total_macro_row_getter,
-            0,
-            90,
-            0,
-            total_macro_max,
-            _total_help,
-            key_override='super_makro_total',
-            default_interval_override=_total_rec_interval,
-            meta={
-                'diag_type': 'super_macro_rational',
-                'recommendation_table': _total_rec_table.to_dict('records') if isinstance(_total_rec_table, pd.DataFrame) else [],
-                'sampled_candidate_rows': bool(_total_sampled),
-                'max_blocks': total_macro_max,
-                'included_filters': [c[0] for c in total_macro_components],
-            },
-        )
+    # v12.0bc: Super-Makro Total är borttaget.
+    # Total-makrot blev ett meta-på-meta-filter som dubbelräknade Struktur,
+    # Värde/Svårighet och Favorit/Skräll och gjorde sidan onödigt tung.
+    # De tre konkreta makrona ovan behålls som vanliga, synliga filter.
 
 
     return specs
@@ -6537,20 +6479,35 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         st.info("Filterintervallen uppdateras efter nytt träffmål…")
         st.rerun()
 
-    # Prestandafix v12.0ba:
-    # Filterrekommendationerna, särskilt flera Super-Makron, behöver bara ett
-    # stabilt urval av grundramen för att uppskatta kvarvarande rad %. Att skicka
-    # hela grundramen här gjorde sidan mycket seg när grundramen var stor.
-    # Själva filtreringen/reduceringen längre ned använder fortfarande hela frame_rows.
+    # Prestandafix v12.0bc:
+    # Super-Makro Total är borttaget, så de tre konkreta Super-Makrona kan visas
+    # direkt igen. Rekommendationernas kvar-rad-procent beräknas fortfarande på
+    # ett stabilt urval när grundramen är stor. Filtrering/reducering längre ned
+    # använder hela frame_rows.
+    enable_supermakro = True
+
     spec_candidate_rows = frame_rows
     spec_sampled_for_specs = False
     if frame_rows is not None and len(frame_rows) > 20000:
-        spec_candidate_rows, spec_sampled_for_specs = _sample_rows_for_macro(frame_rows, max_items=12000)
+        # Rekommendationer behöver bara en snabb uppskattning av kvar rad %.
+        # Filtrering/reducering längre ned kör fortfarande på hela frame_rows.
+        spec_candidate_rows, spec_sampled_for_specs = _sample_rows_for_macro(frame_rows, max_items=3000)
 
-    specs = build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=top_fav_count, target_hist_pct=filter_hist_target_pct, u_rows=None, hist_df=_streck_hist_db, max_shock_pct=max_shock_pct, candidate_rows=spec_candidate_rows)
+    specs = build_clean_filter_specs(
+        v_m,
+        filter_vec,
+        antal_matcher,
+        slider_u_count=top_fav_count,
+        target_hist_pct=filter_hist_target_pct,
+        u_rows=None,
+        hist_df=_streck_hist_db,
+        max_shock_pct=max_shock_pct,
+        candidate_rows=spec_candidate_rows,
+        include_supermakro=enable_supermakro,
+    )
     st.session_state['v12_specs'] = specs
     if spec_sampled_for_specs:
-        st.caption(f"Prestandaläge: filterrekommendationer/Super-Makro uppskattar kvarvarande radmassa på ett stabilt urval av {len(spec_candidate_rows):,} av {len(frame_rows):,} grundrader. Själva filtreringen och TipsetMatrix använder hela grundramen.".replace(',', ' '))
+        st.caption(f"Prestandaläge: filterrekommendationer uppskattar kvarvarande radmassa på ett stabilt urval av {len(spec_candidate_rows):,} av {len(frame_rows):,} grundrader. Själva filtreringen och TipsetMatrix använder hela grundramen.".replace(',', ' '))
     with ctrl_b:
         if st.button("Återställ alla filter till Av", use_container_width=True, key="v12_reset_all_filters_off"):
             for _k in list(st.session_state.keys()):
