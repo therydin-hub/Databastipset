@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0an – U-val med direktintervall"
+APP_VERSION = "v12.0ao – U-val direktintervall fix"
 
 
 st.markdown("""
@@ -2735,6 +2735,14 @@ def _render_u_total_filter_controls(slot, system, rec_interval, filter_hist_targ
             key=u_mode_key,
             help="Av = bara visning. Tvingat = detta intervall måste sitta. Grupp = räknas i valt gruppkrav.",
         )
+    # Streamlit tillåter inte att man ändrar session_state för en widgetnyckel
+    # efter att widgeten med samma key har skapats i samma körning. Därför ligger
+    # Rek-knappen före slidern i körordning, även om den visuellt visas i högerkolumnen.
+    with c_apply:
+        st.markdown("&nbsp;", unsafe_allow_html=True)
+        if st.button("Rek.", key=f'v12_us_{int(slot)}_utips_use_rec', help="Återställ till rekommenderat historikintervall", use_container_width=True):
+            st.session_state[u_range_key] = default_interval
+            st.rerun()
     with c_range:
         interval = st.slider(
             f"Spela antal utgångstips som ska sitta, 0–{marked}",
@@ -2745,11 +2753,6 @@ def _render_u_total_filter_controls(slot, system, rec_interval, filter_hist_targ
             key=u_range_key,
             help="Exempel 1–4 betyder att en rad får passera om 1 till 4 av de markerade utgångstipsen sitter.",
         )
-    with c_apply:
-        st.markdown("&nbsp;", unsafe_allow_html=True)
-        if st.button("Rek.", key=f'v12_us_{int(slot)}_utips_use_rec', help="Återställ till rekommenderat historikintervall", use_container_width=True):
-            st.session_state[u_range_key] = default_interval
-            st.rerun()
 
     # Spegla direkt till Filtercentralen. Den byggs senare i samma körning.
     st.session_state[_u_total_filter_mode_key(slot)] = mode
