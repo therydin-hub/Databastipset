@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0bk – Manuella teckengrupper"
+APP_VERSION = "v12.0bm – Minimerbara teckengrupper"
 
 
 st.markdown("""
@@ -2901,25 +2901,119 @@ def _build_streck_filter_systems(filter_vec, hist_df, similar_df, antal_matcher,
 
 
 # --- MANUELLA TECKENGRUPPER / TECKENBLOCK ---
+MANUAL_GROUP_SLOTS = 8
+
+
+def _manual_choice_sort_key(choice):
+    try:
+        return int(choice.get('match', 999))
+    except Exception:
+        return 999
+
+
+def _normalize_sign_list(signs):
+    """Normaliserar en lista/sträng med tecken till Helgardering-ordning."""
+    if signs is None:
+        return []
+    if isinstance(signs, str):
+        raw = [ch.upper() for ch in signs if ch.upper() in {'1', 'X', '2'}]
+    else:
+        raw = [str(s).strip().upper() for s in signs]
+    return [s for s in ['1', 'X', '2'] if s in raw]
+
+
+def _manual_group_choices_from_group(group, antal_matcher=None):
+    """Returnerar gruppens matchval: [{'match': 3, 'signs': ['1','X']}].
+
+    Bakåtkompatibel med gamla formatet `picks` där varje post var M:tecken.
+    Ny tolkning: ett matchval kan innehålla flera tecken, men räknas max som
+    1 träff eftersom en match bara kan sluta på ett tecken.
+    """
+    by_match = {}
+    raw_choices = group.get('choices', None) if isinstance(group, dict) else None
+    if raw_choices:
+        for c in raw_choices or []:
+            try:
+                m = int(c.get('match', 0))
+            except Exception:
+                continue
+            signs = _normalize_sign_list(c.get('signs', []))
+            if not signs:
+                continue
+            if antal_matcher is not None and not (1 <= m <= int(antal_matcher)):
+                continue
+            if m not in by_match:
+                by_match[m] = set()
+            by_match[m].update(signs)
+    else:
+        for p in (group.get('picks', []) if isinstance(group, dict) else []) or []:
+            try:
+                m = int(p.get('match', 0))
+                sign = str(p.get('sign', '')).upper()
+            except Exception:
+                continue
+            if sign not in {'1', 'X', '2'}:
+                continue
+            if antal_matcher is not None and not (1 <= m <= int(antal_matcher)):
+                continue
+            if m not in by_match:
+                by_match[m] = set()
+            by_match[m].add(sign)
+    out = []
+    for m in sorted(by_match):
+        signs = [s for s in ['1', 'X', '2'] if s in by_match[m]]
+        if signs:
+            out.append({'match': int(m), 'signs': signs})
+    return out
+
+
+def _manual_group_choices_to_picks(choices):
+    picks = []
+    for c in choices or []:
+        try:
+            m = int(c.get('match', 0))
+        except Exception:
+            continue
+        for s in _normalize_sign_list(c.get('signs', [])):
+            picks.append({'match': m, 'sign': s})
+    return picks
+
+
+def _manual_group_choices_to_text(choices):
+    parts = []
+    for c in sorted(choices or [], key=_manual_choice_sort_key):
+        try:
+            m = int(c.get('match', 0))
+        except Exception:
+            continue
+        signs = ''.join(_normalize_sign_list(c.get('signs', [])))
+        if m > 0 and signs:
+            parts.append(f"M{m}:{signs}")
+    return ", ".join(parts)
+
+
 def _manual_sign_groups_signature(groups):
     """Stabil signatur så paketmotorn kan se om teckengrupper ändrats."""
     clean = []
     for g in groups or []:
         if not isinstance(g, dict):
             continue
-        picks = [(int(p.get('match', 0)), str(p.get('sign', '')).upper()) for p in g.get('picks', []) or []]
-        picks = [(m, sg) for m, sg in picks if m > 0 and sg in {'1', 'X', '2'}]
+        choices = _manual_group_choices_from_group(g)
         clean.append({
             'active': bool(g.get('active', False)),
             'name': str(g.get('name', '')),
-            'picks': sorted(picks),
+            'choices': [
+                {'match': int(c.get('match', 0)), 'signs': _normalize_sign_list(c.get('signs', []))}
+                for c in choices
+            ],
             'min': int(g.get('min', 0) or 0),
-            'max': int(g.get('max', len(picks)) if g.get('max', None) is not None else len(picks)),
+            'max': int(g.get('max', len(choices)) if g.get('max', None) is not None else len(choices)),
         })
     return json.dumps(clean, ensure_ascii=False, sort_keys=True)
 
 
 def _manual_group_picks_to_text(picks):
+    """Gammal textvisning, kvar för bakåtkompatibilitet."""
     parts = []
     for p in picks or []:
         try:
@@ -2933,15 +3027,17 @@ def _manual_group_picks_to_text(picks):
 
 
 def _parse_manual_group_picks(text, antal_matcher):
-    """Läser t.ex. 'M3:2, M10:1' eller '3:2 10=1'. Max ett tecken per match."""
+    """Läser t.ex. 'M3:2, M10:1' eller '3:2 10=1'.
+
+    Stöder även flera tecken per match, t.ex. M3:1X eller M10:X2.
+    Returnerar fortfarande `picks` för gammal kompatibilitet.
+    """
     raw = str(text or '').upper().replace('×', 'X')
-    # Stöd både M3:2, 3:2, M3-2, match 3 = 2.
-    tokens = re.findall(r'(?:MATCH\s*)?M?\s*(\d{1,2})\s*[:=\-]?\s*([1X2])', raw)
+    tokens = re.findall(r'(?:MATCH\s*)?M?\s*(\d{1,2})\s*[:=\-]?\s*([1X2]{1,3})', raw)
     picks = []
     warnings = []
-    used_matches = set()
     used_pairs = set()
-    for m_txt, sign in tokens:
+    for m_txt, signs_txt in tokens:
         try:
             m = int(m_txt)
         except Exception:
@@ -2949,15 +3045,13 @@ def _parse_manual_group_picks(text, antal_matcher):
         if not (1 <= m <= int(antal_matcher)):
             warnings.append(f"M{m} finns inte på kupongen.")
             continue
-        pair = (m, sign)
-        if pair in used_pairs:
-            continue
-        if m in used_matches:
-            warnings.append(f"M{m} har fler än ett tecken i samma teckengrupp. Bara första tecknet används.")
-            continue
-        used_matches.add(m)
-        used_pairs.add(pair)
-        picks.append({'match': int(m), 'sign': sign})
+        signs = _normalize_sign_list(signs_txt)
+        for sign in signs:
+            pair = (m, sign)
+            if pair in used_pairs:
+                continue
+            used_pairs.add(pair)
+            picks.append({'match': int(m), 'sign': sign})
     return picks, warnings
 
 
@@ -2966,29 +3060,18 @@ def _normalize_manual_sign_groups(groups, antal_matcher):
     for idx, g in enumerate(groups or [], 1):
         if not isinstance(g, dict):
             continue
-        picks = []
-        used = set()
-        for p in g.get('picks', []) or []:
-            try:
-                m = int(p.get('match', 0))
-                sign = str(p.get('sign', '')).upper()
-            except Exception:
-                continue
-            if not (1 <= m <= int(antal_matcher)) or sign not in {'1', 'X', '2'}:
-                continue
-            if m in used:
-                continue
-            used.add(m)
-            picks.append({'match': m, 'sign': sign})
-        n = len(picks)
+        choices = _manual_group_choices_from_group(g, antal_matcher)
+        n = len(choices)
         mn = int(g.get('min', 0) or 0)
         mx = int(g.get('max', n) if g.get('max', None) is not None else n)
         mn = max(0, min(n, mn))
         mx = max(mn, min(n, mx))
+        picks = _manual_group_choices_to_picks(choices)
         out.append({
             'name': str(g.get('name') or f'Teckengrupp {idx}'),
             'active': bool(g.get('active', False)) and n > 0,
-            'text': _manual_group_picks_to_text(picks),
+            'text': _manual_group_choices_to_text(choices),
+            'choices': choices,
             'picks': picks,
             'min': mn,
             'max': mx,
@@ -2996,14 +3079,18 @@ def _normalize_manual_sign_groups(groups, antal_matcher):
     return out
 
 
+def _manual_group_choice_count(group):
+    return len(_manual_group_choices_from_group(group))
+
+
 def _manual_group_hit_count(row_str, group):
     row_str = normalize_single_row_text(row_str)
     hits = 0
-    for p in group.get('picks', []) or []:
+    for c in _manual_group_choices_from_group(group):
         try:
-            m = int(p.get('match', 0))
-            sign = str(p.get('sign', '')).upper()
-            if 1 <= m <= len(row_str) and row_str[m - 1] == sign:
+            m = int(c.get('match', 0))
+            signs = set(_normalize_sign_list(c.get('signs', [])))
+            if 1 <= m <= len(row_str) and row_str[m - 1] in signs:
                 hits += 1
         except Exception:
             continue
@@ -3011,10 +3098,11 @@ def _manual_group_hit_count(row_str, group):
 
 
 def _manual_group_pass(row_str, group):
-    if not group.get('active') or not group.get('picks'):
+    if not group.get('active') or not _manual_group_choices_from_group(group):
         return True
     h = _manual_group_hit_count(row_str, group)
-    return int(group.get('min', 0)) <= h <= int(group.get('max', len(group.get('picks', []))))
+    n = _manual_group_choice_count(group)
+    return int(group.get('min', 0)) <= h <= int(group.get('max', n))
 
 
 def _manual_sign_groups_pass(row_str, groups):
@@ -3031,7 +3119,7 @@ def _manual_sign_groups_hist_mask(v_m, groups, antal_matcher):
     except Exception:
         rows = []
     mask = []
-    active = [g for g in (groups or []) if g.get('active') and g.get('picks')]
+    active = [g for g in (groups or []) if g.get('active') and _manual_group_choices_from_group(g)]
     for r in rows:
         if len(r) != int(antal_matcher):
             mask.append(False)
@@ -3043,7 +3131,7 @@ def _manual_sign_groups_hist_mask(v_m, groups, antal_matcher):
 
 
 def _apply_manual_sign_groups_to_rows(rows, groups, antal_matcher):
-    active = [g for g in (groups or []) if g.get('active') and g.get('picks')]
+    active = [g for g in (groups or []) if g.get('active') and _manual_group_choices_from_group(g)]
     clean = [normalize_single_row_text(r) for r in (rows or []) if len(normalize_single_row_text(r)) == int(antal_matcher)]
     if not active:
         return clean
@@ -3051,15 +3139,21 @@ def _apply_manual_sign_groups_to_rows(rows, groups, antal_matcher):
 
 
 def _manual_group_probability_distribution(group, filter_vec):
-    """Poisson-binomial över valda tecken, baserat på dagens streck. Antar oberoende matcher."""
+    """Poisson-binomial över valda matchval, baserat på dagens streck.
+
+    Om ett matchval innehåller flera tecken, t.ex. M3:1X, blir sannolikheten
+    summan av dessa tecken i matchen. Matchvalet räknas max som 1 träff.
+    """
     probs = []
-    for p in group.get('picks', []) or []:
+    for c in _manual_group_choices_from_group(group):
         try:
-            m = int(p.get('match', 0))
-            sign = str(p.get('sign', '')).upper()
-            idx = (m - 1) * 3 + {'1': 0, 'X': 1, '2': 2}[sign]
-            if 0 <= idx < len(filter_vec):
-                probs.append(max(0.0, min(1.0, float(filter_vec[idx]) / 100.0)))
+            m = int(c.get('match', 0))
+            p_sum = 0.0
+            for sign in _normalize_sign_list(c.get('signs', [])):
+                idx = (m - 1) * 3 + {'1': 0, 'X': 1, '2': 2}[sign]
+                if 0 <= idx < len(filter_vec):
+                    p_sum += max(0.0, min(1.0, float(filter_vec[idx]) / 100.0))
+            probs.append(max(0.0, min(1.0, p_sum)))
         except Exception:
             continue
     dist = [1.0]
@@ -3090,39 +3184,42 @@ def _manual_group_hist_summary(group, v_m, antal_matcher):
             vals.append(_manual_group_hit_count(r, group))
     if not vals:
         return 0, 0, '—'
+    n = _manual_group_choice_count(group)
     mn = int(group.get('min', 0) or 0)
-    mx = int(group.get('max', len(group.get('picks', []))) or 0)
+    mx = int(group.get('max', n) or 0)
     hit = sum(1 for v in vals if mn <= v <= mx)
-    parts = [f"{i}:{vals.count(i)}" for i in range(0, max(vals) + 1)]
+    parts = [f"{i}:{vals.count(i)}" for i in range(0, max(n, max(vals)) + 1)]
     return int(hit), int(len(vals)), ' | '.join(parts)
 
 
 def _manual_group_frame_diagnostics(group, frame, frame_rows, antal_matcher):
-    picks = group.get('picks', []) or []
+    choices = _manual_group_choices_from_group(group, antal_matcher)
     possible = []
     missing = []
-    for p in picks:
+    for c in choices:
         try:
-            m = int(p.get('match', 0))
-            sign = str(p.get('sign', '')).upper()
-            if frame and 1 <= m <= len(frame) and sign in normalize_signs(frame[m - 1]):
-                possible.append(f"M{m}:{sign}")
-            else:
-                missing.append(f"M{m}:{sign}")
+            m = int(c.get('match', 0))
+            signs = _normalize_sign_list(c.get('signs', []))
+            frame_signs = normalize_signs(frame[m - 1]) if frame and 1 <= m <= len(frame) else []
+            possible_signs = [s for s in signs if s in frame_signs]
+            missing_signs = [s for s in signs if s not in frame_signs]
+            if possible_signs:
+                possible.append(f"M{m}:{''.join(possible_signs)}")
+            if missing_signs:
+                missing.append(f"M{m}:{''.join(missing_signs)}")
         except Exception:
             continue
     mn = int(group.get('min', 0) or 0)
-    mx = int(group.get('max', len(picks)) or 0)
     notes = []
     if missing:
         notes.append("saknas i grundram: " + ', '.join(missing))
     if len(possible) < mn:
-        notes.append(f"omöjligt: bara {len(possible)} möjliga tecken, men min är {mn}")
+        notes.append(f"omöjligt: bara {len(possible)} möjliga matchval, men min är {mn}")
     elif mn > 0 and len(possible) == mn:
         if len(possible) == 1:
-            notes.append("dold spik: " + possible[0])
+            notes.append("dolt tvång: " + possible[0])
         else:
-            notes.append("dolt tvång: alla dessa måste sitta: " + ', '.join(possible))
+            notes.append("dolt tvång: alla dessa matchval måste sitta: " + ', '.join(possible))
     keep = None
     total = None
     if frame_rows is not None:
@@ -3137,15 +3234,16 @@ def _manual_group_frame_diagnostics(group, frame, frame_rows, antal_matcher):
 def _manual_sign_groups_summary_df(groups, v_m, filter_vec, frame, frame_rows, antal_matcher):
     rows = []
     for idx, g in enumerate(groups or [], 1):
-        if not g.get('active') or not g.get('picks'):
+        if not g.get('active') or not _manual_group_choices_from_group(g):
             continue
         h, t, dist = _manual_group_hist_summary(g, v_m, antal_matcher)
         prob = _manual_group_probability_pass_pct(g, filter_vec)
         possible, missing, notes, keep, total = _manual_group_frame_diagnostics(g, frame, frame_rows, antal_matcher)
+        n = _manual_group_choice_count(g)
         rows.append({
             'Grupp': g.get('name') or f'Teckengrupp {idx}',
-            'Tecken': _manual_group_picks_to_text(g.get('picks', [])),
-            'Krav': f"{int(g.get('min',0))}–{int(g.get('max',0))} av {len(g.get('picks', []))}",
+            'Tecken': _manual_group_choices_to_text(_manual_group_choices_from_group(g)),
+            'Krav': f"{int(g.get('min',0))}–{int(g.get('max',0))} av {n}",
             'Historikträff': f"{h}/{t}" if t else '—',
             'Strecksannolikhet': f"{prob:.1f}%",
             'Grundram': (f"{keep}/{total}" if keep is not None and total is not None else '—'),
@@ -3155,78 +3253,147 @@ def _manual_sign_groups_summary_df(groups, v_m, filter_vec, frame, frame_rows, a
     return pd.DataFrame(rows)
 
 
+def _render_manual_choice_row(group_idx, choice_idx, saved_choice, antal_matcher):
+    """Renderar ett matchval: rullgardin för match + kryssrutor 1/X/2."""
+    c_match, c1, cx, c2 = st.columns([1.6, 0.6, 0.6, 0.6])
+    try:
+        saved_m = int((saved_choice or {}).get('match', 0) or 0)
+    except Exception:
+        saved_m = 0
+    saved_signs = set(_normalize_sign_list((saved_choice or {}).get('signs', [])))
+    with c_match:
+        m = st.selectbox(
+            f'Val {choice_idx + 1}: match',
+            options=list(range(0, int(antal_matcher) + 1)),
+            index=max(0, min(int(antal_matcher), saved_m)),
+            format_func=lambda x: '—' if int(x) == 0 else f'M{x}',
+            key=f'v12_mtg_choice_match_{group_idx}_{choice_idx}',
+        )
+    with c1:
+        s1 = st.checkbox('1', value=('1' in saved_signs), key=f'v12_mtg_choice_1_{group_idx}_{choice_idx}')
+    with cx:
+        sx = st.checkbox('X', value=('X' in saved_signs), key=f'v12_mtg_choice_x_{group_idx}_{choice_idx}')
+    with c2:
+        s2 = st.checkbox('2', value=('2' in saved_signs), key=f'v12_mtg_choice_2_{group_idx}_{choice_idx}')
+    signs = []
+    if s1: signs.append('1')
+    if sx: signs.append('X')
+    if s2: signs.append('2')
+    return {'match': int(m), 'signs': signs}
+
+
 def _render_manual_sign_groups_panel(v_m, filter_vec, frame, frame_rows, antal_matcher):
+    """Renderar manuella teckengrupper som en minimerbar panel.
+
+    Teckengrupperna är fortfarande ett förfilter före paketmotorn, men UI:t
+    är stängt som standard så filtercentralen inte blir onödigt lång.
+    """
     saved = _normalize_manual_sign_groups(st.session_state.get('v12_manual_sign_groups', []), antal_matcher)
-    # Säkerställ 6 synliga slots.
+    # Säkerställ 6 synliga slots när panelen öppnas.
     while len(saved) < 6:
-        saved.append({'name': f'Teckengrupp {len(saved)+1}', 'active': False, 'text': '', 'picks': [], 'min': 0, 'max': 0})
+        saved.append({'name': f'Teckengrupp {len(saved)+1}', 'active': False, 'text': '', 'choices': [], 'picks': [], 'min': 0, 'max': 0})
 
-    st.markdown("<div class='v12-card'>", unsafe_allow_html=True)
-    st.markdown("<div class='v12-step'>Steg 3A</div><div class='v12-title'>Manuella teckengrupper före paket</div>", unsafe_allow_html=True)
-    st.caption("Används som förfilter före rekommenderade filterpaket. Exempel: M3:2, M10:1 med krav 1–2 betyder att minst ett av dessa två tecken måste sitta. Beräkna rekommenderade paket efter att detta är sparat.")
-
-    with st.form('v12_manual_sign_groups_form'):
-        draft_rows = []
-        for i in range(6):
-            g = saved[i]
-            st.markdown(f"**Teckengrupp {i+1}**")
-            c0, c1, c2, c3, c4 = st.columns([0.8, 1.6, 3.0, 0.8, 0.8])
-            with c0:
-                active = st.checkbox('Aktiv', value=bool(g.get('active', False)), key=f'v12_mtg_active_{i}')
-            with c1:
-                name = st.text_input('Namn', value=str(g.get('name') or f'Teckengrupp {i+1}'), key=f'v12_mtg_name_{i}')
-            with c2:
-                text = st.text_input('Tecken', value=str(g.get('text') or _manual_group_picks_to_text(g.get('picks', []))), placeholder='M3:2, M10:1', key=f'v12_mtg_text_{i}')
-            with c3:
-                mn = st.number_input('Min', min_value=0, max_value=int(antal_matcher), value=int(g.get('min', 0) or 0), step=1, key=f'v12_mtg_min_{i}')
-            with c4:
-                mx_default = int(g.get('max', max(0, len(g.get('picks', [])))) or 0)
-                mx = st.number_input('Max', min_value=0, max_value=int(antal_matcher), value=max(0, min(int(antal_matcher), mx_default)), step=1, key=f'v12_mtg_max_{i}')
-            draft_rows.append({'active': active, 'name': name, 'text': text, 'min': mn, 'max': mx})
-        submitted = st.form_submit_button('💾 Spara manuella teckengrupper', use_container_width=True)
-
-    if submitted:
-        new_groups = []
-        all_warnings = []
-        for i, row in enumerate(draft_rows, 1):
-            picks, warnings = _parse_manual_group_picks(row.get('text', ''), antal_matcher)
-            all_warnings.extend([f"Teckengrupp {i}: {w}" for w in warnings])
-            n = len(picks)
-            mn = max(0, min(n, int(row.get('min', 0) or 0)))
-            mx = max(mn, min(n, int(row.get('max', n) if row.get('max', None) is not None else n)))
-            new_groups.append({
-                'active': bool(row.get('active')) and n > 0,
-                'name': str(row.get('name') or f'Teckengrupp {i}'),
-                'text': _manual_group_picks_to_text(picks),
-                'picks': picks,
-                'min': mn,
-                'max': mx,
-            })
-        old_sig = _manual_sign_groups_signature(st.session_state.get('v12_manual_sign_groups', []))
-        new_sig = _manual_sign_groups_signature(new_groups)
-        st.session_state['v12_manual_sign_groups'] = new_groups
-        if old_sig != new_sig:
-            # Gamla paket gäller inte längre, eftersom paketmotorn ska räknas efter teckengrupperna.
-            for _k in ['v12_recommended_packages', 'v12_recommended_candidate_audit', 'v12_recommended_meta', 'v12_applied_package_meta', 'v12_applied_package_snapshot']:
-                st.session_state.pop(_k, None)
-            st.session_state['v12_last_result_stale'] = True
-            st.success('Manuella teckengrupper sparade. Rekommenderade paket behöver beräknas om.')
-        else:
-            st.success('Manuella teckengrupper sparade.')
-        for w in all_warnings:
-            st.warning(w)
-        saved = _normalize_manual_sign_groups(new_groups, antal_matcher)
-
-    active_groups = [g for g in saved if g.get('active') and g.get('picks')]
-    if active_groups:
-        summary_df = _manual_sign_groups_summary_df(active_groups, v_m, filter_vec, frame, frame_rows, antal_matcher)
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
-        base_after = _apply_manual_sign_groups_to_rows(frame_rows, active_groups, antal_matcher)
-        hist_mask = _manual_sign_groups_hist_mask(v_m, active_groups, antal_matcher)
-        st.info(f"Manuella teckengrupper aktiva: grundram {len(frame_rows):,} → {len(base_after):,} rader · historik {int(hist_mask.sum())}/{len(hist_mask)}. Paketmotorn räknar på denna förfiltrerade radmassa.".replace(',', ' '))
+    active_groups_preview = [g for g in saved if g.get('active') and _manual_group_choices_from_group(g, antal_matcher)]
+    if active_groups_preview:
+        label = f"🎯 Manuella teckengrupper före paket · {len(active_groups_preview)} aktiva"
     else:
-        st.info('Inga manuella teckengrupper är aktiva. Paketmotorn räknar på hela grundramen.')
-    st.markdown("</div>", unsafe_allow_html=True)
+        label = "🎯 Manuella teckengrupper före paket · inga aktiva"
+
+    with st.expander(label, expanded=False):
+        st.markdown("<div class='v12-card'>", unsafe_allow_html=True)
+        st.markdown("<div class='v12-step'>Steg 3A</div><div class='v12-title'>Manuella teckengrupper före paket</div>", unsafe_allow_html=True)
+        st.caption("Används som förfilter före rekommenderade filterpaket. Välj match i rullgardinen och kryssa i 1/X/2. Ett matchval räknas max som 1 träff, även om du kryssar flera tecken på samma match.")
+
+        with st.form('v12_manual_sign_groups_form'):
+            draft_rows = []
+            for i in range(6):
+                g = saved[i]
+                choices = _manual_group_choices_from_group(g, antal_matcher)
+                while len(choices) < MANUAL_GROUP_SLOTS:
+                    choices.append({'match': 0, 'signs': []})
+                expanded = bool(g.get('active')) or bool(_manual_group_choices_from_group(g, antal_matcher))
+                with st.expander(f"Teckengrupp {i+1}: {g.get('name') or f'Teckengrupp {i+1}'}", expanded=expanded):
+                    c0, c1, c2, c3 = st.columns([0.8, 2.2, 0.8, 0.8])
+                    with c0:
+                        active = st.checkbox('Aktiv', value=bool(g.get('active', False)), key=f'v12_mtg_active_{i}')
+                    with c1:
+                        name = st.text_input('Namn', value=str(g.get('name') or f'Teckengrupp {i+1}'), key=f'v12_mtg_name_{i}')
+                    with c2:
+                        mn = st.number_input('Min', min_value=0, max_value=int(antal_matcher), value=int(g.get('min', 0) or 0), step=1, key=f'v12_mtg_min_{i}')
+                    with c3:
+                        mx_default = int(g.get('max', max(0, _manual_group_choice_count(g))) or 0)
+                        mx = st.number_input('Max', min_value=0, max_value=int(antal_matcher), value=max(0, min(int(antal_matcher), mx_default)), step=1, key=f'v12_mtg_max_{i}')
+
+                    st.caption('Välj upp till 8 matchval. Exempel: M3 med 2 ikryssad + M10 med 1 ikryssad och krav 1–2.')
+                    group_choices = []
+                    for j in range(MANUAL_GROUP_SLOTS):
+                        ch = _render_manual_choice_row(i, j, choices[j], antal_matcher)
+                        group_choices.append(ch)
+                    draft_rows.append({'active': active, 'name': name, 'choices': group_choices, 'min': mn, 'max': mx})
+            submitted = st.form_submit_button('💾 Spara manuella teckengrupper', use_container_width=True)
+
+        if submitted:
+            new_groups = []
+            all_warnings = []
+            for i, row in enumerate(draft_rows, 1):
+                by_match = {}
+                for ch in row.get('choices', []) or []:
+                    try:
+                        m = int(ch.get('match', 0) or 0)
+                    except Exception:
+                        m = 0
+                    signs = _normalize_sign_list(ch.get('signs', []))
+                    if m <= 0 and signs:
+                        all_warnings.append(f"Teckengrupp {i}: tecken är ikryssade utan vald match och ignoreras.")
+                        continue
+                    if m <= 0 or not signs:
+                        continue
+                    if not (1 <= m <= int(antal_matcher)):
+                        all_warnings.append(f"Teckengrupp {i}: M{m} finns inte på kupongen.")
+                        continue
+                    if m not in by_match:
+                        by_match[m] = set()
+                    by_match[m].update(signs)
+                choices = [{'match': int(m), 'signs': [s for s in ['1','X','2'] if s in signs]} for m, signs in sorted(by_match.items())]
+                n = len(choices)
+                mn = max(0, min(n, int(row.get('min', 0) or 0)))
+                mx = max(mn, min(n, int(row.get('max', n) if row.get('max', None) is not None else n)))
+                picks = _manual_group_choices_to_picks(choices)
+                new_groups.append({
+                    'active': bool(row.get('active')) and n > 0,
+                    'name': str(row.get('name') or f'Teckengrupp {i}'),
+                    'text': _manual_group_choices_to_text(choices),
+                    'choices': choices,
+                    'picks': picks,
+                    'min': mn,
+                    'max': mx,
+                })
+            old_sig = _manual_sign_groups_signature(st.session_state.get('v12_manual_sign_groups', []))
+            new_sig = _manual_sign_groups_signature(new_groups)
+            st.session_state['v12_manual_sign_groups'] = new_groups
+            if old_sig != new_sig:
+                # Gamla paket gäller inte längre, eftersom paketmotorn ska räknas efter teckengrupperna.
+                for _k in ['v12_recommended_packages', 'v12_recommended_candidate_audit', 'v12_recommended_meta', 'v12_applied_package_meta', 'v12_applied_package_snapshot']:
+                    st.session_state.pop(_k, None)
+                st.session_state['v12_last_result_stale'] = True
+                st.success('Manuella teckengrupper sparade. Rekommenderade paket behöver beräknas om.')
+            else:
+                st.success('Manuella teckengrupper sparade.')
+            for w in all_warnings:
+                st.warning(w)
+            saved = _normalize_manual_sign_groups(new_groups, antal_matcher)
+
+        active_groups = [g for g in saved if g.get('active') and _manual_group_choices_from_group(g, antal_matcher)]
+        if active_groups:
+            summary_df = _manual_sign_groups_summary_df(active_groups, v_m, filter_vec, frame, frame_rows, antal_matcher)
+            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+            base_after = _apply_manual_sign_groups_to_rows(frame_rows, active_groups, antal_matcher)
+            hist_mask = _manual_sign_groups_hist_mask(v_m, active_groups, antal_matcher)
+            st.info(f"Manuella teckengrupper aktiva: grundram {len(frame_rows):,} → {len(base_after):,} rader · historik {int(hist_mask.sum())}/{len(hist_mask)}. Paketmotorn räknar på denna förfiltrerade radmassa.".replace(',', ' '))
+        else:
+            st.info('Inga manuella teckengrupper är aktiva. Paketmotorn räknar på hela grundramen.')
+        st.markdown("</div>", unsafe_allow_html=True)
+
     return _normalize_manual_sign_groups(st.session_state.get('v12_manual_sign_groups', []), antal_matcher)
 
 
