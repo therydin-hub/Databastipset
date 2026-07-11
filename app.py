@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0be – Spara rekommenderade paket korrekt"
+APP_VERSION = "v12.0bf – Live-rättning och bästa rader"
 
 
 st.markdown("""
@@ -4600,6 +4600,155 @@ def build_correction_hit_distribution_df(result_row, base_rows, filtered_rows, r
     return pd.DataFrame(rows)
 
 
+
+def parse_live_result_row(text, antal_matcher):
+    """Läser pågående facit. 1/X/2 = känd match, -/?/_ = ej rättad ännu."""
+    raw = str(text or "").strip().upper()
+    if not raw:
+        return None, ""
+    chars = []
+    for ch in raw:
+        if ch in {'1', 'X', '2'}:
+            chars.append(ch)
+        elif ch in {'-', '?', '_', '*'}:
+            chars.append('-')
+        elif ch in {' ', ',', ';', '/', '|', ':'}:
+            continue
+        else:
+            # Ignorera övriga separatorer hellre än att krascha på inklistrad text.
+            continue
+    if len(chars) != int(antal_matcher):
+        return None, f"Live-raden måste innehålla exakt {int(antal_matcher)} positioner. Använd 1/X/2 för kända matcher och - för ej rättade. Hittade {len(chars)}."
+    if not any(c in {'1', 'X', '2'} for c in chars):
+        return None, "Minst en match måste vara rättad/påbörjad."
+    return ''.join(chars), ""
+
+
+def live_known_positions(live_row):
+    return [i for i, c in enumerate(str(live_row or '')) if c in {'1', 'X', '2'}]
+
+
+def live_hits_misses(row, live_row):
+    row = normalize_single_row_text(row)
+    known = live_known_positions(live_row)
+    hits = sum(1 for i in known if i < len(row) and row[i] == live_row[i])
+    misses = len(known) - hits
+    return int(hits), int(misses), int(len(known))
+
+
+def build_live_pool_summary_df(live_row, base_rows, filtered_rows, reduced_rows, antal_matcher):
+    """Sammanfattar hur många rader som fortfarande lever för 13/12/11/10 vid live-rättning."""
+    pools = [('Grundram', base_rows), ('Efter filter', filtered_rows)]
+    if reduced_rows:
+        pools.append(('Efter TipsetMatrix', reduced_rows))
+    levels = [int(antal_matcher), int(antal_matcher)-1, int(antal_matcher)-2, int(antal_matcher)-3]
+    levels = [lvl for lvl in levels if lvl >= 0]
+    out = []
+    for label, rows in pools:
+        clean = [normalize_single_row_text(r) for r in (rows or []) if len(normalize_single_row_text(r)) == int(antal_matcher)]
+        total = len(clean)
+        miss_counts = []
+        best_hits = 0
+        best_max = 0
+        for r in clean:
+            hits, misses, known = live_hits_misses(r, live_row)
+            miss_counts.append(misses)
+            best_hits = max(best_hits, hits)
+            best_max = max(best_max, int(antal_matcher) - misses)
+        for lvl in levels:
+            allowed_misses = int(antal_matcher) - lvl
+            n = sum(1 for m in miss_counts if m <= allowed_misses)
+            label_lvl = f"Lever för {lvl}" if lvl == int(antal_matcher) else f"Lever för {lvl}+"
+            out.append({
+                'Steg': label,
+                'Nivå': label_lvl,
+                'Antal rader': int(n),
+                'Andel': f"{100*n/max(1,total):.2f}%" if total else '0.00%',
+                'Bästa live-träff': f"{best_hits}/{len(live_known_positions(live_row))}",
+                'Bästa maxnivå': f"{best_max} rätt" if total else '—',
+            })
+    return pd.DataFrame(out)
+
+
+def live_row_cells_html(row, live_row):
+    row = normalize_single_row_text(row)
+    cells = []
+    for i, ch in enumerate(row):
+        live = live_row[i] if i < len(str(live_row)) else '-'
+        if live not in {'1', 'X', '2'}:
+            style = "background:rgba(128,128,128,.14);border:1px solid rgba(128,128,128,.28);color:inherit;"
+        elif ch == live:
+            style = "background:rgba(40,167,69,.28);border:1px solid rgba(40,167,69,.65);font-weight:800;"
+        else:
+            style = "background:rgba(220,53,69,.25);border:1px solid rgba(220,53,69,.65);font-weight:800;"
+        cells.append(f"<span style='display:inline-block;min-width:1.35rem;text-align:center;margin:.05rem;padding:.12rem .18rem;border-radius:.35rem;{style}'>{html.escape(ch)}</span>")
+    return ''.join(cells)
+
+
+def best_live_rows(rows, live_row, prob_vector, antal_matcher, limit=50):
+    """Returnerar bästa live-rader. Sortering: minst missar, högst träff, högst maxnivå, högst log-probability."""
+    import heapq
+    clean = [normalize_single_row_text(r) for r in (rows or []) if len(normalize_single_row_text(r)) == int(antal_matcher)]
+    items = []
+    for idx, r in enumerate(clean):
+        hits, misses, known = live_hits_misses(r, live_row)
+        max_possible = int(antal_matcher) - misses
+        try:
+            score = row_log_probability(r, prob_vector or [])
+        except Exception:
+            score = 0.0
+        # nlargest: högre är bättre. Missar inverteras.
+        key = (-misses, hits, max_possible, score, -idx)
+        items.append((key, r, hits, misses, max_possible, score))
+    best = heapq.nlargest(int(limit), items, key=lambda x: x[0]) if items else []
+    out = []
+    known_count = len(live_known_positions(live_row))
+    for _, r, hits, misses, max_possible, score in best:
+        out.append({
+            'Rad': r,
+            'Träffbild': live_row_cells_html(r, live_row),
+            'Live-träff': f"{hits}/{known_count}",
+            'Missar': int(misses),
+            'Max möjligt': f"{max_possible} rätt",
+            'Radscore': round(float(score), 4),
+        })
+    return out
+
+
+def render_best_live_rows_table(rows_info, title="Bästa levande rader"):
+    if not rows_info:
+        st.info("Inga rader att visa.")
+        return
+    html_rows = []
+    for i, item in enumerate(rows_info, 1):
+        html_rows.append(
+            "<tr>"
+            f"<td style='white-space:nowrap;text-align:right;padding:.35rem .5rem;'>{i}</td>"
+            f"<td style='white-space:nowrap;padding:.35rem .5rem;font-family:monospace;'>{html.escape(item.get('Rad',''))}</td>"
+            f"<td style='white-space:nowrap;padding:.35rem .5rem;'>{item.get('Träffbild','')}</td>"
+            f"<td style='white-space:nowrap;text-align:center;padding:.35rem .5rem;'>{html.escape(str(item.get('Live-träff','')))}</td>"
+            f"<td style='white-space:nowrap;text-align:center;padding:.35rem .5rem;'>{html.escape(str(item.get('Missar','')))}</td>"
+            f"<td style='white-space:nowrap;text-align:center;padding:.35rem .5rem;'>{html.escape(str(item.get('Max möjligt','')))}</td>"
+            "</tr>"
+        )
+    table = (
+        f"<div style='overflow-x:auto;'>"
+        f"<table style='border-collapse:collapse;width:100%;font-size:.92rem;'>"
+        f"<caption style='caption-side:top;text-align:left;font-weight:800;margin:.4rem 0;'>{html.escape(title)}</caption>"
+        "<thead><tr>"
+        "<th style='text-align:right;padding:.35rem .5rem;border-bottom:1px solid rgba(128,128,128,.35);'>#</th>"
+        "<th style='text-align:left;padding:.35rem .5rem;border-bottom:1px solid rgba(128,128,128,.35);'>Rad</th>"
+        "<th style='text-align:left;padding:.35rem .5rem;border-bottom:1px solid rgba(128,128,128,.35);'>Träffbild</th>"
+        "<th style='text-align:center;padding:.35rem .5rem;border-bottom:1px solid rgba(128,128,128,.35);'>Live</th>"
+        "<th style='text-align:center;padding:.35rem .5rem;border-bottom:1px solid rgba(128,128,128,.35);'>Missar</th>"
+        "<th style='text-align:center;padding:.35rem .5rem;border-bottom:1px solid rgba(128,128,128,.35);'>Max</th>"
+        "</tr></thead><tbody>"
+        + ''.join(html_rows) +
+        "</tbody></table></div>"
+    )
+    st.markdown(table, unsafe_allow_html=True)
+
+
 def _format_filter_value(v, decimals=0):
     try:
         if int(decimals) == 0:
@@ -7124,54 +7273,105 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
 
         st.markdown("---")
         st.markdown("### 🧾 Rättningsmodul")
-        st.caption("Skriv in rätt rad manuellt. Rättningen använder senast körda grundram, filtermassa och TipsetMatrix-rader — den kör inte om filter eller reducering.")
-        with st.form("v12_correction_form", clear_on_submit=False):
-            corr_txt = st.text_input("Rätt rad", value=st.session_state.get('v12_correction_input', ''), placeholder="Exempel: 1X2X1122X... eller 1,X,2,X,...")
-            corr_submit = st.form_submit_button("Rätta system")
-        if corr_submit:
-            rr, err = parse_result_row(corr_txt, antal_matcher)
-            if err:
-                st.error(err)
-                st.session_state['v12_correction_row'] = ''
-            else:
-                st.session_state['v12_correction_input'] = corr_txt
-                st.session_state['v12_correction_row'] = rr
-        corr_row = st.session_state.get('v12_correction_row')
-        if corr_row:
-            base_rows_for_corr = frame_rows
-            filtered_rows_for_corr = filtered_rows
-            reduced_rows_for_corr = reduced_rows
-            corr = build_facit_check(corr_row, frame, base_rows_for_corr, filtered_rows_for_corr, reduced_rows_for_corr, antal_matcher)
-            cA, cB, cC, cD, cE = st.columns(5)
-            cA.metric("I grundram", yes_no(corr.get('I grundram')))
-            cB.metric("Efter filter", yes_no(corr.get('Efter filter')))
-            cC.metric("Efter TipsetMatrix", yes_no(corr.get('Efter TipsetMatrix')) if reduced_rows_for_corr else "Ej körd")
-            cD.metric("Bästa rätt", corr.get('Bästa rätt efter TipsetMatrix', 0) if reduced_rows_for_corr else "—")
-            cE.metric("12+", yes_no(corr.get('12+ uppnått')) if reduced_rows_for_corr else "—")
+        st.caption("Rättningen använder senast körda grundram, filtermassa och TipsetMatrix-rader — den kör inte om filter eller reducering.")
+        correction_mode = st.radio("Rättningsläge", ["Live-rättning / endast påbörjade matcher", "Sluträttning"], horizontal=True, key="v12_correction_mode")
 
-            st.markdown("**Antal rader med 13/12/11/10 rätt**")
-            dist_df = build_correction_hit_distribution_df(corr_row, base_rows_for_corr, filtered_rows_for_corr, reduced_rows_for_corr, antal_matcher)
-            st.dataframe(dist_df, use_container_width=True, hide_index=True)
+        if correction_mode.startswith("Live"):
+            st.caption("Skriv 1/X/2 för matcher som ska rättas och - för matcher som inte ska räknas ännu. Exempel: XX2--1---X---")
+            live_txt = st.text_input("Live-facit", value=st.session_state.get('v12_live_correction_input', ''), placeholder="Exempel: XX2--1---X---")
+            live_row, live_err = parse_live_result_row(live_txt, antal_matcher)
+            if live_txt and live_err:
+                st.error(live_err)
+            if live_row:
+                st.session_state['v12_live_correction_input'] = live_txt
+                known_count = len(live_known_positions(live_row))
+                base_rows_for_corr = frame_rows
+                filtered_rows_for_corr = filtered_rows
+                reduced_rows_for_corr = reduced_rows
+                cA, cB, cC, cD = st.columns(4)
+                cA.metric("Rättade matcher", f"{known_count}/{antal_matcher}")
+                # Bästa rad efter filter/slutrader
+                best_pool = reduced_rows_for_corr if reduced_rows_for_corr else filtered_rows_for_corr
+                top_one = best_live_rows(best_pool, live_row, filter_vec, antal_matcher, limit=1)
+                if top_one:
+                    cB.metric("Bästa live-träff", top_one[0].get('Live-träff', '—'))
+                    cC.metric("Bästa maxnivå", top_one[0].get('Max möjligt', '—'))
+                    cD.metric("Missar", top_one[0].get('Missar', '—'))
+                else:
+                    cB.metric("Bästa live-träff", "—")
+                    cC.metric("Bästa maxnivå", "—")
+                    cD.metric("Missar", "—")
 
-            if reduced_rows_for_corr and corr.get('Närmaste reducerade rader'):
-                with st.expander("Visa närmaste reducerade rader", expanded=False):
-                    nearest_df = pd.DataFrame({
-                        'Rad': corr.get('Närmaste reducerade rader'),
-                        'Rätt': [sum(1 for a, b in zip(corr_row, r) if a == b) for r in corr.get('Närmaste reducerade rader')],
-                    })
-                    st.dataframe(nearest_df, use_container_width=True, hide_index=True)
+                st.markdown("**Rader som fortfarande lever**")
+                live_summary_df = build_live_pool_summary_df(live_row, base_rows_for_corr, filtered_rows_for_corr, reduced_rows_for_corr, antal_matcher)
+                st.dataframe(live_summary_df, use_container_width=True, hide_index=True)
 
-            st.markdown("**Filterträff/miss på rätt rad**")
-            filter_corr_df = build_filter_correction_df(corr_row, specs, res.get('settings', settings), res.get('group_reqs', group_reqs))
-            if filter_corr_df.empty:
-                st.info("Inga aktiva filter att rätta mot.")
-            else:
-                st.dataframe(filter_corr_df, use_container_width=True, hide_index=True)
+                top_limit = st.slider("Visa antal bästa rader", 10, 200, 50, 10, key="v12_live_top_limit")
+                if reduced_rows_for_corr:
+                    render_best_live_rows_table(
+                        best_live_rows(reduced_rows_for_corr, live_row, filter_vec, antal_matcher, limit=top_limit),
+                        title="Bästa inlämnade/TipsetMatrix-rader"
+                    )
+                    with st.expander("Visa bästa rader efter filtermassan", expanded=False):
+                        render_best_live_rows_table(
+                            best_live_rows(filtered_rows_for_corr, live_row, filter_vec, antal_matcher, limit=top_limit),
+                            title="Bästa rader efter filter"
+                        )
+                else:
+                    render_best_live_rows_table(
+                        best_live_rows(filtered_rows_for_corr, live_row, filter_vec, antal_matcher, limit=top_limit),
+                        title="Bästa rader efter filter"
+                    )
+                st.caption("Grön = träff på rättad match. Röd = miss på rättad match. Grå = matchen räknas inte ännu.")
 
-            group_corr_df = build_group_correction_df(corr_row, specs, res.get('settings', settings), res.get('group_reqs', group_reqs))
-            if not group_corr_df.empty:
-                st.markdown("**Gruppträffar**")
-                st.dataframe(group_corr_df, use_container_width=True, hide_index=True)
+        else:
+            with st.form("v12_correction_form", clear_on_submit=False):
+                corr_txt = st.text_input("Rätt rad", value=st.session_state.get('v12_correction_input', ''), placeholder="Exempel: 1X2X1122X... eller 1,X,2,X,...")
+                corr_submit = st.form_submit_button("Rätta system")
+            if corr_submit:
+                rr, err = parse_result_row(corr_txt, antal_matcher)
+                if err:
+                    st.error(err)
+                    st.session_state['v12_correction_row'] = ''
+                else:
+                    st.session_state['v12_correction_input'] = corr_txt
+                    st.session_state['v12_correction_row'] = rr
+            corr_row = st.session_state.get('v12_correction_row')
+            if corr_row:
+                base_rows_for_corr = frame_rows
+                filtered_rows_for_corr = filtered_rows
+                reduced_rows_for_corr = reduced_rows
+                corr = build_facit_check(corr_row, frame, base_rows_for_corr, filtered_rows_for_corr, reduced_rows_for_corr, antal_matcher)
+                cA, cB, cC, cD, cE = st.columns(5)
+                cA.metric("I grundram", yes_no(corr.get('I grundram')))
+                cB.metric("Efter filter", yes_no(corr.get('Efter filter')))
+                cC.metric("Efter TipsetMatrix", yes_no(corr.get('Efter TipsetMatrix')) if reduced_rows_for_corr else "Ej körd")
+                cD.metric("Bästa rätt", corr.get('Bästa rätt efter TipsetMatrix', 0) if reduced_rows_for_corr else "—")
+                cE.metric("12+", yes_no(corr.get('12+ uppnått')) if reduced_rows_for_corr else "—")
+
+                st.markdown("**Antal rader med 13/12/11/10 rätt**")
+                dist_df = build_correction_hit_distribution_df(corr_row, base_rows_for_corr, filtered_rows_for_corr, reduced_rows_for_corr, antal_matcher)
+                st.dataframe(dist_df, use_container_width=True, hide_index=True)
+
+                if reduced_rows_for_corr and corr.get('Närmaste reducerade rader'):
+                    with st.expander("Visa närmaste reducerade rader", expanded=False):
+                        nearest_df = pd.DataFrame({
+                            'Rad': corr.get('Närmaste reducerade rader'),
+                            'Rätt': [sum(1 for a, b in zip(corr_row, r) if a == b) for r in corr.get('Närmaste reducerade rader')],
+                        })
+                        st.dataframe(nearest_df, use_container_width=True, hide_index=True)
+
+                st.markdown("**Filterträff/miss på rätt rad**")
+                filter_corr_df = build_filter_correction_df(corr_row, specs, res.get('settings', settings), res.get('group_reqs', group_reqs))
+                if filter_corr_df.empty:
+                    st.info("Inga aktiva filter att rätta mot.")
+                else:
+                    st.dataframe(filter_corr_df, use_container_width=True, hide_index=True)
+
+                group_corr_df = build_group_correction_df(corr_row, specs, res.get('settings', settings), res.get('group_reqs', group_reqs))
+                if not group_corr_df.empty:
+                    st.markdown("**Gruppträffar**")
+                    st.dataframe(group_corr_df, use_container_width=True, hide_index=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 else:
