@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0bg – Rerun-kontroll och formulär"
+APP_VERSION = "v12.0bi – Exakt beslutsmotor + cache"
 
 
 st.markdown("""
@@ -52,6 +52,31 @@ def tm_download_button(label, data, file_name, mime, **kwargs):
             mime=mime,
             **kwargs,
         )
+
+
+# --- v12.0bh: enkel intern profiler för att hitta flaskhalsar i Streamlit-reruns ---
+def _perf_enabled():
+    return bool(st.session_state.get('v12_show_perf_profile', False))
+
+def _perf_mark(label, start_time, bucket='v12_perf_marks'):
+    if not _perf_enabled():
+        return time.perf_counter()
+    now = time.perf_counter()
+    st.session_state.setdefault(bucket, []).append({'Steg': label, 'Sekunder': round(now - start_time, 3)})
+    return now
+
+def _short_hash_items(items, limit=1200):
+    """Billig signatur för listor som inte ska läggas helt i cache-nycklar."""
+    try:
+        items = list(items or [])
+        if len(items) <= limit:
+            sample = items
+        else:
+            step = max(1, len(items) // limit)
+            sample = items[::step][:limit]
+        return hash(tuple(sample))
+    except Exception:
+        return 0
 
 
 # ==========================================
@@ -4960,8 +4985,14 @@ def _render_inline_filter_info(spec, interval, frame_rows, frame, antal_matcher)
 
     row_values = []
     pass_rows = []
-    if frame_rows is not None and len(frame_rows) <= 30000:
-        for r in frame_rows:
+    sampled_info = False
+    rows_for_info = []
+    if frame_rows is not None:
+        if len(frame_rows) > 3000:
+            rows_for_info, sampled_info = _sample_rows_for_macro(frame_rows, max_items=3000)
+        else:
+            rows_for_info = frame_rows
+        for r in rows_for_info:
             try:
                 val = _spec_value(r, spec)
                 row_values.append(val)
@@ -4978,9 +5009,14 @@ def _render_inline_filter_info(spec, interval, frame_rows, frame, antal_matcher)
     rec_txt = _display_interval(rec_interval, spec['decimals'])
     cur_txt = _display_interval(interval, spec['decimals'])
     if row_values:
-        red_pct = 100 - 100 * len(pass_rows) / max(1, len(frame_rows))
-        frame_txt = f"{len(frame_rows):,} → {len(pass_rows):,}".replace(',', ' ')
-        frame_sub = f"Reducerar {red_pct:.1f}% av grundramen"
+        red_pct = 100 - 100 * len(pass_rows) / max(1, len(rows_for_info))
+        if sampled_info:
+            est_pass = int(round(len(frame_rows) * len(pass_rows) / max(1, len(rows_for_info))))
+            frame_txt = f"≈ {len(frame_rows):,} → {est_pass:,}".replace(',', ' ')
+            frame_sub = f"Uppskattar reducering {red_pct:.1f}% på 3 000-raders urval"
+        else:
+            frame_txt = f"{len(frame_rows):,} → {len(pass_rows):,}".replace(',', ' ')
+            frame_sub = f"Reducerar {red_pct:.1f}% av grundramen"
     else:
         frame_txt = "—"
         frame_sub = "Spara grundram för exakt effekt"
@@ -6520,9 +6556,19 @@ with st.sidebar:
         st.markdown("**Spara spelfil/filterpaket**")
         st.caption("Spara blir aktivt när kupong, grundram och filtercentral är laddade.")
 
+    st.checkbox("Visa tidsprofil", value=bool(st.session_state.get('v12_show_perf_profile', False)), key='v12_show_perf_profile', help="Visar vilka huvudsteg som tar tid vid varje sidkörning.")
     if st.button("🧹 Rensa cache", use_container_width=True):
         st.cache_data.clear()
+        for _k in ['v12_specs_cache', 'v12_specs_cache_sig']:
+            st.session_state.pop(_k, None)
         st.success("Cache tömd.")
+
+# v12.0bh performance profile resets per rerun
+if _perf_enabled():
+    st.session_state['v12_perf_marks'] = []
+    _perf_start = time.perf_counter()
+else:
+    _perf_start = time.perf_counter()
 
 # Step 1 – kupongdata / historik
 st.markdown("<div class='v12-card'>", unsafe_allow_html=True)
@@ -6706,28 +6752,48 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     # använder hela frame_rows.
     enable_supermakro = True
 
+    # v12.0bi: Beslutskritiska filterrekommendationer räknas på hela grundramen.
+    # Prestandaoptimeringen får inte ändra vilka intervall/paket som rekommenderas.
+    # Urval används bara i separata visningsdiagnoser/popovers, inte för att välja filterintervall.
     spec_candidate_rows = frame_rows
     spec_sampled_for_specs = False
-    if frame_rows is not None and len(frame_rows) > 20000:
-        # Rekommendationer behöver bara en snabb uppskattning av kvar rad %.
-        # Filtrering/reducering längre ned kör fortfarande på hela frame_rows.
-        spec_candidate_rows, spec_sampled_for_specs = _sample_rows_for_macro(frame_rows, max_items=3000)
 
-    specs = build_clean_filter_specs(
-        v_m,
-        filter_vec,
-        antal_matcher,
-        slider_u_count=top_fav_count,
-        target_hist_pct=filter_hist_target_pct,
-        u_rows=None,
-        hist_df=_streck_hist_db,
-        max_shock_pct=max_shock_pct,
-        candidate_rows=spec_candidate_rows,
-        include_supermakro=enable_supermakro,
+    _t_specs = time.perf_counter()
+    _spec_sig = (
+        int(antal_matcher),
+        int(filter_hist_target_pct),
+        int(max_shock_pct),
+        bool(enable_supermakro),
+        tuple(round(float(x), 4) for x in list(filter_vec or [])),
+        tuple(str(x) for x in list(v_m.get('Correct_Row', []))[:120]),
+        int(len(v_m)),
+        int(len(frame_rows or [])),
+        _short_hash_items(spec_candidate_rows),
+        int(len(_streck_hist_db)) if isinstance(_streck_hist_db, pd.DataFrame) else 0,
     )
+    if st.session_state.get('v12_specs_cache_sig') == _spec_sig and st.session_state.get('v12_specs_cache') is not None:
+        specs = st.session_state['v12_specs_cache']
+        specs_from_cache = True
+    else:
+        specs = build_clean_filter_specs(
+            v_m,
+            filter_vec,
+            antal_matcher,
+            slider_u_count=top_fav_count,
+            target_hist_pct=filter_hist_target_pct,
+            u_rows=None,
+            hist_df=_streck_hist_db,
+            max_shock_pct=max_shock_pct,
+            candidate_rows=spec_candidate_rows,
+            include_supermakro=enable_supermakro,
+        )
+        st.session_state['v12_specs_cache_sig'] = _spec_sig
+        st.session_state['v12_specs_cache'] = specs
+        specs_from_cache = False
     st.session_state['v12_specs'] = specs
-    if spec_sampled_for_specs:
-        st.caption(f"Prestandaläge: filterrekommendationer uppskattar kvarvarande radmassa på ett stabilt urval av {len(spec_candidate_rows):,} av {len(frame_rows):,} grundrader. Själva filtreringen och TipsetMatrix använder hela grundramen.".replace(',', ' '))
+    _t_perf = _perf_mark('Bygga/läsa filterdefinitioner', _t_specs)
+    cache_txt = 'cache' if specs_from_cache else 'ny beräkning'
+    st.caption(f"Exakt läge: filterrekommendationer och paketintervall räknas på hela grundramen ({len(frame_rows):,} rader, {cache_txt}). Snabburval används endast i vissa informationsrutor/diagnoser, aldrig för slutlig filtrering eller reducering.".replace(',', ' '))
     with ctrl_b:
         if st.button("Återställ alla filter till Av", use_container_width=True, key="v12_reset_all_filters_off"):
             for _k in list(st.session_state.keys()):
@@ -6964,69 +7030,88 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     mode_options = ['Av', 'Tvingat'] + [f'Grupp {i}' for i in range(1, 7)]
     cats = _ordered_categories_from_specs(specs)
 
+    def _range_key_for_spec(_spec):
+        return f"filter_range_{_spec.get('key')}_h{filter_hist_target_pct}_tf{top_fav_count}"
+
+    def _default_interval_for_spec(_spec):
+        lo, hi = _spec['bounds']
+        default_interval = _current_interval_for_spec(_spec)
+        try:
+            return (max(lo, float(default_interval[0])), min(hi, float(default_interval[1])))
+        except Exception:
+            return _spec['default_interval']
+
+    # v12.0bh: rendera bara vald filterflik. Streamlit kör annars även stängda expanders,
+    # vilket gjorde att alla sliders, popovers och diagnoser byggdes vid varje rerun.
+    selected_cat = st.radio(
+        "Visa filterkategori",
+        cats,
+        index=cats.index(st.session_state.get('v12_selected_filter_category', cats[0])) if st.session_state.get('v12_selected_filter_category', cats[0]) in cats else 0,
+        horizontal=True,
+        key='v12_selected_filter_category',
+    )
+
     settings = {}
     with st.form("v12_filtercentral_form"):
-        st.caption("Ändra flera filter utan att sidan laddar om. Tryck Applicera filterändringar när du är klar.")
-        for ci, cat in enumerate(cats):
-            with st.expander(f"📂 {cat}", expanded=(ci == 0)):
-                cat_specs = [s for s in specs if s['category'] == cat]
-                for spec in cat_specs:
-                    k = spec['key']
-                    mode_key = f'filter_mode_{k}'
-                    # Viktigt: range_key innehåller träffmålet.
-                    # Streamlit återanvänder annars gamla slider-värden från session_state och ignorerar nytt default-value.
-                    # Det var därför "Rek. intervall" kunde vara 95/100%, medan "Nu valt" låg kvar på gammalt 90%-intervall.
-                    range_key = f'filter_range_{k}_h{filter_hist_target_pct}_tf{top_fav_count}'
-                    default_mode = st.session_state.get(mode_key, 'Av')
-                    lo, hi = spec['bounds']
-                    dec = spec['decimals']
-                    default_interval = _current_interval_for_spec(spec)
-                    try:
-                        val = (max(lo, float(default_interval[0])), min(hi, float(default_interval[1])))
-                    except Exception:
-                        val = spec['default_interval']
-                    if range_key in st.session_state:
-                        try:
-                            cur = st.session_state[range_key]
-                            if float(cur[0]) < float(lo) or float(cur[1]) > float(hi):
-                                st.session_state[range_key] = val
-                        except Exception:
-                            st.session_state[range_key] = val
-                    c1, c2, c3, c4 = st.columns([1.35, 1.0, 3.0, 0.45])
-                    with c1:
-                        st.markdown(f"**{spec['name']}**")
-                        hp, ht, pct = _hist_pass_count(spec['hist_values'], spec['default_interval'])
-                        st.caption(f"Rek: {_display_interval(spec['default_interval'], dec)} · {hp}/{ht}")
-                    with c2:
-                        mode = st.selectbox(
-                            "Läge",
-                            mode_options,
-                            index=mode_options.index(default_mode) if default_mode in mode_options else 0,
-                            key=mode_key,
-                            label_visibility="collapsed",
-                        )
-                    with c3:
-                        step = 1 if dec == 0 else (0.01 if dec >= 2 else 0.1)
-                        if dec == 0:
-                            lo_i, hi_i = int(lo), int(hi)
-                            val_i = (int(round(val[0])), int(round(val[1])))
-                            rng = st.slider("Intervall", lo_i, hi_i, val_i, step=1, key=range_key, label_visibility="collapsed")
-                        else:
-                            rng = st.slider("Intervall", float(lo), float(hi), (float(val[0]), float(val[1])), step=step, key=range_key, label_visibility="collapsed")
-                    with c4:
-                        # Popover öppnas/stängs i klienten och triggar normalt inte en full sidkörning,
-                        # till skillnad från en vanlig knapp. Statistik visas därmed nära filtret utan
-                        # separat scrollsektion och utan att Auto/TipsetMatrix körs om.
-                        if hasattr(st, "popover"):
-                            with st.popover("ℹ️", help="Visa frekvenstabell, träff och reducering för detta filter"):
-                                _render_inline_filter_info(spec, rng, frame_rows, frame, antal_matcher)
-                        else:
-                            with st.expander("ℹ️", expanded=False):
-                                _render_inline_filter_info(spec, rng, frame_rows, frame, antal_matcher)
-                    _render_favorite_shock_diagnostics(spec, rng, frame, filter_vec, antal_matcher)
-                    settings[k] = {'mode': mode, 'interval': rng}
-                    st.divider()
+        st.caption("Ändra flera filter i vald kategori och tryck Applicera filterändringar. Övriga filter behåller sina sparade lägen/intervall.")
+        st.markdown(f"### 📂 {selected_cat}")
+        cat_specs = [s for s in specs if s['category'] == selected_cat]
+        for spec in cat_specs:
+            k = spec['key']
+            mode_key = f'filter_mode_{k}'
+            range_key = _range_key_for_spec(spec)
+            default_mode = st.session_state.get(mode_key, 'Av')
+            lo, hi = spec['bounds']
+            dec = spec['decimals']
+            val = _default_interval_for_spec(spec)
+            if range_key in st.session_state:
+                try:
+                    cur = st.session_state[range_key]
+                    if float(cur[0]) < float(lo) or float(cur[1]) > float(hi):
+                        st.session_state[range_key] = val
+                except Exception:
+                    st.session_state[range_key] = val
+            c1, c2, c3, c4 = st.columns([1.35, 1.0, 3.0, 0.45])
+            with c1:
+                st.markdown(f"**{spec['name']}**")
+                hp, ht, pct = _hist_pass_count(spec['hist_values'], spec['default_interval'])
+                st.caption(f"Rek: {_display_interval(spec['default_interval'], dec)} · {hp}/{ht}")
+            with c2:
+                mode = st.selectbox(
+                    "Läge",
+                    mode_options,
+                    index=mode_options.index(default_mode) if default_mode in mode_options else 0,
+                    key=mode_key,
+                    label_visibility="collapsed",
+                )
+            with c3:
+                step = 1 if dec == 0 else (0.01 if dec >= 2 else 0.1)
+                if dec == 0:
+                    lo_i, hi_i = int(lo), int(hi)
+                    val_i = (int(round(val[0])), int(round(val[1])))
+                    rng = st.slider("Intervall", lo_i, hi_i, val_i, step=1, key=range_key, label_visibility="collapsed")
+                else:
+                    rng = st.slider("Intervall", float(lo), float(hi), (float(val[0]), float(val[1])), step=step, key=range_key, label_visibility="collapsed")
+            with c4:
+                if hasattr(st, "popover"):
+                    with st.popover("ℹ️", help="Visa frekvenstabell, träff och reducering för detta filter"):
+                        _render_inline_filter_info(spec, rng, frame_rows, frame, antal_matcher)
+                else:
+                    with st.expander("ℹ️", expanded=False):
+                        _render_inline_filter_info(spec, rng, frame_rows, frame, antal_matcher)
+            _render_favorite_shock_diagnostics(spec, rng, frame, filter_vec, antal_matcher)
+            st.divider()
         filter_apply = st.form_submit_button("✅ Applicera filterändringar", use_container_width=True)
+
+    # Samla inställningar för ALLA filter, inte bara den kategori som renderades.
+    for spec in specs:
+        k = spec['key']
+        mode_key = f'filter_mode_{k}'
+        range_key = _range_key_for_spec(spec)
+        settings[k] = {
+            'mode': st.session_state.get(mode_key, 'Av'),
+            'interval': st.session_state.get(range_key, _default_interval_for_spec(spec)),
+        }
     if filter_apply:
         st.session_state['v12_last_result_stale'] = True
         st.success("Filterändringar applicerade. Kör filtrering + reducering när du vill räkna om systemet.")
@@ -7116,27 +7201,34 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     if active_count and hpkg <= max(3, int(0.25 * max(1, htot))):
         st.warning("Samlad historikträff är mycket låg. Det betyder oftast att för många filter är Tvingade samtidigt. Lägg över närliggande filter i Grupp eller bredda intervallen.")
 
-    with st.expander("🔬 Samlad historikträff – rad-för-rad diagnos", expanded=False):
-        if active_count:
-            diag_df = _active_package_diagnostic_df(v_m, specs, settings, group_reqs, antal_matcher, max_rows=htot)
-            if not diag_df.empty:
-                st.dataframe(diag_df, use_container_width=True, hide_index=True)
-                st.caption("✅ Träff betyder att den historiska vinnarraden klarade hela aktiva filterpaketet. ❌ Miss visar vilket tvingat filter eller gruppkrav som stoppade raden.")
+    with st.expander("🔬 Diagnoser och översikter", expanded=False):
+        st.caption("Prestandaläge: tunga diagnoser räknas bara när du aktivt väljer dem här.")
+        show_hist_diag = st.checkbox("Visa samlad historikträff rad-för-rad", value=False, key="v12_show_hist_diag")
+        show_group_diag = st.checkbox("Visa gruppdiagnos", value=False, key="v12_show_group_diag")
+        show_filter_overview = st.checkbox("Visa filteröversikt med reducering", value=False, key="v12_show_filter_overview")
+        if show_hist_diag:
+            if active_count:
+                diag_df = _active_package_diagnostic_df(v_m, specs, settings, group_reqs, antal_matcher, max_rows=htot)
+                if not diag_df.empty:
+                    st.dataframe(diag_df, use_container_width=True, hide_index=True)
+                    st.caption("✅ Träff betyder att den historiska vinnarraden klarade hela aktiva filterpaketet. ❌ Miss visar vilket tvingat filter eller gruppkrav som stoppade raden.")
+                else:
+                    st.info("Ingen historikdiagnos kunde byggas.")
             else:
-                st.info("Ingen historikdiagnos kunde byggas.")
-        else:
-            st.info("Aktivera minst ett filter för att se samlad historikdiagnos.")
-
-    with st.expander("🧩 Gruppdiagnos – min/max och faktisk effekt", expanded=False):
-        group_diag_df = _active_group_diagnostic_df(specs, settings, group_reqs, frame_rows=frame_rows)
-        if not group_diag_df.empty:
-            st.dataframe(group_diag_df, use_container_width=True, hide_index=True)
-            st.caption("Gruppdiagnosen räknar gruppens min/max-krav separat från tvingade filter. Grundramseffekt visas exakt när grundramen är högst 30 000 rader.")
-        else:
-            st.info("Inga filter ligger i Grupp 1–6 just nu.")
-
-    with st.expander("📋 Filteröversikt", expanded=False):
-        st.dataframe(_build_filter_summary_df(specs, settings, group_reqs, rows=frame_rows), use_container_width=True, hide_index=True)
+                st.info("Aktivera minst ett filter för att se samlad historikdiagnos.")
+        if show_group_diag:
+            group_diag_df = _active_group_diagnostic_df(specs, settings, group_reqs, frame_rows=frame_rows)
+            if not group_diag_df.empty:
+                st.dataframe(group_diag_df, use_container_width=True, hide_index=True)
+                st.caption("Gruppdiagnosen räknar gruppens min/max-krav separat från tvingade filter.")
+            else:
+                st.info("Inga filter ligger i Grupp 1–6 just nu.")
+        if show_filter_overview:
+            overview_rows = frame_rows
+            if frame_rows is not None and len(frame_rows) > 5000:
+                overview_rows, _ = _sample_rows_for_macro(frame_rows, max_items=5000)
+                st.caption("Filteröversiktens reducering uppskattas på 5 000 rader. Kör filtrering för exakt resultat.")
+            st.dataframe(_build_filter_summary_df(specs, settings, group_reqs, rows=overview_rows), use_container_width=True, hide_index=True)
 
     # Filterinfo visas nu i popover direkt på respektive filter. Att öppna/stänga popover triggar normalt inte rerun.
     st.markdown("</div>", unsafe_allow_html=True)
@@ -7401,3 +7493,15 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
 
 else:
     st.info("Läs in kupongdata och spara grundramen för att öppna filtercentralen.")
+
+
+# v12.0bh: tidsprofil för felsökning av långsamma reruns
+try:
+    if _perf_enabled():
+        _perf_mark('Total sidkörning', _perf_start)
+        _marks = st.session_state.get('v12_perf_marks', [])
+        if _marks:
+            with st.sidebar.expander('⏱ Tidsprofil senaste körning', expanded=False):
+                st.dataframe(pd.DataFrame(_marks), use_container_width=True, hide_index=True)
+except Exception:
+    pass
