@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0br – Rekfilter utan manuell histmask"
+APP_VERSION = "v12.0bs – Paketkontroll utan manuell mask"
 
 
 st.markdown("""
@@ -4531,6 +4531,12 @@ def _hist_package_passes(v_m, specs, settings, group_reqs, manual_sign_groups=No
     Därför räknar denna funktion med spec['hist_values'][i] för varje av de
     liknande historiska omgångarna. Det gör Filtercentralens samlade träff och
     paketmotorns träff jämförbara.
+
+    v12.0bs: manuella teckengrupper ingår inte i denna träff. De är spelarens
+    egna förfilter och visas med egen historikträff. Filtercentralens samlade
+    träff ska därför kunna jämföras direkt med rekommenderat paket.
+    Parametrarna manual_sign_groups/antal_matcher finns kvar för bakåtkompatibilitet
+    men används inte här.
     """
     try:
         htot = int(max([len(s.get('hist_values', [])) for s in specs] + [len(v_m)]))
@@ -4555,17 +4561,11 @@ def _hist_package_passes(v_m, specs, settings, group_reqs, manual_sign_groups=No
         interval = settings.get(spec.get('key'), {}).get('interval', spec.get('default_interval'))
         return in_range(vals[idx], interval)
 
-    manual_mask = None
-    if manual_sign_groups and antal_matcher is not None:
-        try:
-            manual_mask = _manual_sign_groups_hist_mask(v_m, manual_sign_groups, antal_matcher)
-        except Exception:
-            manual_mask = None
-
+    # Manuella teckengrupper ska inte sänka Filtercentralens/paketets
+    # historikträff. De påverkar bara aktuell radmassa före paketmotorn och
+    # visas separat i panelen för manuella teckengrupper.
     passed = 0
     for i in range(htot):
-        if manual_mask is not None and (i >= len(manual_mask) or not bool(manual_mask[i])):
-            continue
         ok = True
         for spec in forced_specs:
             if not hist_value_pass(spec, i):
@@ -8030,7 +8030,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     active_count = sum(1 for v in settings.values() if v['mode'] != 'Av')
     forced_count = sum(1 for v in settings.values() if v['mode'] == 'Tvingat')
     group_count = active_count - forced_count
-    hpkg, htot = _hist_package_passes(v_m, specs, settings, group_reqs, manual_sign_groups=manual_sign_groups, antal_matcher=antal_matcher)
+    hpkg, htot = _hist_package_passes(v_m, specs, settings, group_reqs)
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Aktiva filter", active_count)
