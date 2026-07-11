@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0bq – Stabil rättningsinput"
+APP_VERSION = "v12.0br – Rekfilter utan manuell histmask"
 
 
 st.markdown("""
@@ -3389,7 +3389,7 @@ def _render_manual_sign_groups_panel(v_m, filter_vec, frame, frame_rows, antal_m
             st.dataframe(summary_df, use_container_width=True, hide_index=True)
             base_after = _apply_manual_sign_groups_to_rows(frame_rows, active_groups, antal_matcher)
             hist_mask = _manual_sign_groups_hist_mask(v_m, active_groups, antal_matcher)
-            st.info(f"Manuella teckengrupper aktiva: grundram {len(frame_rows):,} → {len(base_after):,} rader · historik {int(hist_mask.sum())}/{len(hist_mask)}. Paketmotorn räknar på denna förfiltrerade radmassa.".replace(',', ' '))
+            st.info(f"Manuella teckengrupper aktiva: grundram {len(frame_rows):,} → {len(base_after):,} rader · manuell historik {int(hist_mask.sum())}/{len(hist_mask)}. Paketmotorn räknar radreducering på denna förfiltrerade radmassa, men rekommenderade filters träffbild visas separat mot alla {len(hist_mask)} liknande omgångar.".replace(',', ' '))
         else:
             st.info('Inga manuella teckengrupper är aktiva. Paketmotorn räknar på hela grundramen.')
         st.markdown("</div>", unsafe_allow_html=True)
@@ -6592,15 +6592,13 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
     ftot = len(frame_rows)
     if htot == 0 or ftot == 0:
         return []
-    if manual_hist_mask is not None:
-        try:
-            pre_hist_mask = np.array(manual_hist_mask, dtype=bool)
-            if len(pre_hist_mask) != htot:
-                pre_hist_mask = np.ones(htot, dtype=bool)
-        except Exception:
-            pre_hist_mask = np.ones(htot, dtype=bool)
-    else:
-        pre_hist_mask = np.ones(htot, dtype=bool)
+    # v12.0br: manuella teckengrupper är spelarens eget förfilter och ska inte
+    # sänka träffbilden i rekommenderade filterpaket. Paketmotorn räknar därför
+    # historisk filterträff mot alla liknande historiska omgångar, medan reducering
+    # och radantal fortfarande räknas på radmassan EFTER manuella teckengrupper.
+    # manual_hist_mask accepteras bara bakåtkompatibelt/diagnostiskt men används
+    # inte som startmask i paketens historikträff.
+    pre_hist_mask = np.ones(htot, dtype=bool)
     pre_hist_hit = int(pre_hist_mask.sum())
     if pre_hist_hit <= 0:
         return [], pd.DataFrame()
@@ -6612,8 +6610,8 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
     min_hit_count = int(max(0, min(pre_hist_hit, min_hit_count)))
     min_value_filters = int(max(0, min(12, min_value_filters)))
     if hit_levels is None:
-        # Gå hela vägen ner till vald lägstanivå. Om manuella teckengrupper är aktiva
-        # kan startnivån aldrig bli högre än hur många historiska omgångar de klarar.
+        # Gå hela vägen ner till vald lägstanivå. Manuella teckengrupper påverkar
+        # inte denna träffskala; de visas separat och påverkar bara aktuell radmassa.
         hit_levels = list(range(pre_hist_hit, min_hit_count - 1, -1))
     hit_levels = sorted({int(max(0, min(pre_hist_hit, h))) for h in hit_levels if int(h) >= min_hit_count}, reverse=True)
 
@@ -7635,7 +7633,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     st.session_state['v12_specs'] = specs
     _t_perf = _perf_mark('Bygga/läsa filterdefinitioner', _t_specs)
     cache_txt = 'cache' if specs_from_cache else 'ny beräkning'
-    st.caption(f"Exakt läge: filterrekommendationer och paketintervall räknas på aktuell radmassa efter manuella teckengrupper ({len(manual_frame_rows):,} av {len(frame_rows):,} rader, {cache_txt}). Snabburval används endast i vissa informationsrutor/diagnoser, aldrig för slutlig filtrering eller reducering.".replace(',', ' '))
+    st.caption(f"Exakt läge: rekommenderade filters historikträff räknas mot alla liknande omgångar. Radreducering och paketens kvarvarande rader räknas på aktuell radmassa efter manuella teckengrupper ({len(manual_frame_rows):,} av {len(frame_rows):,} rader, {cache_txt}). Snabburval används endast i vissa informationsrutor/diagnoser, aldrig för slutlig filtrering eller reducering.".replace(',', ' '))
     with ctrl_b:
         if st.button("Återställ alla filter till Av", use_container_width=True, key="v12_reset_all_filters_off"):
             for _k in list(st.session_state.keys()):
@@ -7648,7 +7646,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     st.caption("När du ändrar minsta historiska träff får varje filter nya slider-nycklar och startar på sitt rekommenderade intervall. 100% ska därför ge startintervall med 30/30 där det är möjligt.")
 
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
-        st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn bygger nivåtrappa per filter, testar även kombinationslyft av småfilter, visar progressklocka/ETA, eftertrimmar valt paket och visar hårda grupppaket som egen pakettyp. Gruppresultatet visas alltid, även när det ligger över radgränsen eller inte kunde byggas.")
+        st.caption("Testar Pareto-bästa paket på radmassan efter dina manuella teckengrupper. De manuella teckengrupperna visas separat och drar inte ner paketens historiska filterträff. Paketmotorn bygger nivåtrappa per filter, testar även kombinationslyft av småfilter, visar progressklocka/ETA, eftertrimmar valt paket och visar hårda grupppaket som egen pakettyp.")
 
         with st.expander("Välj filter som måste ingå i rekommenderade paket", expanded=False):
             st.caption("Kryssa i filter du vill att paketmotorn ska använda. Ändringar ligger i ett formulär och sparas först när du trycker på knappen, så sidan laddar inte om för varje kryss.")
@@ -7747,7 +7745,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 required_keys=required_keys_now,
                 target_frame_after=int(rec_display_max_rows),
                 progress_cb=_ui_package_progress,
-                manual_hist_mask=manual_hist_mask,
+                manual_hist_mask=None,
             )
             if isinstance(rec_result, tuple):
                 packages, candidate_audit = rec_result
@@ -7759,7 +7757,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             st.session_state['v12_recommended_packages'] = packages
             st.session_state['v12_recommended_candidate_audit'] = candidate_audit
             st.session_state['v12_recommended_meta'] = {
-                'package_engine': 'pareto_multilevel_progress_posttrim_group_visible_diagnostics',
+                'package_engine': 'pareto_multilevel_progress_posttrim_group_visible_diagnostics_filter_hist_independent_of_manual_groups',
                 'manual_hist_target_pct': int(filter_hist_target_pct),
                 'top_fav_filters': 'Topp 3/4/5/6',
                 'frame_rows': int(len(manual_frame_rows)),
