@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0bc – Super-Makro utan Total"
+APP_VERSION = "v12.0be – Spara rekommenderade paket korrekt"
 
 
 st.markdown("""
@@ -1274,20 +1274,23 @@ def frame_export_text(frame):
 def submission_game_header_and_code(spelform):
     """Returnerar rubrik och radprefix för inlämningsformatet egna rader.
 
-    Formatet är t.ex. Europatipset:
-    EUROPATIPSET
+    Svenska Spels externa spelfil ska använda radprefix E på varje rad,
+    oavsett speltyp. Rubriken skiljer fortfarande spelformerna åt.
+
+    Exempel:
+    STRYKTIPSET
     E,2,2,1,X,2,...
     """
     sf = str(spelform or "").strip().lower()
     if "europa" in sf:
         return "EUROPATIPSET", "E"
     if "stryk" in sf:
-        return "STRYKTIPSET", "S"
+        return "STRYKTIPSET", "E"
     if "topp" in sf:
-        return "TOPPTIPSET", "T"
+        return "TOPPTIPSET", "E"
     if "power" in sf:
-        return "POWERPLAY", "P"
-    return str(spelform or "TIPSET").upper(), "R"
+        return "POWERPLAY", "E"
+    return str(spelform or "TIPSET").upper(), "E"
 
 
 def normalize_single_row_text(row):
@@ -4339,21 +4342,58 @@ def _history_df_from_records(records):
     return pd.DataFrame(rows)
 
 
-def _collect_filter_settings_for_save(specs, filter_hist_target_pct, top_fav_count):
+def _collect_filter_settings_for_save(specs, filter_hist_target_pct, top_fav_count, settings_override=None):
+    """Samlar filterläge/intervall för sparfil.
+
+    Viktigt: om användaren precis har applicerat ett rekommenderat paket eller
+    ändrat filter i UI:t ska sparfilen få exakt den filtercentral som visas nu.
+    Därför kan funktionen läsa från det renderade `settings`-objektet i stället
+    för enbart session_state. Session_state används som fallback för
+    bakåtkompatibilitet och tidiga sparlägen.
+    """
     out = {}
+    settings_override = settings_override or {}
     for spec in specs or []:
         k = spec.get('key')
         if not k:
             continue
-        mode = st.session_state.get(f'filter_mode_{k}', 'Av')
-        range_key = f'filter_range_{k}_h{int(filter_hist_target_pct)}_tf{int(top_fav_count)}'
-        interval = st.session_state.get(range_key, spec.get('default_interval'))
+        if isinstance(settings_override.get(k), dict):
+            mode = settings_override[k].get('mode', 'Av')
+            interval = settings_override[k].get('interval', spec.get('default_interval'))
+        else:
+            mode = st.session_state.get(f'filter_mode_{k}', 'Av')
+            range_key = f'filter_range_{k}_h{int(filter_hist_target_pct)}_tf{int(top_fav_count)}'
+            interval = st.session_state.get(range_key, spec.get('default_interval'))
         out[k] = {
             'name': spec.get('name', k),
             'category': spec.get('category', ''),
             'mode': mode,
             'interval': _json_safe_value(interval),
         }
+    return out
+
+
+def _collect_recommended_package_state_for_save(specs=None):
+    """Sparar paketmotorns styrvärden och senast applicerade paketmetadata.
+
+    Tidigare sparades bara filtercentralen. Det gjorde att en spelfil kunde
+    ladda tillbaka aktiva filter men tappa paketmotorns val, obligatoriska
+    filter och paketkontrollen. Då såg det ut som om det sparade rekommenderade
+    paketet inte stämde med filen.
+    """
+    specs = specs or []
+    required_keys = [s.get('key') for s in specs if s.get('key') and st.session_state.get(f"v12_reqpkg_{s.get('key')}", False)]
+    out = {
+        'rec_min_step': _json_safe_value(st.session_state.get('v12_rec_min_step')),
+        'rec_max_filters': _json_safe_value(st.session_state.get('v12_rec_max_filters')),
+        'rec_min_hit': _json_safe_value(st.session_state.get('v12_rec_min_hit')),
+        'rec_display_max_rows': _json_safe_value(st.session_state.get('v12_rec_display_max_rows')),
+        'rec_frame_adapt': _json_safe_value(st.session_state.get('v12_rec_frame_adapt')),
+        'rec_min_value_filters': _json_safe_value(st.session_state.get('v12_rec_min_value_filters')),
+        'required_keys': _json_safe_value(required_keys),
+        'applied_package_meta': _json_safe_value(st.session_state.get('v12_applied_package_meta', {})),
+        'applied_package_snapshot': _json_safe_value(st.session_state.get('v12_applied_package_snapshot', {})),
+    }
     return out
 
 
@@ -4396,7 +4436,8 @@ def _apply_group_reqs_to_session(group_reqs):
         st.session_state[f'group_req_{i}'] = mn
 
 
-def _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher):
+def _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher, settings_override=None, package_state=None):
+    package_state = package_state if package_state is not None else _collect_recommended_package_state_for_save(specs)
     return {
         'file_type': 'tipset_filterpaket',
         'app_version': APP_VERSION,
@@ -4405,14 +4446,15 @@ def _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fa
         'antal_matcher': int(antal_matcher),
         'filter_hist_target_pct': int(filter_hist_target_pct),
         'top_fav_filters': 'Topp 3/4/5/6',
-        'filters': _collect_filter_settings_for_save(specs, filter_hist_target_pct, top_fav_count),
+        'filters': _collect_filter_settings_for_save(specs, filter_hist_target_pct, top_fav_count, settings_override=settings_override),
         'group_reqs': _json_safe_value(group_reqs),
+        'recommended_package_state': _json_safe_value(package_state or {}),
         'u_rows': {},
     }
 
 
-def _build_spelfil_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher, input_text, top_n, pay_min, frame, v_m, filter_vec, reducer_settings=None):
-    payload = _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher)
+def _build_spelfil_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher, input_text, top_n, pay_min, frame, v_m, filter_vec, reducer_settings=None, settings_override=None, package_state=None):
+    payload = _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher, settings_override=settings_override, package_state=package_state)
     payload.update({
         'file_type': 'tipset_spelfil',
         'input_text': input_text or '',
@@ -4458,6 +4500,30 @@ def _apply_spelfil_payload(payload):
     _apply_u_rows_to_session(payload.get('u_rows', {}))
     _apply_filter_settings_to_session(payload.get('filters', {}), fhp, tfc)
     _apply_group_reqs_to_session(payload.get('group_reqs', {}))
+
+    pkg_state = payload.get('recommended_package_state') or {}
+    if isinstance(pkg_state, dict):
+        # Återställ paketmotorns styrvärden och obligatoriska filter. Detta gör
+        # att en sparad spelfil/filterpaket inte bara återställer filterlägena,
+        # utan även vilken rekommenderad paketkonfiguration filen byggdes från.
+        _map = {
+            'rec_min_step': 'v12_rec_min_step',
+            'rec_max_filters': 'v12_rec_max_filters',
+            'rec_min_hit': 'v12_rec_min_hit',
+            'rec_display_max_rows': 'v12_rec_display_max_rows',
+            'rec_frame_adapt': 'v12_rec_frame_adapt',
+            'rec_min_value_filters': 'v12_rec_min_value_filters',
+        }
+        for src, dst in _map.items():
+            if pkg_state.get(src) is not None:
+                st.session_state[dst] = pkg_state.get(src)
+        for rk in pkg_state.get('required_keys', []) or []:
+            if rk:
+                st.session_state[f'v12_reqpkg_{rk}'] = True
+        if isinstance(pkg_state.get('applied_package_meta'), dict):
+            st.session_state['v12_applied_package_meta'] = pkg_state.get('applied_package_meta') or {}
+        if isinstance(pkg_state.get('applied_package_snapshot'), dict):
+            st.session_state['v12_applied_package_snapshot'] = pkg_state.get('applied_package_snapshot') or {}
 
     if ftype == 'tipset_spelfil':
         frame = payload.get('frame') or []
@@ -6246,7 +6312,12 @@ def _apply_recommended_package_to_session(package, specs, filter_hist_target_pct
         'frame_after': int(package.get('frame_after', 0)),
         'num_filters': int(package.get('num_filters', len(package.get('filters', []) or []))),
         'signature': _package_signature(package),
+        'package_type': package.get('package_type', ''),
+        'reduction_pct': float(package.get('reduction_pct', 0.0) or 0.0),
     }
+    # Sparas i spelfil/filterpaket så exakt vilket rekommenderat paket som
+    # applicerades kan återskapas och jämföras efter uppladdning.
+    st.session_state['v12_applied_package_snapshot'] = _json_safe_value(package)
 
 
 
@@ -6940,8 +7011,16 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         'v12_reducer_mode': reducer_mode,
         'v12_target_13_pct': float(target_13_pct),
     }
-    filter_payload = _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher)
-    game_payload = _build_spelfil_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher, input_text, top_n, pay_min, frame, v_m, filter_vec, reducer_settings=reducer_save_settings)
+    package_save_state = _collect_recommended_package_state_for_save(specs)
+    filter_payload = _build_filterpaket_payload(
+        specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher,
+        settings_override=settings, package_state=package_save_state,
+    )
+    game_payload = _build_spelfil_payload(
+        specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher,
+        input_text, top_n, pay_min, frame, v_m, filter_vec, reducer_settings=reducer_save_settings,
+        settings_override=settings, package_state=package_save_state,
+    )
     with sidebar_save_slot.container():
         st.markdown("**Spara spelfil/filterpaket**")
         st.caption("Spelfil sparar kupong, grundram, filter, grupper och reduceringsinställningar. Filterpaket sparar bara filter/intervall/gruppkrav.")
