@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0bi – Exakt beslutsmotor + cache"
+APP_VERSION = "v12.0bj – Stängd filterkategori + paketstandard"
 
 
 st.markdown("""
@@ -6842,15 +6842,16 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     "Minsta extra reducering",
                     min_value=0.5,
                     max_value=20.0,
-                    value=float(st.session_state.get("v12_rec_min_step", 5.0)),
-                    step=0.5,
+                    value=float(st.session_state.get("v12_rec_min_step", 1.0)),
+                    step=0.25,
+                    format="%.2f",
                     key="v12_rec_min_step",
                     help="Gäller främst efter att värdekärnan är byggd. Värde-/poängfilter som behövs för kvoten får läggas till med lägre marginalkrav om de håller samlad träff.",
                 )
             with rp_c2:
-                rec_max_filters = st.number_input("Max filter i paket", min_value=1, max_value=40, value=int(st.session_state.get("v12_rec_max_filters", 18)), step=1, key="v12_rec_max_filters")
+                rec_max_filters = st.number_input("Max filter i paket", min_value=1, max_value=40, value=int(st.session_state.get("v12_rec_max_filters", 30)), step=1, key="v12_rec_max_filters")
             with rp_c3:
-                rec_min_hit = st.number_input("Sök ner till träff", min_value=1, max_value=int(len(v_m)), value=min(int(st.session_state.get("v12_rec_min_hit", min(15, int(len(v_m))))), int(len(v_m))), step=1, key="v12_rec_min_hit", help="Exempel: 15 betyder att paketmotorn söker ända ner till 15/30 när historikbasen är 30.")
+                rec_min_hit = st.number_input("Sök ner till träff", min_value=1, max_value=int(len(v_m)), value=min(int(st.session_state.get("v12_rec_min_hit", min(22, int(len(v_m))))), int(len(v_m))), step=1, key="v12_rec_min_hit", help="Exempel: 15 betyder att paketmotorn söker ända ner till 15/30 när historikbasen är 30.")
             with rp_c4:
                 rec_display_max_rows = st.number_input("Visa paket under", min_value=100, max_value=75000, value=int(st.session_state.get("v12_rec_display_max_rows", 5000)), step=100, key="v12_rec_display_max_rows", help="Paket över denna filtermassa döljs i huvudlistan. Standard 5 000 eftersom bredare paket oftast är opraktiska inför TipsetMatrix.")
             with rp_c5:
@@ -7041,67 +7042,74 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         except Exception:
             return _spec['default_interval']
 
-    # v12.0bh: rendera bara vald filterflik. Streamlit kör annars även stängda expanders,
-    # vilket gjorde att alla sliders, popovers och diagnoser byggdes vid varje rerun.
+    # v12.0bj: rendera bara vald filterkategori – och tillåt att ingen kategori är öppen.
+    # Det minskar scroll och gör att filtercentralen kan vara helt hopfälld utan att förlora aktiva filter.
+    cat_closed_label = "Stäng alla filterkategorier"
+    cat_options = [cat_closed_label] + cats
+    _prev_cat = st.session_state.get('v12_selected_filter_category', cat_closed_label)
     selected_cat = st.radio(
         "Visa filterkategori",
-        cats,
-        index=cats.index(st.session_state.get('v12_selected_filter_category', cats[0])) if st.session_state.get('v12_selected_filter_category', cats[0]) in cats else 0,
+        cat_options,
+        index=cat_options.index(_prev_cat) if _prev_cat in cat_options else 0,
         horizontal=True,
         key='v12_selected_filter_category',
     )
 
     settings = {}
-    with st.form("v12_filtercentral_form"):
-        st.caption("Ändra flera filter i vald kategori och tryck Applicera filterändringar. Övriga filter behåller sina sparade lägen/intervall.")
-        st.markdown(f"### 📂 {selected_cat}")
-        cat_specs = [s for s in specs if s['category'] == selected_cat]
-        for spec in cat_specs:
-            k = spec['key']
-            mode_key = f'filter_mode_{k}'
-            range_key = _range_key_for_spec(spec)
-            default_mode = st.session_state.get(mode_key, 'Av')
-            lo, hi = spec['bounds']
-            dec = spec['decimals']
-            val = _default_interval_for_spec(spec)
-            if range_key in st.session_state:
-                try:
-                    cur = st.session_state[range_key]
-                    if float(cur[0]) < float(lo) or float(cur[1]) > float(hi):
+    filter_apply = False
+    if selected_cat == cat_closed_label:
+        st.info("Alla filterkategorier är stängda. Aktiva filter ligger kvar och används fortfarande när du kör filtrering/reducering.")
+    else:
+        with st.form("v12_filtercentral_form"):
+            st.caption("Ändra flera filter i vald kategori och tryck Applicera filterändringar. Övriga filter behåller sina sparade lägen/intervall.")
+            st.markdown(f"### 📂 {selected_cat}")
+            cat_specs = [s for s in specs if s['category'] == selected_cat]
+            for spec in cat_specs:
+                k = spec['key']
+                mode_key = f'filter_mode_{k}'
+                range_key = _range_key_for_spec(spec)
+                default_mode = st.session_state.get(mode_key, 'Av')
+                lo, hi = spec['bounds']
+                dec = spec['decimals']
+                val = _default_interval_for_spec(spec)
+                if range_key in st.session_state:
+                    try:
+                        cur = st.session_state[range_key]
+                        if float(cur[0]) < float(lo) or float(cur[1]) > float(hi):
+                            st.session_state[range_key] = val
+                    except Exception:
                         st.session_state[range_key] = val
-                except Exception:
-                    st.session_state[range_key] = val
-            c1, c2, c3, c4 = st.columns([1.35, 1.0, 3.0, 0.45])
-            with c1:
-                st.markdown(f"**{spec['name']}**")
-                hp, ht, pct = _hist_pass_count(spec['hist_values'], spec['default_interval'])
-                st.caption(f"Rek: {_display_interval(spec['default_interval'], dec)} · {hp}/{ht}")
-            with c2:
-                mode = st.selectbox(
-                    "Läge",
-                    mode_options,
-                    index=mode_options.index(default_mode) if default_mode in mode_options else 0,
-                    key=mode_key,
-                    label_visibility="collapsed",
-                )
-            with c3:
-                step = 1 if dec == 0 else (0.01 if dec >= 2 else 0.1)
-                if dec == 0:
-                    lo_i, hi_i = int(lo), int(hi)
-                    val_i = (int(round(val[0])), int(round(val[1])))
-                    rng = st.slider("Intervall", lo_i, hi_i, val_i, step=1, key=range_key, label_visibility="collapsed")
-                else:
-                    rng = st.slider("Intervall", float(lo), float(hi), (float(val[0]), float(val[1])), step=step, key=range_key, label_visibility="collapsed")
-            with c4:
-                if hasattr(st, "popover"):
-                    with st.popover("ℹ️", help="Visa frekvenstabell, träff och reducering för detta filter"):
-                        _render_inline_filter_info(spec, rng, frame_rows, frame, antal_matcher)
-                else:
-                    with st.expander("ℹ️", expanded=False):
-                        _render_inline_filter_info(spec, rng, frame_rows, frame, antal_matcher)
-            _render_favorite_shock_diagnostics(spec, rng, frame, filter_vec, antal_matcher)
-            st.divider()
-        filter_apply = st.form_submit_button("✅ Applicera filterändringar", use_container_width=True)
+                c1, c2, c3, c4 = st.columns([1.35, 1.0, 3.0, 0.45])
+                with c1:
+                    st.markdown(f"**{spec['name']}**")
+                    hp, ht, pct = _hist_pass_count(spec['hist_values'], spec['default_interval'])
+                    st.caption(f"Rek: {_display_interval(spec['default_interval'], dec)} · {hp}/{ht}")
+                with c2:
+                    mode = st.selectbox(
+                        "Läge",
+                        mode_options,
+                        index=mode_options.index(default_mode) if default_mode in mode_options else 0,
+                        key=mode_key,
+                        label_visibility="collapsed",
+                    )
+                with c3:
+                    step = 1 if dec == 0 else (0.01 if dec >= 2 else 0.1)
+                    if dec == 0:
+                        lo_i, hi_i = int(lo), int(hi)
+                        val_i = (int(round(val[0])), int(round(val[1])))
+                        rng = st.slider("Intervall", lo_i, hi_i, val_i, step=1, key=range_key, label_visibility="collapsed")
+                    else:
+                        rng = st.slider("Intervall", float(lo), float(hi), (float(val[0]), float(val[1])), step=step, key=range_key, label_visibility="collapsed")
+                with c4:
+                    if hasattr(st, "popover"):
+                        with st.popover("ℹ️", help="Visa frekvenstabell, träff och reducering för detta filter"):
+                            _render_inline_filter_info(spec, rng, frame_rows, frame, antal_matcher)
+                    else:
+                        with st.expander("ℹ️", expanded=False):
+                            _render_inline_filter_info(spec, rng, frame_rows, frame, antal_matcher)
+                _render_favorite_shock_diagnostics(spec, rng, frame, filter_vec, antal_matcher)
+                st.divider()
+            filter_apply = st.form_submit_button("✅ Applicera filterändringar", use_container_width=True)
 
     # Samla inställningar för ALLA filter, inte bara den kategori som renderades.
     for spec in specs:
