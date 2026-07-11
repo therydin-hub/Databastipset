@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0bj – Stängd filterkategori + paketstandard"
+APP_VERSION = "v12.0bk – Manuella teckengrupper"
 
 
 st.markdown("""
@@ -2900,6 +2900,336 @@ def _build_streck_filter_systems(filter_vec, hist_df, similar_df, antal_matcher,
     return items
 
 
+# --- MANUELLA TECKENGRUPPER / TECKENBLOCK ---
+def _manual_sign_groups_signature(groups):
+    """Stabil signatur så paketmotorn kan se om teckengrupper ändrats."""
+    clean = []
+    for g in groups or []:
+        if not isinstance(g, dict):
+            continue
+        picks = [(int(p.get('match', 0)), str(p.get('sign', '')).upper()) for p in g.get('picks', []) or []]
+        picks = [(m, sg) for m, sg in picks if m > 0 and sg in {'1', 'X', '2'}]
+        clean.append({
+            'active': bool(g.get('active', False)),
+            'name': str(g.get('name', '')),
+            'picks': sorted(picks),
+            'min': int(g.get('min', 0) or 0),
+            'max': int(g.get('max', len(picks)) if g.get('max', None) is not None else len(picks)),
+        })
+    return json.dumps(clean, ensure_ascii=False, sort_keys=True)
+
+
+def _manual_group_picks_to_text(picks):
+    parts = []
+    for p in picks or []:
+        try:
+            m = int(p.get('match', 0))
+            sg = str(p.get('sign', '')).upper()
+            if m > 0 and sg in {'1', 'X', '2'}:
+                parts.append(f"M{m}:{sg}")
+        except Exception:
+            continue
+    return ", ".join(parts)
+
+
+def _parse_manual_group_picks(text, antal_matcher):
+    """Läser t.ex. 'M3:2, M10:1' eller '3:2 10=1'. Max ett tecken per match."""
+    raw = str(text or '').upper().replace('×', 'X')
+    # Stöd både M3:2, 3:2, M3-2, match 3 = 2.
+    tokens = re.findall(r'(?:MATCH\s*)?M?\s*(\d{1,2})\s*[:=\-]?\s*([1X2])', raw)
+    picks = []
+    warnings = []
+    used_matches = set()
+    used_pairs = set()
+    for m_txt, sign in tokens:
+        try:
+            m = int(m_txt)
+        except Exception:
+            continue
+        if not (1 <= m <= int(antal_matcher)):
+            warnings.append(f"M{m} finns inte på kupongen.")
+            continue
+        pair = (m, sign)
+        if pair in used_pairs:
+            continue
+        if m in used_matches:
+            warnings.append(f"M{m} har fler än ett tecken i samma teckengrupp. Bara första tecknet används.")
+            continue
+        used_matches.add(m)
+        used_pairs.add(pair)
+        picks.append({'match': int(m), 'sign': sign})
+    return picks, warnings
+
+
+def _normalize_manual_sign_groups(groups, antal_matcher):
+    out = []
+    for idx, g in enumerate(groups or [], 1):
+        if not isinstance(g, dict):
+            continue
+        picks = []
+        used = set()
+        for p in g.get('picks', []) or []:
+            try:
+                m = int(p.get('match', 0))
+                sign = str(p.get('sign', '')).upper()
+            except Exception:
+                continue
+            if not (1 <= m <= int(antal_matcher)) or sign not in {'1', 'X', '2'}:
+                continue
+            if m in used:
+                continue
+            used.add(m)
+            picks.append({'match': m, 'sign': sign})
+        n = len(picks)
+        mn = int(g.get('min', 0) or 0)
+        mx = int(g.get('max', n) if g.get('max', None) is not None else n)
+        mn = max(0, min(n, mn))
+        mx = max(mn, min(n, mx))
+        out.append({
+            'name': str(g.get('name') or f'Teckengrupp {idx}'),
+            'active': bool(g.get('active', False)) and n > 0,
+            'text': _manual_group_picks_to_text(picks),
+            'picks': picks,
+            'min': mn,
+            'max': mx,
+        })
+    return out
+
+
+def _manual_group_hit_count(row_str, group):
+    row_str = normalize_single_row_text(row_str)
+    hits = 0
+    for p in group.get('picks', []) or []:
+        try:
+            m = int(p.get('match', 0))
+            sign = str(p.get('sign', '')).upper()
+            if 1 <= m <= len(row_str) and row_str[m - 1] == sign:
+                hits += 1
+        except Exception:
+            continue
+    return int(hits)
+
+
+def _manual_group_pass(row_str, group):
+    if not group.get('active') or not group.get('picks'):
+        return True
+    h = _manual_group_hit_count(row_str, group)
+    return int(group.get('min', 0)) <= h <= int(group.get('max', len(group.get('picks', []))))
+
+
+def _manual_sign_groups_pass(row_str, groups):
+    for g in groups or []:
+        if g.get('active') and not _manual_group_pass(row_str, g):
+            return False
+    return True
+
+
+def _manual_sign_groups_hist_mask(v_m, groups, antal_matcher):
+    rows = []
+    try:
+        rows = [normalize_single_row_text(r) for r in list(v_m.get('Correct_Row', []))]
+    except Exception:
+        rows = []
+    mask = []
+    active = [g for g in (groups or []) if g.get('active') and g.get('picks')]
+    for r in rows:
+        if len(r) != int(antal_matcher):
+            mask.append(False)
+        elif not active:
+            mask.append(True)
+        else:
+            mask.append(_manual_sign_groups_pass(r, active))
+    return np.array(mask, dtype=bool)
+
+
+def _apply_manual_sign_groups_to_rows(rows, groups, antal_matcher):
+    active = [g for g in (groups or []) if g.get('active') and g.get('picks')]
+    clean = [normalize_single_row_text(r) for r in (rows or []) if len(normalize_single_row_text(r)) == int(antal_matcher)]
+    if not active:
+        return clean
+    return [r for r in clean if _manual_sign_groups_pass(r, active)]
+
+
+def _manual_group_probability_distribution(group, filter_vec):
+    """Poisson-binomial över valda tecken, baserat på dagens streck. Antar oberoende matcher."""
+    probs = []
+    for p in group.get('picks', []) or []:
+        try:
+            m = int(p.get('match', 0))
+            sign = str(p.get('sign', '')).upper()
+            idx = (m - 1) * 3 + {'1': 0, 'X': 1, '2': 2}[sign]
+            if 0 <= idx < len(filter_vec):
+                probs.append(max(0.0, min(1.0, float(filter_vec[idx]) / 100.0)))
+        except Exception:
+            continue
+    dist = [1.0]
+    for p in probs:
+        nxt = [0.0] * (len(dist) + 1)
+        for k, val in enumerate(dist):
+            nxt[k] += val * (1.0 - p)
+            nxt[k + 1] += val * p
+        dist = nxt
+    return dist
+
+
+def _manual_group_probability_pass_pct(group, filter_vec):
+    dist = _manual_group_probability_distribution(group, filter_vec)
+    mn = int(group.get('min', 0) or 0)
+    mx = int(group.get('max', len(dist) - 1) or 0)
+    return round(100.0 * sum(dist[k] for k in range(max(0, mn), min(len(dist) - 1, mx) + 1)), 1) if dist else 0.0
+
+
+def _manual_group_hist_summary(group, v_m, antal_matcher):
+    vals = []
+    try:
+        rows = [normalize_single_row_text(r) for r in list(v_m.get('Correct_Row', []))]
+    except Exception:
+        rows = []
+    for r in rows:
+        if len(r) == int(antal_matcher):
+            vals.append(_manual_group_hit_count(r, group))
+    if not vals:
+        return 0, 0, '—'
+    mn = int(group.get('min', 0) or 0)
+    mx = int(group.get('max', len(group.get('picks', []))) or 0)
+    hit = sum(1 for v in vals if mn <= v <= mx)
+    parts = [f"{i}:{vals.count(i)}" for i in range(0, max(vals) + 1)]
+    return int(hit), int(len(vals)), ' | '.join(parts)
+
+
+def _manual_group_frame_diagnostics(group, frame, frame_rows, antal_matcher):
+    picks = group.get('picks', []) or []
+    possible = []
+    missing = []
+    for p in picks:
+        try:
+            m = int(p.get('match', 0))
+            sign = str(p.get('sign', '')).upper()
+            if frame and 1 <= m <= len(frame) and sign in normalize_signs(frame[m - 1]):
+                possible.append(f"M{m}:{sign}")
+            else:
+                missing.append(f"M{m}:{sign}")
+        except Exception:
+            continue
+    mn = int(group.get('min', 0) or 0)
+    mx = int(group.get('max', len(picks)) or 0)
+    notes = []
+    if missing:
+        notes.append("saknas i grundram: " + ', '.join(missing))
+    if len(possible) < mn:
+        notes.append(f"omöjligt: bara {len(possible)} möjliga tecken, men min är {mn}")
+    elif mn > 0 and len(possible) == mn:
+        if len(possible) == 1:
+            notes.append("dold spik: " + possible[0])
+        else:
+            notes.append("dolt tvång: alla dessa måste sitta: " + ', '.join(possible))
+    keep = None
+    total = None
+    if frame_rows is not None:
+        total = len(frame_rows)
+        try:
+            keep = sum(1 for r in frame_rows if _manual_group_pass(r, group))
+        except Exception:
+            keep = None
+    return possible, missing, notes, keep, total
+
+
+def _manual_sign_groups_summary_df(groups, v_m, filter_vec, frame, frame_rows, antal_matcher):
+    rows = []
+    for idx, g in enumerate(groups or [], 1):
+        if not g.get('active') or not g.get('picks'):
+            continue
+        h, t, dist = _manual_group_hist_summary(g, v_m, antal_matcher)
+        prob = _manual_group_probability_pass_pct(g, filter_vec)
+        possible, missing, notes, keep, total = _manual_group_frame_diagnostics(g, frame, frame_rows, antal_matcher)
+        rows.append({
+            'Grupp': g.get('name') or f'Teckengrupp {idx}',
+            'Tecken': _manual_group_picks_to_text(g.get('picks', [])),
+            'Krav': f"{int(g.get('min',0))}–{int(g.get('max',0))} av {len(g.get('picks', []))}",
+            'Historikträff': f"{h}/{t}" if t else '—',
+            'Strecksannolikhet': f"{prob:.1f}%",
+            'Grundram': (f"{keep}/{total}" if keep is not None and total is not None else '—'),
+            'Fördelning hist': dist,
+            'Diagnos': '; '.join(notes) if notes else 'OK',
+        })
+    return pd.DataFrame(rows)
+
+
+def _render_manual_sign_groups_panel(v_m, filter_vec, frame, frame_rows, antal_matcher):
+    saved = _normalize_manual_sign_groups(st.session_state.get('v12_manual_sign_groups', []), antal_matcher)
+    # Säkerställ 6 synliga slots.
+    while len(saved) < 6:
+        saved.append({'name': f'Teckengrupp {len(saved)+1}', 'active': False, 'text': '', 'picks': [], 'min': 0, 'max': 0})
+
+    st.markdown("<div class='v12-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='v12-step'>Steg 3A</div><div class='v12-title'>Manuella teckengrupper före paket</div>", unsafe_allow_html=True)
+    st.caption("Används som förfilter före rekommenderade filterpaket. Exempel: M3:2, M10:1 med krav 1–2 betyder att minst ett av dessa två tecken måste sitta. Beräkna rekommenderade paket efter att detta är sparat.")
+
+    with st.form('v12_manual_sign_groups_form'):
+        draft_rows = []
+        for i in range(6):
+            g = saved[i]
+            st.markdown(f"**Teckengrupp {i+1}**")
+            c0, c1, c2, c3, c4 = st.columns([0.8, 1.6, 3.0, 0.8, 0.8])
+            with c0:
+                active = st.checkbox('Aktiv', value=bool(g.get('active', False)), key=f'v12_mtg_active_{i}')
+            with c1:
+                name = st.text_input('Namn', value=str(g.get('name') or f'Teckengrupp {i+1}'), key=f'v12_mtg_name_{i}')
+            with c2:
+                text = st.text_input('Tecken', value=str(g.get('text') or _manual_group_picks_to_text(g.get('picks', []))), placeholder='M3:2, M10:1', key=f'v12_mtg_text_{i}')
+            with c3:
+                mn = st.number_input('Min', min_value=0, max_value=int(antal_matcher), value=int(g.get('min', 0) or 0), step=1, key=f'v12_mtg_min_{i}')
+            with c4:
+                mx_default = int(g.get('max', max(0, len(g.get('picks', [])))) or 0)
+                mx = st.number_input('Max', min_value=0, max_value=int(antal_matcher), value=max(0, min(int(antal_matcher), mx_default)), step=1, key=f'v12_mtg_max_{i}')
+            draft_rows.append({'active': active, 'name': name, 'text': text, 'min': mn, 'max': mx})
+        submitted = st.form_submit_button('💾 Spara manuella teckengrupper', use_container_width=True)
+
+    if submitted:
+        new_groups = []
+        all_warnings = []
+        for i, row in enumerate(draft_rows, 1):
+            picks, warnings = _parse_manual_group_picks(row.get('text', ''), antal_matcher)
+            all_warnings.extend([f"Teckengrupp {i}: {w}" for w in warnings])
+            n = len(picks)
+            mn = max(0, min(n, int(row.get('min', 0) or 0)))
+            mx = max(mn, min(n, int(row.get('max', n) if row.get('max', None) is not None else n)))
+            new_groups.append({
+                'active': bool(row.get('active')) and n > 0,
+                'name': str(row.get('name') or f'Teckengrupp {i}'),
+                'text': _manual_group_picks_to_text(picks),
+                'picks': picks,
+                'min': mn,
+                'max': mx,
+            })
+        old_sig = _manual_sign_groups_signature(st.session_state.get('v12_manual_sign_groups', []))
+        new_sig = _manual_sign_groups_signature(new_groups)
+        st.session_state['v12_manual_sign_groups'] = new_groups
+        if old_sig != new_sig:
+            # Gamla paket gäller inte längre, eftersom paketmotorn ska räknas efter teckengrupperna.
+            for _k in ['v12_recommended_packages', 'v12_recommended_candidate_audit', 'v12_recommended_meta', 'v12_applied_package_meta', 'v12_applied_package_snapshot']:
+                st.session_state.pop(_k, None)
+            st.session_state['v12_last_result_stale'] = True
+            st.success('Manuella teckengrupper sparade. Rekommenderade paket behöver beräknas om.')
+        else:
+            st.success('Manuella teckengrupper sparade.')
+        for w in all_warnings:
+            st.warning(w)
+        saved = _normalize_manual_sign_groups(new_groups, antal_matcher)
+
+    active_groups = [g for g in saved if g.get('active') and g.get('picks')]
+    if active_groups:
+        summary_df = _manual_sign_groups_summary_df(active_groups, v_m, filter_vec, frame, frame_rows, antal_matcher)
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        base_after = _apply_manual_sign_groups_to_rows(frame_rows, active_groups, antal_matcher)
+        hist_mask = _manual_sign_groups_hist_mask(v_m, active_groups, antal_matcher)
+        st.info(f"Manuella teckengrupper aktiva: grundram {len(frame_rows):,} → {len(base_after):,} rader · historik {int(hist_mask.sum())}/{len(hist_mask)}. Paketmotorn räknar på denna förfiltrerade radmassa.".replace(',', ' '))
+    else:
+        st.info('Inga manuella teckengrupper är aktiva. Paketmotorn räknar på hela grundramen.')
+    st.markdown("</div>", unsafe_allow_html=True)
+    return _normalize_manual_sign_groups(st.session_state.get('v12_manual_sign_groups', []), antal_matcher)
+
+
 
 FILTER_CATEGORY_ORDER = [
     'Struktur',
@@ -2907,6 +3237,7 @@ FILTER_CATEGORY_ORDER = [
     'FAT',
     'FAT-sekvenser',
     'Favorit & skräll',
+    'Manuella teckengrupper',
     'Super-Makro',
 ]
 
@@ -4021,7 +4352,7 @@ def _apply_manual_filters(rows, specs, settings, group_reqs):
     return filtered
 
 
-def _hist_package_passes(v_m, specs, settings, group_reqs):
+def _hist_package_passes(v_m, specs, settings, group_reqs, manual_sign_groups=None, antal_matcher=None):
     """Samlad historisk träff för aktiva filter.
 
     Viktigt: detta ska räknas på samma historiska filtervärden som används i
@@ -4057,8 +4388,17 @@ def _hist_package_passes(v_m, specs, settings, group_reqs):
         interval = settings.get(spec.get('key'), {}).get('interval', spec.get('default_interval'))
         return in_range(vals[idx], interval)
 
+    manual_mask = None
+    if manual_sign_groups and antal_matcher is not None:
+        try:
+            manual_mask = _manual_sign_groups_hist_mask(v_m, manual_sign_groups, antal_matcher)
+        except Exception:
+            manual_mask = None
+
     passed = 0
     for i in range(htot):
+        if manual_mask is not None and (i >= len(manual_mask) or not bool(manual_mask[i])):
+            continue
         ok = True
         for spec in forced_specs:
             if not hist_value_pass(spec, i):
@@ -4461,7 +4801,7 @@ def _apply_group_reqs_to_session(group_reqs):
         st.session_state[f'group_req_{i}'] = mn
 
 
-def _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher, settings_override=None, package_state=None):
+def _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher, settings_override=None, package_state=None, manual_sign_groups=None):
     package_state = package_state if package_state is not None else _collect_recommended_package_state_for_save(specs)
     return {
         'file_type': 'tipset_filterpaket',
@@ -4474,12 +4814,13 @@ def _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fa
         'filters': _collect_filter_settings_for_save(specs, filter_hist_target_pct, top_fav_count, settings_override=settings_override),
         'group_reqs': _json_safe_value(group_reqs),
         'recommended_package_state': _json_safe_value(package_state or {}),
+        'manual_sign_groups': _json_safe_value(manual_sign_groups if manual_sign_groups is not None else st.session_state.get('v12_manual_sign_groups', [])),
         'u_rows': {},
     }
 
 
-def _build_spelfil_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher, input_text, top_n, pay_min, frame, v_m, filter_vec, reducer_settings=None, settings_override=None, package_state=None):
-    payload = _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher, settings_override=settings_override, package_state=package_state)
+def _build_spelfil_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher, input_text, top_n, pay_min, frame, v_m, filter_vec, reducer_settings=None, settings_override=None, package_state=None, manual_sign_groups=None):
+    payload = _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher, settings_override=settings_override, package_state=package_state, manual_sign_groups=manual_sign_groups)
     payload.update({
         'file_type': 'tipset_spelfil',
         'input_text': input_text or '',
@@ -4523,6 +4864,8 @@ def _apply_spelfil_payload(payload):
     fhp = int(st.session_state.get('v12_filter_hist_target_pct', payload.get('filter_hist_target_pct', 90)) or 90)
     tfc = 3
     _apply_u_rows_to_session(payload.get('u_rows', {}))
+    if payload.get('manual_sign_groups') is not None:
+        st.session_state['v12_manual_sign_groups'] = _normalize_manual_sign_groups(payload.get('manual_sign_groups') or [], int(payload.get('antal_matcher') or 13))
     _apply_filter_settings_to_session(payload.get('filters', {}), fhp, tfc)
     _apply_group_reqs_to_session(payload.get('group_reqs', {}))
 
@@ -5422,7 +5765,7 @@ def _append_group_representatives(pareto_packages, all_packages, max_group_packa
 
 
 
-def _combine_forced_candidate_masks(chosen):
+def _combine_forced_candidate_masks(chosen, initial_hist_mask=None):
     """Kombinerar tvingade filter till samlad historik-/grundramsmask."""
     chosen = list(chosen or [])
     if not chosen:
@@ -5430,7 +5773,12 @@ def _combine_forced_candidate_masks(chosen):
     try:
         htot = len(chosen[0]['hist_mask'])
         ftot = len(chosen[0]['frame_mask'])
-        hist = np.ones(htot, dtype=bool)
+        if initial_hist_mask is not None:
+            hist = np.array(initial_hist_mask, dtype=bool)
+            if len(hist) != htot:
+                hist = np.ones(htot, dtype=bool)
+        else:
+            hist = np.ones(htot, dtype=bool)
         frame = np.ones(ftot, dtype=bool)
         for c in chosen:
             hist = hist & np.asarray(c['hist_mask'], dtype=bool)
@@ -5440,9 +5788,14 @@ def _combine_forced_candidate_masks(chosen):
         return None, None
 
 
-def _rebuild_forced_package_steps(chosen, htot, ftot):
+def _rebuild_forced_package_steps(chosen, htot, ftot, initial_hist_mask=None):
     """Bygger om steg-tabellen efter att nivåer bytts i eftertrimningen."""
-    cur_hist = np.ones(int(htot), dtype=bool)
+    if initial_hist_mask is not None:
+        cur_hist = np.array(initial_hist_mask, dtype=bool)
+        if len(cur_hist) != int(htot):
+            cur_hist = np.ones(int(htot), dtype=bool)
+    else:
+        cur_hist = np.ones(int(htot), dtype=bool)
     cur_frame = np.ones(int(ftot), dtype=bool)
     steps = []
     for cand in list(chosen or []):
@@ -5467,7 +5820,7 @@ def _rebuild_forced_package_steps(chosen, htot, ftot):
     return steps, int(cur_hist.sum()), int(cur_frame.sum()), cur_hist, cur_frame
 
 
-def _post_trim_forced_package_levels(chosen, candidates_by_key, frame, antal_matcher, row_matrix=None, max_passes=2):
+def _post_trim_forced_package_levels(chosen, candidates_by_key, frame, antal_matcher, row_matrix=None, max_passes=2, initial_hist_mask=None):
     """Snävar åt valda filter efter paketbygget utan att sänka samlad träff.
 
     Exempel: om paketet har FAT Summa 19–30 och hela paketet ändå har 23/30,
@@ -5478,7 +5831,7 @@ def _post_trim_forced_package_levels(chosen, candidates_by_key, frame, antal_mat
     chosen = [dict(c) for c in list(chosen or [])]
     if not chosen:
         return chosen, [], None, None
-    base_hist, base_frame = _combine_forced_candidate_masks(chosen)
+    base_hist, base_frame = _combine_forced_candidate_masks(chosen, initial_hist_mask=initial_hist_mask)
     if base_hist is None or base_frame is None:
         return chosen, [], None, None
     preserve_hit = int(base_hist.sum())
@@ -5491,7 +5844,7 @@ def _post_trim_forced_package_levels(chosen, candidates_by_key, frame, antal_mat
             cur_key = cur.get('key')
             if cur_key is None:
                 continue
-            cur_hist_mask, cur_frame_mask = _combine_forced_candidate_masks(chosen)
+            cur_hist_mask, cur_frame_mask = _combine_forced_candidate_masks(chosen, initial_hist_mask=initial_hist_mask)
             if cur_hist_mask is None or cur_frame_mask is None:
                 continue
             cur_rows = int(cur_frame_mask.sum())
@@ -5508,7 +5861,7 @@ def _post_trim_forced_package_levels(chosen, candidates_by_key, frame, antal_mat
                 if cur.get('required_in_package'):
                     alt2['required_in_package'] = True
                 trial[idx] = alt2
-                new_hist, new_frame = _combine_forced_candidate_masks(trial)
+                new_hist, new_frame = _combine_forced_candidate_masks(trial, initial_hist_mask=initial_hist_mask)
                 if new_hist is None or new_frame is None:
                     continue
                 new_hit = int(new_hist.sum())
@@ -5548,7 +5901,7 @@ def _post_trim_forced_package_levels(chosen, candidates_by_key, frame, antal_mat
                 changed = True
         if not changed:
             break
-    final_hist, final_frame = _combine_forced_candidate_masks(chosen)
+    final_hist, final_frame = _combine_forced_candidate_masks(chosen, initial_hist_mask=initial_hist_mask)
     return chosen, notes, final_hist, final_frame
 
 
@@ -5672,7 +6025,7 @@ def _best_hard_group_from_candidates(group_label, group_no, group_candidates, cu
     return best
 
 
-def _build_grouped_package_for_target(candidates, target, frame_rows, frame, antal_matcher, max_filters=18, min_value_filters=3, required_keys=None, row_matrix=None):
+def _build_grouped_package_for_target(candidates, target, frame_rows, frame, antal_matcher, max_filters=18, min_value_filters=3, required_keys=None, row_matrix=None, initial_hist_mask=None):
     """Bygger ett paket med hårda grupper i stället för att tvinga varje filter.
 
     Målet är: fler viktiga filter, särskilt värde-/poängfilter, men med hårda gruppkrav
@@ -5683,7 +6036,15 @@ def _build_grouped_package_for_target(candidates, target, frame_rows, frame, ant
     required_keys = set(required_keys or [])
     htot = len(candidates[0]['hist_mask'])
     ftot = len(candidates[0]['frame_mask'])
-    cur_hist = np.ones(htot, dtype=bool)
+    if initial_hist_mask is not None:
+        try:
+            cur_hist = np.array(initial_hist_mask, dtype=bool)
+            if len(cur_hist) != htot:
+                cur_hist = np.ones(htot, dtype=bool)
+        except Exception:
+            cur_hist = np.ones(htot, dtype=bool)
+    else:
+        cur_hist = np.ones(htot, dtype=bool)
     cur_frame = np.ones(ftot, dtype=bool)
     groups = []
     steps = []
@@ -5871,7 +6232,7 @@ def _build_grouped_package_for_target(candidates, target, frame_rows, frame, ant
         'structure_filters': int(structure_filters),
     }
 
-def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14, min_hit_count=15, frame_adapt=True, min_value_filters=3, required_keys=None, target_frame_after=None, progress_cb=None):
+def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14, min_hit_count=15, frame_adapt=True, min_value_filters=3, required_keys=None, target_frame_after=None, progress_cb=None, manual_hist_mask=None):
     """Bygger Pareto-rekommenderade filterpaket.
 
     Viktigt från v12.0n:
@@ -5888,17 +6249,30 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
     ftot = len(frame_rows)
     if htot == 0 or ftot == 0:
         return []
+    if manual_hist_mask is not None:
+        try:
+            pre_hist_mask = np.array(manual_hist_mask, dtype=bool)
+            if len(pre_hist_mask) != htot:
+                pre_hist_mask = np.ones(htot, dtype=bool)
+        except Exception:
+            pre_hist_mask = np.ones(htot, dtype=bool)
+    else:
+        pre_hist_mask = np.ones(htot, dtype=bool)
+    pre_hist_hit = int(pre_hist_mask.sum())
+    if pre_hist_hit <= 0:
+        return [], pd.DataFrame()
     required_keys = set(required_keys or [])
     try:
         target_frame_after = int(target_frame_after) if target_frame_after is not None else None
     except Exception:
         target_frame_after = None
-    min_hit_count = int(max(0, min(htot, min_hit_count)))
+    min_hit_count = int(max(0, min(pre_hist_hit, min_hit_count)))
     min_value_filters = int(max(0, min(12, min_value_filters)))
     if hit_levels is None:
-        # Gå hela vägen ner till vald lägstanivå, standard 15/30 när htot=30.
-        hit_levels = list(range(htot, min_hit_count - 1, -1))
-    hit_levels = sorted({int(max(0, min(htot, h))) for h in hit_levels if int(h) >= min_hit_count}, reverse=True)
+        # Gå hela vägen ner till vald lägstanivå. Om manuella teckengrupper är aktiva
+        # kan startnivån aldrig bli högre än hur många historiska omgångar de klarar.
+        hit_levels = list(range(pre_hist_hit, min_hit_count - 1, -1))
+    hit_levels = sorted({int(max(0, min(pre_hist_hit, h))) for h in hit_levels if int(h) >= min_hit_count}, reverse=True)
 
     # Progress/ETA: totalen är en uppskattning men ger en stabil klocka i UI.
     progress_total = max(1, len(specs) + (2 * len(hit_levels)) + 4)
@@ -5953,7 +6327,7 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                     frame_mask = np.array([_spec_pass(r, spec, interval) for r in frame_rows], dtype=bool)
             except Exception:
                 continue
-            hist_hit = int(hist_mask.sum())
+            hist_hit = int((pre_hist_mask & hist_mask).sum())
             frame_keep = int(frame_mask.sum())
             red_pct = 100.0 - 100.0 * frame_keep / max(1, ftot)
             if frame_keep >= ftot:
@@ -5986,7 +6360,7 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
         candidates_by_key_for_trim.setdefault(_c.get('key'), []).append(_c)
     min_step_reduction_pct = float(min_step_reduction_pct)
     for target_idx, target in enumerate(hit_levels, 1):
-        cur_hist = np.ones(htot, dtype=bool)
+        cur_hist = pre_hist_mask.copy()
         cur_frame = np.ones(ftot, dtype=bool)
         chosen = []
         used_keys = set()
@@ -6166,10 +6540,11 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             antal_matcher,
             row_matrix=row_matrix,
             max_passes=2,
+            initial_hist_mask=pre_hist_mask,
         )
         if trim_hist is not None and trim_frame is not None:
             cur_hist, cur_frame = trim_hist, trim_frame
-            steps, _, _, _, _ = _rebuild_forced_package_steps(chosen, htot, ftot)
+            steps, _, _, _, _ = _rebuild_forced_package_steps(chosen, htot, ftot, initial_hist_mask=pre_hist_mask)
         else:
             post_trim_notes = []
 
@@ -6219,6 +6594,7 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 min_value_filters=int(min_value_filters),
                 required_keys=required_keys,
                 row_matrix=row_matrix,
+                initial_hist_mask=pre_hist_mask,
             )
             if gp is not None:
                 group_packages.append(gp)
@@ -6706,6 +7082,15 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         st.error(frame_msg)
         st.stop()
 
+    manual_sign_groups = _render_manual_sign_groups_panel(v_m, filter_vec, frame, frame_rows, antal_matcher)
+    manual_sign_groups_sig = _manual_sign_groups_signature(manual_sign_groups)
+    manual_hist_mask = _manual_sign_groups_hist_mask(v_m, manual_sign_groups, antal_matcher)
+    manual_frame_rows = _apply_manual_sign_groups_to_rows(frame_rows, manual_sign_groups, antal_matcher)
+    if manual_sign_groups and any(g.get('active') for g in manual_sign_groups):
+        if len(manual_frame_rows) == 0:
+            st.error('De manuella teckengrupperna lämnar inga rader i grundramen. Justera kraven innan du fortsätter.')
+            st.stop()
+
     # Toppfavoritfiltret finns nu som fasta filter: Topp 3, 4, 5 och 6 favoriter.
     # 5 bästa skrällar använder fast maxstreck 22% enligt standardvalet.
     top_fav_count = 3  # behålls bara för bakåtkompatibla sparnycklar
@@ -6755,7 +7140,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     # v12.0bi: Beslutskritiska filterrekommendationer räknas på hela grundramen.
     # Prestandaoptimeringen får inte ändra vilka intervall/paket som rekommenderas.
     # Urval används bara i separata visningsdiagnoser/popovers, inte för att välja filterintervall.
-    spec_candidate_rows = frame_rows
+    spec_candidate_rows = manual_frame_rows
     spec_sampled_for_specs = False
 
     _t_specs = time.perf_counter()
@@ -6768,6 +7153,8 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         tuple(str(x) for x in list(v_m.get('Correct_Row', []))[:120]),
         int(len(v_m)),
         int(len(frame_rows or [])),
+        int(len(manual_frame_rows or [])),
+        manual_sign_groups_sig,
         _short_hash_items(spec_candidate_rows),
         int(len(_streck_hist_db)) if isinstance(_streck_hist_db, pd.DataFrame) else 0,
     )
@@ -6793,7 +7180,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     st.session_state['v12_specs'] = specs
     _t_perf = _perf_mark('Bygga/läsa filterdefinitioner', _t_specs)
     cache_txt = 'cache' if specs_from_cache else 'ny beräkning'
-    st.caption(f"Exakt läge: filterrekommendationer och paketintervall räknas på hela grundramen ({len(frame_rows):,} rader, {cache_txt}). Snabburval används endast i vissa informationsrutor/diagnoser, aldrig för slutlig filtrering eller reducering.".replace(',', ' '))
+    st.caption(f"Exakt läge: filterrekommendationer och paketintervall räknas på aktuell radmassa efter manuella teckengrupper ({len(manual_frame_rows):,} av {len(frame_rows):,} rader, {cache_txt}). Snabburval används endast i vissa informationsrutor/diagnoser, aldrig för slutlig filtrering eller reducering.".replace(',', ' '))
     with ctrl_b:
         if st.button("Återställ alla filter till Av", use_container_width=True, key="v12_reset_all_filters_off"):
             for _k in list(st.session_state.keys()):
@@ -6896,7 +7283,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     pass
 
             rec_result = _build_recommended_filter_packages(
-                v_m, specs, frame_rows, frame, antal_matcher,
+                v_m, specs, manual_frame_rows, frame, antal_matcher,
                 min_step_reduction_pct=float(rec_min_step),
                 max_filters=int(rec_max_filters),
                 min_hit_count=int(rec_min_hit),
@@ -6905,6 +7292,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 required_keys=required_keys_now,
                 target_frame_after=int(rec_display_max_rows),
                 progress_cb=_ui_package_progress,
+                manual_hist_mask=manual_hist_mask,
             )
             if isinstance(rec_result, tuple):
                 packages, candidate_audit = rec_result
@@ -6919,7 +7307,10 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 'package_engine': 'pareto_multilevel_progress_posttrim_group_visible_diagnostics',
                 'manual_hist_target_pct': int(filter_hist_target_pct),
                 'top_fav_filters': 'Topp 3/4/5/6',
-                'frame_rows': int(len(frame_rows)),
+                'frame_rows': int(len(manual_frame_rows)),
+                'frame_rows_before_manual': int(len(frame_rows)),
+                'manual_sign_groups_sig': manual_sign_groups_sig,
+                'manual_sign_groups_active': int(sum(1 for g in manual_sign_groups if g.get('active'))),
                 'min_step': float(rec_min_step),
                 'max_filters': int(rec_max_filters),
                 'min_hit': int(rec_min_hit),
@@ -6929,6 +7320,10 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 'required_keys': list(required_keys_now),
             }
         packages = st.session_state.get('v12_recommended_packages') or []
+        _pkg_meta = st.session_state.get('v12_recommended_meta') or {}
+        if packages and _pkg_meta.get('manual_sign_groups_sig') != manual_sign_groups_sig:
+            st.warning('Manuella teckengrupper har ändrats sedan paketen beräknades. Beräkna rekommenderade paket igen innan du använder ett paket.')
+            packages = []
         rec_display_max_rows = int(st.session_state.get('v12_rec_display_max_rows', 5000))
         visible_packages = [p for p in packages if int(p.get('frame_after', 10**12)) <= rec_display_max_rows]
         hidden_packages = [p for p in packages if int(p.get('frame_after', 10**12)) > rec_display_max_rows]
@@ -7180,7 +7575,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     active_count = sum(1 for v in settings.values() if v['mode'] != 'Av')
     forced_count = sum(1 for v in settings.values() if v['mode'] == 'Tvingat')
     group_count = active_count - forced_count
-    hpkg, htot = _hist_package_passes(v_m, specs, settings, group_reqs)
+    hpkg, htot = _hist_package_passes(v_m, specs, settings, group_reqs, manual_sign_groups=manual_sign_groups, antal_matcher=antal_matcher)
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Aktiva filter", active_count)
@@ -7281,12 +7676,12 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     package_save_state = _collect_recommended_package_state_for_save(specs)
     filter_payload = _build_filterpaket_payload(
         specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher,
-        settings_override=settings, package_state=package_save_state,
+        settings_override=settings, package_state=package_save_state, manual_sign_groups=manual_sign_groups,
     )
     game_payload = _build_spelfil_payload(
         specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher,
         input_text, top_n, pay_min, frame, v_m, filter_vec, reducer_settings=reducer_save_settings,
-        settings_override=settings, package_state=package_save_state,
+        settings_override=settings, package_state=package_save_state, manual_sign_groups=manual_sign_groups,
     )
     with sidebar_save_slot.container():
         st.markdown("**Spara spelfil/filterpaket**")
@@ -7317,9 +7712,9 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     if go:
         st.session_state['v12_last_result_stale'] = False
         with st.spinner("Filtrerar exakt grundram..."):
-            filtered_rows = _apply_manual_filters(frame_rows, specs, settings, group_reqs)
+            filtered_rows = _apply_manual_filters(manual_frame_rows, specs, settings, group_reqs)
         st.session_state['v12_last_result'] = {'filtered_rows': filtered_rows, 'reduced_rows': [], 'settings': settings, 'group_reqs': group_reqs, 'hist_package': {'hit': int(hpkg), 'total': int(htot)}}
-        st.success(f"Filtrering klar: {len(frame_rows):,} → {len(filtered_rows):,} rader.".replace(',', ' '))
+        st.success(f"Filtrering klar: {len(frame_rows):,} → {len(manual_frame_rows):,} efter manuella teckengrupper → {len(filtered_rows):,} rader.".replace(',', ' '))
         miss = selected_signs_missing(filtered_rows, frame, antal_matcher)
         if miss:
             st.warning("Vissa markerade tecken saknas efter filter: " + format_missing_signs(miss))
