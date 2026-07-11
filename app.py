@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0bm – Minimerbara teckengrupper"
+APP_VERSION = "v12.0bo – Paketmotor kombinationstest"
 
 
 st.markdown("""
@@ -6399,6 +6399,122 @@ def _build_grouped_package_for_target(candidates, target, frame_rows, frame, ant
         'structure_filters': int(structure_filters),
     }
 
+
+def _best_filter_pair_lift(candidates, cur_hist, cur_frame, used_keys, target, htot, frame_rows, frame, antal_matcher, row_matrix=None, min_pair_reduction_pct=1.0, require_value_if_needed=False, max_keys=48, variants_per_key=2):
+    """Hittar ett filterpar som ger tydligt lyft trots att filtren var för svaga var för sig.
+
+    Detta är ett exakt test mot aktuell radmassa och de 30 liknande historiska
+    omgångarna. Det används av paketmotorn efter den vanliga greedy-trappan.
+    Syftet är att fånga filter A+B där A och B var för små var för sig, men
+    tillsammans ger ett rationellt extra steg utan att tappa målträffen.
+    """
+    try:
+        cur_hist = np.asarray(cur_hist, dtype=bool)
+        cur_frame = np.asarray(cur_frame, dtype=bool)
+        cur_frame_count = int(cur_frame.sum())
+        if cur_frame_count <= 0:
+            return None
+        used_keys = set(used_keys or [])
+        target = int(target)
+        min_pair_reduction_pct = float(min_pair_reduction_pct)
+
+        by_key = {}
+        for cand in candidates or []:
+            key = cand.get('key')
+            if key is None or key in used_keys:
+                continue
+            if int(cand.get('hist_hit', 0)) < target:
+                continue
+            try:
+                new_hist = cur_hist & np.asarray(cand['hist_mask'], dtype=bool)
+                hist_hit = int(new_hist.sum())
+                if hist_hit < target:
+                    continue
+                new_frame = cur_frame & np.asarray(cand['frame_mask'], dtype=bool)
+                new_count = int(new_frame.sum())
+                if new_count >= cur_frame_count:
+                    continue
+                step_pct = 100.0 * (cur_frame_count - new_count) / max(1, cur_frame_count)
+                if step_pct <= 0:
+                    continue
+            except Exception:
+                continue
+            is_value = str(cand.get('category', '')) == 'Värde & svårighet'
+            score = (hist_hit, float(step_pct), float(cand.get('red_pct', 0.0)), -new_count, 1 if is_value else 0)
+            by_key.setdefault(key, []).append({
+                'cand': cand,
+                'hist': new_hist,
+                'frame': new_frame,
+                'hist_hit': hist_hit,
+                'frame_count': new_count,
+                'step_pct': float(step_pct),
+                'is_value': bool(is_value),
+                'score': score,
+            })
+
+        if len(by_key) < 2:
+            return None
+
+        # Behåll bara de starkaste nivåerna per filter och de mest lovande filternycklarna.
+        per_key = {}
+        key_scores = []
+        for key, rows in by_key.items():
+            rows = sorted(rows, key=lambda r: r['score'], reverse=True)[:int(max(1, variants_per_key))]
+            per_key[key] = rows
+            best = rows[0]
+            key_scores.append((best['step_pct'], best['hist_hit'], best['score'], key))
+        key_scores.sort(reverse=True)
+        keys = [k for *_rest, k in key_scores[:int(max(2, max_keys))]]
+
+        best_pair = None
+        best_score = None
+        for i, key_a in enumerate(keys):
+            for key_b in keys[i+1:]:
+                for a in per_key.get(key_a, []):
+                    for b in per_key.get(key_b, []):
+                        try:
+                            pair_hist = cur_hist & np.asarray(a['cand']['hist_mask'], dtype=bool) & np.asarray(b['cand']['hist_mask'], dtype=bool)
+                            pair_hit = int(pair_hist.sum())
+                            if pair_hit < target:
+                                continue
+                            pair_frame = cur_frame & np.asarray(a['cand']['frame_mask'], dtype=bool) & np.asarray(b['cand']['frame_mask'], dtype=bool)
+                            pair_count = int(pair_frame.sum())
+                            if pair_count >= cur_frame_count:
+                                continue
+                            pair_step = 100.0 * (cur_frame_count - pair_count) / max(1, cur_frame_count)
+                            if pair_step < min_pair_reduction_pct:
+                                continue
+                        except Exception:
+                            continue
+                        value_add = int(bool(a['is_value'])) + int(bool(b['is_value']))
+                        if require_value_if_needed and value_add <= 0:
+                            continue
+                        if row_matrix is not None:
+                            if not _mask_keeps_teckenskydd(row_matrix, pair_frame, frame, antal_matcher):
+                                continue
+                        else:
+                            test_rows = _rows_from_mask(frame_rows, pair_frame)
+                            if selected_signs_missing(test_rows, frame, antal_matcher):
+                                continue
+                        # Synergi = parets lyft utöver bästa enskilda lyftet. Ett positivt värde
+                        # visar att kombinationen gör något som filtren inte gör ensamma.
+                        synergy = float(pair_step) - max(float(a['step_pct']), float(b['step_pct']))
+                        min_individual_hit = min(int(a['hist_hit']), int(b['hist_hit']))
+                        score = (
+                            value_add if require_value_if_needed else min(value_add, 1),
+                            int(pair_hit),
+                            float(pair_step),
+                            float(synergy),
+                            int(min_individual_hit),
+                            -int(pair_count),
+                        )
+                        if best_pair is None or score > best_score:
+                            best_pair = (a, b, pair_hist, pair_frame, pair_hit, pair_count, pair_step, synergy)
+                            best_score = score
+        return best_pair
+    except Exception:
+        return None
+
 def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14, min_hit_count=15, frame_adapt=True, min_value_filters=3, required_keys=None, target_frame_after=None, progress_cb=None, manual_hist_mask=None):
     """Bygger Pareto-rekommenderade filterpaket.
 
@@ -6697,6 +6813,71 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 'Samlad träff efter steg': f"{hist_hit}/{htot}",
             })
 
+        # Kombinationslyft: testa filterpar som var för svaga var för sig men
+        # som tillsammans ger tydlig extra reducering utan att tappa målträffen.
+        # Detta gör paketmotorn mindre girig och bättre på överlappande småfilter.
+        combo_notes = []
+        combo_round = 0
+        while len(chosen) + 2 <= int(max_filters) and combo_round < 2:
+            cur_frame_count = int(cur_frame.sum())
+            if cur_frame_count <= 0:
+                break
+            value_count_now = sum(1 for c in chosen if str(c.get('category', '')) == 'Värde & svårighet')
+            need_value_pair = value_count_now < int(min_value_filters)
+            pair_min_step = max(1.0, float(min_step_reduction_pct) * 1.10)
+            if required_keys and target_frame_after is not None and cur_frame_count > int(target_frame_after):
+                pair_min_step = min(pair_min_step, 0.75)
+            pair = _best_filter_pair_lift(
+                candidates,
+                cur_hist,
+                cur_frame,
+                used_keys,
+                int(target),
+                int(htot),
+                frame_rows,
+                frame,
+                antal_matcher,
+                row_matrix=row_matrix,
+                min_pair_reduction_pct=pair_min_step,
+                require_value_if_needed=need_value_pair,
+                max_keys=42,
+                variants_per_key=2,
+            )
+            if pair is None:
+                break
+            a, b, pair_hist, pair_frame, pair_hit, pair_count, pair_step, synergy = pair
+            cand_a = dict(a['cand'])
+            cand_b = dict(b['cand'])
+            combo_round += 1
+            combo_label = f"Kombinationslyft {combo_round}"
+            cand_a['combo_lift'] = combo_label
+            cand_b['combo_lift'] = combo_label
+            chosen.extend([cand_a, cand_b])
+            used_keys.update([cand_a.get('key'), cand_b.get('key')])
+            cur_hist = pair_hist
+            cur_frame = pair_frame
+            steps.append({
+                'Filter': f"{cand_a.get('name','')} + {cand_b.get('name','')}",
+                'Kategori': 'Kombinationslyft',
+                'Intervall': f"{cand_a.get('interval_txt','-')} + {cand_b.get('interval_txt','-')}",
+                'Intervallträff': f"{int(cand_a.get('hist_hit',0))}/{htot} + {int(cand_b.get('hist_hit',0))}/{htot}",
+                'Testnivå': 'filterpar',
+                'Stegreducering': f"{float(pair_step):.1f}%",
+                'Efter filter': int(pair_count),
+                'Samlad träff efter steg': f"{int(pair_hit)}/{htot}",
+            })
+            combo_notes.append({
+                'Typ': 'Kombinationslyft',
+                'Filter': f"{cand_a.get('name','')} + {cand_b.get('name','')}",
+                'Intervall': f"{cand_a.get('interval_txt','-')} + {cand_b.get('interval_txt','-')}",
+                'Enskild extra reducering': f"{float(a.get('step_pct',0.0)):.1f}% / {float(b.get('step_pct',0.0)):.1f}%",
+                'Parreducering': f"{float(pair_step):.1f}%",
+                'Synergi': f"{float(synergy):+.1f}%",
+                'Efter filter': int(pair_count),
+                'Samlad träff bevarad': f"{int(pair_hit)}/{int(htot)}",
+            })
+
+
         # Eftertrimma valda nivåer: byt till hårdare intervall om hela paketets
         # samlade historikträff inte försämras. Detta fångar t.ex. FAT Summa
         # 19–30 -> 19–26 när båda ger samma 23/30 i färdigt paket.
@@ -6714,6 +6895,8 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             steps, _, _, _, _ = _rebuild_forced_package_steps(chosen, htot, ftot, initial_hist_mask=pre_hist_mask)
         else:
             post_trim_notes = []
+        if combo_notes:
+            post_trim_notes = list(combo_notes) + list(post_trim_notes or [])
 
         final_hit = int(cur_hist.sum())
         final_keep = int(cur_frame.sum())
@@ -7001,6 +7184,51 @@ def _group_packages_status_text(packages, max_after_rows):
         best = min(hidden, key=lambda p: int(p.get('frame_after', 10**12)))
         return f"Grupppaket finns, men inget ligger under {int(max_after_rows):,} rader. Närmast är {int(best.get('frame_after',0)):,} rader med {int(best.get('hist_hit',0))}/{int(best.get('hist_total',0))} samlad träff.".replace(',', ' ')
     return "Inga hårda grupppaket att visa."
+
+
+def _parse_spelvarde_value(v):
+    """Robust konvertering av visat spelvärde till tal för färgkodning."""
+    try:
+        return float(str(v).replace(' ', '').replace(',', '.'))
+    except Exception:
+        return None
+
+
+def _spelvarde_band(value):
+    """Klassar spelvärde enligt appens praktiska tolkningszoner.
+
+    5 000-7 000 är bästa normalzonen: bra balans mellan samlad historikträff
+    och faktisk reducering. Färgningen är bara beslutsstöd; paket ska fortfarande
+    bedömas på samlad träff, radantal och filterinnehåll.
+    """
+    v = _parse_spelvarde_value(value)
+    if v is None:
+        return ""
+    if 5000 <= v <= 7000:
+        return "background-color: rgba(46, 204, 113, 0.28); font-weight: 700;"
+    if 4000 <= v < 5000 or 7000 < v <= 8000:
+        return "background-color: rgba(241, 196, 15, 0.24);"
+    if v > 8000:
+        return "background-color: rgba(230, 126, 34, 0.26); font-weight: 700;"
+    return "color: rgba(128,128,128,0.95);"
+
+
+def _style_spelvarde_df(df):
+    """Markerar spelvärdeskolumnen utan att ändra själva dataframen."""
+    if df is None or getattr(df, 'empty', True) or 'Spelvärde' not in df.columns:
+        return df
+    try:
+        return df.style.map(_spelvarde_band, subset=['Spelvärde'])
+    except Exception:
+        try:
+            return df.style.applymap(_spelvarde_band, subset=['Spelvärde'])
+        except Exception:
+            return df
+
+
+def _spelvarde_caption():
+    return "Spelvärde färgkodas som beslutsstöd: grönt 5 000–7 000, gult 4 000–5 000 eller 7 000–8 000, orange över 8 000. Samlad historikträff och radantal väger fortfarande tyngst."
+
 
 def _apply_recommended_package_to_session(package, specs, filter_hist_target_pct, top_fav_count):
     chosen_keys = {c['key'] for c in package.get('filters', [])}
@@ -7360,7 +7588,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     st.caption("När du ändrar minsta historiska träff får varje filter nya slider-nycklar och startar på sitt rekommenderade intervall. 100% ska därför ge startintervall med 30/30 där det är möjligt.")
 
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
-        st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn bygger nivåtrappa per filter, visar progressklocka/ETA, eftertrimmar valt paket och visar nu hårda grupppaket som egen pakettyp. Gruppresultatet visas alltid, även när det ligger över radgränsen eller inte kunde byggas.")
+        st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn bygger nivåtrappa per filter, testar även kombinationslyft av småfilter, visar progressklocka/ETA, eftertrimmar valt paket och visar hårda grupppaket som egen pakettyp. Gruppresultatet visas alltid, även när det ligger över radgränsen eller inte kunde byggas.")
 
         with st.expander("Välj filter som måste ingå i rekommenderade paket", expanded=False):
             st.caption("Kryssa i filter du vill att paketmotorn ska använda. Ändringar ligger i ett formulär och sparas först när du trycker på knappen, så sidan laddar inte om för varje kryss.")
@@ -7500,7 +7728,8 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 top_packages = _top_playable_packages(visible_packages, 3)
                 st.markdown("**3 mest spelvärda paket**")
                 st.caption("Sorterat på kombinationen samlad historisk träff + faktisk reducering. Paket med fler värde-/poängfilter får en liten bonus eftersom de styr utdelningsprofilen bättre.")
-                st.dataframe(_recommended_packages_summary_df(top_packages), use_container_width=True, hide_index=True)
+                st.dataframe(_style_spelvarde_df(_recommended_packages_summary_df(top_packages)), use_container_width=True, hide_index=True)
+                st.caption(_spelvarde_caption())
 
                 # v12.0ae: visa grupppaketsektionen alltid, även om inga grupppaket
                 # ligger under radgränsen. Annars ser funktionen ut att saknas.
@@ -7508,7 +7737,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 st.caption("Visas separat eftersom grupppaket är en annan riskprofil: fler filter kan ingå men alla måste inte sitta samtidigt. Sektionen visas även när bästa grupppaket ligger över radgränsen.")
                 group_status_df = _group_packages_status_df(packages, rec_display_max_rows, max_rows=6)
                 if not group_status_df.empty:
-                    st.dataframe(group_status_df, use_container_width=True, hide_index=True)
+                    st.dataframe(_style_spelvarde_df(group_status_df), use_container_width=True, hide_index=True)
                     st.caption(_group_packages_status_text(packages, rec_display_max_rows))
                 else:
                     st.info(_group_packages_status_text(packages, rec_display_max_rows))
@@ -7517,7 +7746,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 rest_packages = [p for p in visible_packages if p not in top_packages and p not in best_group_packages]
                 if rest_packages:
                     with st.expander("Visa övriga spelbara paket under radgränsen", expanded=False):
-                        st.dataframe(_recommended_packages_summary_df(rest_packages), use_container_width=True, hide_index=True)
+                        st.dataframe(_style_spelvarde_df(_recommended_packages_summary_df(rest_packages)), use_container_width=True, hide_index=True)
             else:
                 top_packages = []
                 st.warning("Inga paket hamnade under vald radgräns. Visar därför bästa paketet över gränsen som referens så att listan inte blir tom.")
@@ -7525,13 +7754,14 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     best_over = _top_playable_packages(hidden_packages, 1)
                     if best_over:
                         st.markdown("**Bästa paket över radgränsen**")
-                        st.dataframe(_recommended_packages_summary_df(best_over), use_container_width=True, hide_index=True)
+                        st.dataframe(_style_spelvarde_df(_recommended_packages_summary_df(best_over)), use_container_width=True, hide_index=True)
+                        st.caption(_spelvarde_caption())
                         st.caption("Detta paket klarar dina krav bäst men lämnar fler rader än vald gräns. Höj radgränsen eller kryssa i fler/lämpligare filter om du vill pressa vidare.")
                 st.markdown("**Bästa hårda grupppaket**")
                 st.caption("Sektionen visas även när inga grupppaket är spelbara under radgränsen, så du ser om gruppmotorn faktiskt byggde något.")
                 group_status_df = _group_packages_status_df(packages, rec_display_max_rows, max_rows=6)
                 if not group_status_df.empty:
-                    st.dataframe(group_status_df, use_container_width=True, hide_index=True)
+                    st.dataframe(_style_spelvarde_df(group_status_df), use_container_width=True, hide_index=True)
                     st.caption(_group_packages_status_text(packages, rec_display_max_rows))
                 else:
                     st.info(_group_packages_status_text(packages, rec_display_max_rows))
@@ -7573,7 +7803,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                         if sel_pkg.get('post_trim_notes'):
                             st.markdown("**Eftertrimning utan tappad samlad träff**")
                             st.dataframe(pd.DataFrame(sel_pkg.get('post_trim_notes') or []), use_container_width=True, hide_index=True)
-                            st.caption("Eftertrim betyder att appen hittade ett snävare intervall som gav färre rader men behöll samma samlade historikträff för paketet.")
+                            st.caption("Eftertrim betyder att appen hittade ett snävare intervall som gav färre rader men behöll samma samlade historikträff. Kombinationslyft betyder att två små filter tillsammans gav ett tydligt extra steg trots att de var svaga var för sig.")
                     else:
                         st.info("Detta paket hittade inga filter som gav tillräcklig extra reducering inom träffmålet.")
                 if apply_selected_package:
