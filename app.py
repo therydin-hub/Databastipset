@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0bo – Paketmotor kombinationstest"
+APP_VERSION = "v12.0bq – Stabil rättningsinput"
 
 
 st.markdown("""
@@ -5142,6 +5142,7 @@ def parse_live_result_row(text, antal_matcher):
     if not raw:
         return None, ""
     chars = []
+    invalid = []
     for ch in raw:
         if ch in {'1', 'X', '2'}:
             chars.append(ch)
@@ -5150,13 +5151,72 @@ def parse_live_result_row(text, antal_matcher):
         elif ch in {' ', ',', ';', '/', '|', ':'}:
             continue
         else:
-            # Ignorera övriga separatorer hellre än att krascha på inklistrad text.
-            continue
+            invalid.append(ch)
+            chars.append(ch)
+    if invalid:
+        bad = ', '.join(sorted(set(invalid)))
+        return None, f"Live-raden innehåller ogiltiga tecken: {bad}. Använd bara 1, X, 2 eller - för orättade matcher."
     if len(chars) != int(antal_matcher):
         return None, f"Live-raden måste innehålla exakt {int(antal_matcher)} positioner. Använd 1/X/2 för kända matcher och - för ej rättade. Hittade {len(chars)}."
     if not any(c in {'1', 'X', '2'} for c in chars):
         return None, "Minst en match måste vara rättad/påbörjad."
     return ''.join(chars), ""
+
+
+def count_live_result_input(text):
+    """Räknar live-facitpositioner utan att kräva full giltighet.
+
+    Returnerar antal positioner, antal rättade positioner, normaliserad rad
+    och ogiltiga tecken. Separatorer ignoreras. Ogiltiga tecken räknas
+    som positioner i räknaren så användaren ser faktisk längd, men de stoppas vid rättning.
+    """
+    chars = []
+    known = 0
+    invalid = []
+    for ch in str(text or '').strip().upper():
+        if ch in {'1', 'X', '2'}:
+            chars.append(ch)
+            known += 1
+        elif ch in {'-', '?', '_', '*'}:
+            chars.append('-')
+        elif ch in {' ', ',', ';', '/', '|', ':'}:
+            continue
+        else:
+            chars.append(ch)
+            invalid.append(ch)
+    return len(chars), known, ''.join(chars), sorted(set(invalid))
+
+
+def count_result_row_input(text):
+    """Räknar 1/X/2-tecken i en sluträttningsrad. Separatorer ignoreras."""
+    return len(re.findall(r'[1X2]', str(text or '').upper()))
+
+
+def live_counter_status(pos_count, antal_matcher):
+    if pos_count == int(antal_matcher):
+        return "OK"
+    if pos_count < int(antal_matcher):
+        return f"Saknar {int(antal_matcher) - pos_count}"
+    return f"För många: +{pos_count - int(antal_matcher)}"
+
+
+def render_counter_caption(kind, pos_count, known_count=None, antal_matcher=13, normalized='', invalid_chars=None):
+    invalid_chars = invalid_chars or []
+    status = live_counter_status(pos_count, antal_matcher)
+    if known_count is None:
+        msg = f"{kind}: {pos_count}/{int(antal_matcher)} tecken · {status}"
+    else:
+        msg = f"{kind}: {pos_count}/{int(antal_matcher)} positioner · rättade {known_count} · {status}"
+    if normalized and pos_count == int(antal_matcher):
+        msg += f" · {normalized}"
+    if invalid_chars:
+        st.error(msg + f" · Ogiltigt: {', '.join(invalid_chars)}", icon="⛔")
+    elif pos_count == int(antal_matcher):
+        st.success(msg, icon="✅")
+    elif pos_count == 0:
+        st.caption(msg)
+    else:
+        st.warning(msg, icon="⚠️")
 
 
 def live_known_positions(live_row):
@@ -8191,12 +8251,28 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
 
         if correction_mode.startswith("Live"):
             st.caption("Skriv 1/X/2 för matcher som ska rättas och - för matcher som inte ska räknas ännu. Exempel: XX2--1---X---")
+            if 'v12_live_correction_draft' not in st.session_state:
+                st.session_state['v12_live_correction_draft'] = st.session_state.get('v12_live_correction_input', '')
+
+            # v12.0bq: Rättningsraden måste vara stabil. Tidigare kunde Streamlit-reruns
+            # visa senast sparade rättningsrad igen när man ändrade texten, vilket gjorde att
+            # användaren ibland behövde skriva/rätta två gånger. Formen gör att textändringen
+            # och knappen skickas som en enda transaktion, medan tabellerna nedan alltid bygger
+            # på senast uttryckligen rättad rad.
             with st.form("v12_live_correction_form", clear_on_submit=False):
-                live_txt = st.text_input("Live-facit", value=st.session_state.get('v12_live_correction_input', ''), placeholder="Exempel: XX2--1---X---")
+                live_txt_draft = st.text_input("Live-facit", key='v12_live_correction_draft', placeholder="Exempel: XX2--1---X---")
+                live_pos_count, live_known_count, live_normalized, live_invalid_chars = count_live_result_input(live_txt_draft)
+                render_counter_caption("Teckenräknare live-facit", live_pos_count, live_known_count, antal_matcher, live_normalized, live_invalid_chars)
                 live_submit = st.form_submit_button("Rätta live", use_container_width=True)
+
             if live_submit:
-                st.session_state['v12_live_correction_input'] = live_txt
-            live_txt = st.session_state.get('v12_live_correction_input', '')
+                st.session_state['v12_live_correction_input'] = live_txt_draft
+
+            live_submitted_txt = st.session_state.get('v12_live_correction_input', '')
+            live_dirty = (str(st.session_state.get('v12_live_correction_draft', '') or '') != str(live_submitted_txt or ''))
+            if live_dirty and live_submitted_txt:
+                st.info("Live-facit har ändrats. Tabellerna nedan visar senast rättade rad. Klicka **Rätta live** för att uppdatera.")
+            live_txt = live_submitted_txt
             live_row, live_err = parse_live_result_row(live_txt, antal_matcher)
             if live_txt and live_err:
                 st.error(live_err)
@@ -8242,8 +8318,12 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 st.caption("Grön = träff på rättad match. Röd = miss på rättad match. Grå = matchen räknas inte ännu.")
 
         else:
-            with st.form("v12_correction_form", clear_on_submit=False):
-                corr_txt = st.text_input("Rätt rad", value=st.session_state.get('v12_correction_input', ''), placeholder="Exempel: 1X2X1122X... eller 1,X,2,X,...")
+            if 'v12_correction_draft' not in st.session_state:
+                st.session_state['v12_correction_draft'] = st.session_state.get('v12_correction_input', '')
+            with st.form("v12_final_correction_form", clear_on_submit=False):
+                corr_txt = st.text_input("Rätt rad", key='v12_correction_draft', placeholder="Exempel: 1X2X1122X... eller 1,X,2,X,...")
+                corr_count = count_result_row_input(corr_txt)
+                render_counter_caption("Teckenräknare rätt rad", corr_count, None, antal_matcher, '')
                 corr_submit = st.form_submit_button("Rätta system")
             if corr_submit:
                 rr, err = parse_result_row(corr_txt, antal_matcher)
@@ -8253,7 +8333,10 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 else:
                     st.session_state['v12_correction_input'] = corr_txt
                     st.session_state['v12_correction_row'] = rr
-            corr_row = st.session_state.get('v12_correction_row')
+            corr_dirty = (str(corr_txt or '') != str(st.session_state.get('v12_correction_input', '') or ''))
+            if corr_dirty and st.session_state.get('v12_correction_row'):
+                st.info("Rätt rad har ändrats. Klicka **Rätta system** för att uppdatera rättningen.")
+            corr_row = '' if corr_dirty else st.session_state.get('v12_correction_row')
             if corr_row:
                 base_rows_for_corr = frame_rows
                 filtered_rows_for_corr = filtered_rows
