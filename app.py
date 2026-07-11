@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0bf – Live-rättning och bästa rader"
+APP_VERSION = "v12.0bg – Rerun-kontroll och formulär"
 
 
 st.markdown("""
@@ -6743,59 +6743,68 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         st.caption("Testar Pareto-bästa paket på din exakta grundram. Paketmotorn bygger nivåtrappa per filter, visar progressklocka/ETA, eftertrimmar valt paket och visar nu hårda grupppaket som egen pakettyp. Gruppresultatet visas alltid, även när det ligger över radgränsen eller inte kunde byggas.")
 
         with st.expander("Välj filter som måste ingå i rekommenderade paket", expanded=False):
-            st.caption("Kryssa i filter du vill att paketmotorn ska använda. Motorn får själv avgöra om de passar bäst som tvingade filter eller i hårda grupper. Om ett ikryssat filter inte kan användas utan att träffbild/teckenskydd rasar visas inget paket på den nivån.")
-            required_keys_now = []
-            req_cats = _ordered_categories_from_specs(specs)
-            for _cat in req_cats:
-                st.markdown(f"**{_cat}**")
-                _cat_specs = [_s for _s in specs if _s.get('category') == _cat]
-                _cols = st.columns(3)
-                for _i, _spec in enumerate(_cat_specs):
-                    with _cols[_i % 3]:
-                        if st.checkbox(_spec.get('name',''), key=f"v12_reqpkg_{_spec.get('key')}"):
-                            required_keys_now.append(_spec.get('key'))
-            if required_keys_now:
-                st.success(f"{len(required_keys_now)} filter är markerade som måste ingå i paketmotorn.")
+            st.caption("Kryssa i filter du vill att paketmotorn ska använda. Ändringar ligger i ett formulär och sparas först när du trycker på knappen, så sidan laddar inte om för varje kryss.")
+            saved_required_keys = set(st.session_state.get('v12_required_pkg_keys', []))
+            required_keys_draft = []
+            with st.form("v12_required_pkg_form"):
+                req_cats = _ordered_categories_from_specs(specs)
+                for _cat in req_cats:
+                    st.markdown(f"**{_cat}**")
+                    _cat_specs = [_s for _s in specs if _s.get('category') == _cat]
+                    _cols = st.columns(3)
+                    for _i, _spec in enumerate(_cat_specs):
+                        with _cols[_i % 3]:
+                            _key = _spec.get('key')
+                            if st.checkbox(_spec.get('name',''), value=(_key in saved_required_keys), key=f"v12_reqpkg_form_{_key}"):
+                                required_keys_draft.append(_key)
+                req_save = st.form_submit_button("Spara obligatoriska filter", use_container_width=True)
+            if req_save:
+                st.session_state['v12_required_pkg_keys'] = list(dict.fromkeys(required_keys_draft))
+                st.success(f"{len(required_keys_draft)} obligatoriska filter sparade.")
+            required_keys_saved = st.session_state.get('v12_required_pkg_keys', [])
+            if required_keys_saved:
+                st.success(f"{len(required_keys_saved)} filter är markerade som måste ingå i paketmotorn.")
             else:
                 st.info("Inga obligatoriska filter valda. Paketmotorn söker fritt.")
-        required_keys_now = [s.get('key') for s in specs if st.session_state.get(f"v12_reqpkg_{s.get('key')}", False)]
+        required_keys_now = list(st.session_state.get('v12_required_pkg_keys', []))
 
-        rp_c1, rp_c2, rp_c3, rp_c4, rp_c5, rp_c6, rp_c7 = st.columns([1, 1, 1, 1, 1, 1, 1])
-        with rp_c1:
-            rec_min_step = st.number_input(
-                "Minsta extra reducering",
-                min_value=0.5,
-                max_value=20.0,
-                value=5.0,
-                step=0.5,
-                key="v12_rec_min_step",
-                help="Gäller främst efter att värdekärnan är byggd. Värde-/poängfilter som behövs för kvoten får läggas till med lägre marginalkrav om de håller samlad träff.",
-            )
-        with rp_c2:
-            rec_max_filters = st.number_input("Max filter i paket", min_value=1, max_value=40, value=18, step=1, key="v12_rec_max_filters")
-        with rp_c3:
-            rec_min_hit = st.number_input("Sök ner till träff", min_value=1, max_value=int(len(v_m)), value=min(15, int(len(v_m))), step=1, key="v12_rec_min_hit", help="Exempel: 15 betyder att paketmotorn söker ända ner till 15/30 när historikbasen är 30.")
-        with rp_c4:
-            rec_display_max_rows = st.number_input("Visa paket under", min_value=100, max_value=75000, value=5000, step=100, key="v12_rec_display_max_rows", help="Paket över denna filtermassa döljs i huvudlistan. Standard 5 000 eftersom bredare paket oftast är opraktiska inför TipsetMatrix.")
-        with rp_c5:
-            rec_frame_adapt = st.checkbox(
-                "Anpassa mot grundram",
-                value=True,
-                key="v12_rec_frame_adapt",
-                help="Undviker paketfilter som ligger för nära grundramens yttergränser. Gäller även FAT-sekvenser som blir grundramsdrivna, t.ex. när ramen redan låser minst 3 sekvensträffar och filtret bara kapar max.",
-            )
-        with rp_c6:
-            rec_min_value_filters = st.number_input(
-                "Min värde-/poängfilter",
-                min_value=0,
-                max_value=10,
-                value=3,
-                step=1,
-                key="v12_rec_min_value_filters",
-                help="Hård spärr: ett rekommenderat paket måste innehålla minst detta antal filter från Värde & svårighet. Annars visas paketet inte i listan.",
-            )
-        with rp_c7:
-            build_recs = st.button("Beräkna paket", use_container_width=True, key="v12_build_recommended_packages")
+        with st.form("v12_recommended_package_engine_form"):
+            st.caption("Paketmotorns inställningar ligger i formulär. Ändra flera saker och tryck Beräkna paket en gång.")
+            rp_c1, rp_c2, rp_c3, rp_c4, rp_c5, rp_c6 = st.columns([1, 1, 1, 1, 1, 1])
+            with rp_c1:
+                rec_min_step = st.number_input(
+                    "Minsta extra reducering",
+                    min_value=0.5,
+                    max_value=20.0,
+                    value=float(st.session_state.get("v12_rec_min_step", 5.0)),
+                    step=0.5,
+                    key="v12_rec_min_step",
+                    help="Gäller främst efter att värdekärnan är byggd. Värde-/poängfilter som behövs för kvoten får läggas till med lägre marginalkrav om de håller samlad träff.",
+                )
+            with rp_c2:
+                rec_max_filters = st.number_input("Max filter i paket", min_value=1, max_value=40, value=int(st.session_state.get("v12_rec_max_filters", 18)), step=1, key="v12_rec_max_filters")
+            with rp_c3:
+                rec_min_hit = st.number_input("Sök ner till träff", min_value=1, max_value=int(len(v_m)), value=min(int(st.session_state.get("v12_rec_min_hit", min(15, int(len(v_m))))), int(len(v_m))), step=1, key="v12_rec_min_hit", help="Exempel: 15 betyder att paketmotorn söker ända ner till 15/30 när historikbasen är 30.")
+            with rp_c4:
+                rec_display_max_rows = st.number_input("Visa paket under", min_value=100, max_value=75000, value=int(st.session_state.get("v12_rec_display_max_rows", 5000)), step=100, key="v12_rec_display_max_rows", help="Paket över denna filtermassa döljs i huvudlistan. Standard 5 000 eftersom bredare paket oftast är opraktiska inför TipsetMatrix.")
+            with rp_c5:
+                rec_frame_adapt = st.checkbox(
+                    "Anpassa mot grundram",
+                    value=bool(st.session_state.get("v12_rec_frame_adapt", True)),
+                    key="v12_rec_frame_adapt",
+                    help="Undviker paketfilter som ligger för nära grundramens yttergränser. Gäller även FAT-sekvenser som blir grundramsdrivna, t.ex. när ramen redan låser minst 3 sekvensträffar och filtret bara kapar max.",
+                )
+            with rp_c6:
+                rec_min_value_filters = st.number_input(
+                    "Min värde-/poängfilter",
+                    min_value=0,
+                    max_value=10,
+                    value=int(st.session_state.get("v12_rec_min_value_filters", 3)),
+                    step=1,
+                    key="v12_rec_min_value_filters",
+                    help="Hård spärr: ett rekommenderat paket måste innehålla minst detta antal filter från Värde & svårighet. Annars visas paketet inte i listan.",
+                )
+            build_recs = st.form_submit_button("Beräkna paket", use_container_width=True)
         if build_recs:
             start_clock = time.time()
             progress_bar = st.progress(0, text="Startar paketmotor...")
@@ -6918,11 +6927,14 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 selectable_packages = _dedupe_package_list(_sel_base + _sel_groups)
             if not visible_packages and selectable_packages:
                 st.info("Du kan använda bästa paketet över radgränsen, men filtermassan blir bredare än din valda gräns.")
+            apply_selected_package = False
             if not selectable_packages:
                 sel_pkg = None
             else:
                 labels = [f"{p['hist_hit']}/{p['hist_total']} · {p['frame_start']:,}→{p['frame_after']:,} · {p['reduction_pct']:.1f}% · {p['num_filters']} filter · {p.get('value_filters',0)} värde · {p.get('package_type','Tvingat')}".replace(',', ' ') for p in selectable_packages]
-                pick_idx = st.selectbox("Välj toppaket att använda", list(range(len(selectable_packages))), format_func=lambda i: labels[i], key="v12_recommended_pick")
+                with st.form("v12_select_recommended_package_form"):
+                    pick_idx = st.selectbox("Välj toppaket att använda", list(range(len(selectable_packages))), format_func=lambda i: labels[i], key="v12_recommended_pick")
+                    apply_selected_package = st.form_submit_button("✅ Använd valt paket i filtercentralen", use_container_width=True)
                 sel_pkg = selectable_packages[int(pick_idx)]
             if sel_pkg is not None:
                 with st.expander("Visa filter och intervall i valt paket", expanded=False):
@@ -6935,10 +6947,10 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                             st.caption("Eftertrim betyder att appen hittade ett snävare intervall som gav färre rader men behöll samma samlade historikträff för paketet.")
                     else:
                         st.info("Detta paket hittade inga filter som gav tillräcklig extra reducering inom träffmålet.")
-                if st.button("✅ Använd valt paket i filtercentralen", use_container_width=True, key="v12_apply_recommended_package"):
+                if apply_selected_package:
                     _apply_recommended_package_to_session(sel_pkg, specs, filter_hist_target_pct, top_fav_count)
-                    st.success("Paketet har lagts in i filtercentralen.")
-                    st.rerun()
+                    st.session_state['v12_last_result_stale'] = True
+                    st.success("Paketet har lagts in i filtercentralen. Kontrollera filtercentralen nedanför och kör filtrering när du är nöjd.")
         else:
             candidate_audit = st.session_state.get('v12_recommended_candidate_audit')
             if st.session_state.get('v12_recommended_meta'):
@@ -6953,65 +6965,71 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     cats = _ordered_categories_from_specs(specs)
 
     settings = {}
-    for ci, cat in enumerate(cats):
-        with st.expander(f"📂 {cat}", expanded=(ci == 0)):
-            cat_specs = [s for s in specs if s['category'] == cat]
-            for spec in cat_specs:
-                k = spec['key']
-                mode_key = f'filter_mode_{k}'
-                # Viktigt: range_key innehåller träffmålet.
-                # Streamlit återanvänder annars gamla slider-värden från session_state och ignorerar nytt default-value.
-                # Det var därför "Rek. intervall" kunde vara 95/100%, medan "Nu valt" låg kvar på gammalt 90%-intervall.
-                range_key = f'filter_range_{k}_h{filter_hist_target_pct}_tf{top_fav_count}'
-                default_mode = st.session_state.get(mode_key, 'Av')
-                lo, hi = spec['bounds']
-                dec = spec['decimals']
-                default_interval = _current_interval_for_spec(spec)
-                try:
-                    val = (max(lo, float(default_interval[0])), min(hi, float(default_interval[1])))
-                except Exception:
-                    val = spec['default_interval']
-                if range_key in st.session_state:
+    with st.form("v12_filtercentral_form"):
+        st.caption("Ändra flera filter utan att sidan laddar om. Tryck Applicera filterändringar när du är klar.")
+        for ci, cat in enumerate(cats):
+            with st.expander(f"📂 {cat}", expanded=(ci == 0)):
+                cat_specs = [s for s in specs if s['category'] == cat]
+                for spec in cat_specs:
+                    k = spec['key']
+                    mode_key = f'filter_mode_{k}'
+                    # Viktigt: range_key innehåller träffmålet.
+                    # Streamlit återanvänder annars gamla slider-värden från session_state och ignorerar nytt default-value.
+                    # Det var därför "Rek. intervall" kunde vara 95/100%, medan "Nu valt" låg kvar på gammalt 90%-intervall.
+                    range_key = f'filter_range_{k}_h{filter_hist_target_pct}_tf{top_fav_count}'
+                    default_mode = st.session_state.get(mode_key, 'Av')
+                    lo, hi = spec['bounds']
+                    dec = spec['decimals']
+                    default_interval = _current_interval_for_spec(spec)
                     try:
-                        cur = st.session_state[range_key]
-                        if float(cur[0]) < float(lo) or float(cur[1]) > float(hi):
-                            st.session_state[range_key] = val
+                        val = (max(lo, float(default_interval[0])), min(hi, float(default_interval[1])))
                     except Exception:
-                        st.session_state[range_key] = val
-                c1, c2, c3, c4 = st.columns([1.35, 1.0, 3.0, 0.45])
-                with c1:
-                    st.markdown(f"**{spec['name']}**")
-                    hp, ht, pct = _hist_pass_count(spec['hist_values'], spec['default_interval'])
-                    st.caption(f"Rek: {_display_interval(spec['default_interval'], dec)} · {hp}/{ht}")
-                with c2:
-                    mode = st.selectbox(
-                        "Läge",
-                        mode_options,
-                        index=mode_options.index(default_mode) if default_mode in mode_options else 0,
-                        key=mode_key,
-                        label_visibility="collapsed",
-                    )
-                with c3:
-                    step = 1 if dec == 0 else (0.01 if dec >= 2 else 0.1)
-                    if dec == 0:
-                        lo_i, hi_i = int(lo), int(hi)
-                        val_i = (int(round(val[0])), int(round(val[1])))
-                        rng = st.slider("Intervall", lo_i, hi_i, val_i, step=1, key=range_key, label_visibility="collapsed")
-                    else:
-                        rng = st.slider("Intervall", float(lo), float(hi), (float(val[0]), float(val[1])), step=step, key=range_key, label_visibility="collapsed")
-                with c4:
-                    # Popover öppnas/stängs i klienten och triggar normalt inte en full sidkörning,
-                    # till skillnad från en vanlig knapp. Statistik visas därmed nära filtret utan
-                    # separat scrollsektion och utan att Auto/TipsetMatrix körs om.
-                    if hasattr(st, "popover"):
-                        with st.popover("ℹ️", help="Visa frekvenstabell, träff och reducering för detta filter"):
-                            _render_inline_filter_info(spec, rng, frame_rows, frame, antal_matcher)
-                    else:
-                        with st.expander("ℹ️", expanded=False):
-                            _render_inline_filter_info(spec, rng, frame_rows, frame, antal_matcher)
-                _render_favorite_shock_diagnostics(spec, rng, frame, filter_vec, antal_matcher)
-                settings[k] = {'mode': mode, 'interval': rng}
-                st.divider()
+                        val = spec['default_interval']
+                    if range_key in st.session_state:
+                        try:
+                            cur = st.session_state[range_key]
+                            if float(cur[0]) < float(lo) or float(cur[1]) > float(hi):
+                                st.session_state[range_key] = val
+                        except Exception:
+                            st.session_state[range_key] = val
+                    c1, c2, c3, c4 = st.columns([1.35, 1.0, 3.0, 0.45])
+                    with c1:
+                        st.markdown(f"**{spec['name']}**")
+                        hp, ht, pct = _hist_pass_count(spec['hist_values'], spec['default_interval'])
+                        st.caption(f"Rek: {_display_interval(spec['default_interval'], dec)} · {hp}/{ht}")
+                    with c2:
+                        mode = st.selectbox(
+                            "Läge",
+                            mode_options,
+                            index=mode_options.index(default_mode) if default_mode in mode_options else 0,
+                            key=mode_key,
+                            label_visibility="collapsed",
+                        )
+                    with c3:
+                        step = 1 if dec == 0 else (0.01 if dec >= 2 else 0.1)
+                        if dec == 0:
+                            lo_i, hi_i = int(lo), int(hi)
+                            val_i = (int(round(val[0])), int(round(val[1])))
+                            rng = st.slider("Intervall", lo_i, hi_i, val_i, step=1, key=range_key, label_visibility="collapsed")
+                        else:
+                            rng = st.slider("Intervall", float(lo), float(hi), (float(val[0]), float(val[1])), step=step, key=range_key, label_visibility="collapsed")
+                    with c4:
+                        # Popover öppnas/stängs i klienten och triggar normalt inte en full sidkörning,
+                        # till skillnad från en vanlig knapp. Statistik visas därmed nära filtret utan
+                        # separat scrollsektion och utan att Auto/TipsetMatrix körs om.
+                        if hasattr(st, "popover"):
+                            with st.popover("ℹ️", help="Visa frekvenstabell, träff och reducering för detta filter"):
+                                _render_inline_filter_info(spec, rng, frame_rows, frame, antal_matcher)
+                        else:
+                            with st.expander("ℹ️", expanded=False):
+                                _render_inline_filter_info(spec, rng, frame_rows, frame, antal_matcher)
+                    _render_favorite_shock_diagnostics(spec, rng, frame, filter_vec, antal_matcher)
+                    settings[k] = {'mode': mode, 'interval': rng}
+                    st.divider()
+        filter_apply = st.form_submit_button("✅ Applicera filterändringar", use_container_width=True)
+    if filter_apply:
+        st.session_state['v12_last_result_stale'] = True
+        st.success("Filterändringar applicerade. Kör filtrering + reducering när du vill räkna om systemet.")
     # Gruppkrav ligger i sidomenyn så de alltid är lätta att hitta när filter flyttas till Grupp 1–6.
     group_reqs = {}
     with st.sidebar:
@@ -7192,9 +7210,12 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
 
     st.caption("Spara/öppna spelfil och filterpaket ligger nu i sidomenyn.")
 
+    if st.session_state.get('v12_last_result_stale') and st.session_state.get('v12_last_result'):
+        st.warning("Filter/paketinställningar har ändrats sedan senaste körningen. Tryck Kör filtrering + reducering för att räkna om resultatet.")
     go = st.button("🚀 Kör filtrering + reducering", use_container_width=True)
 
     if go:
+        st.session_state['v12_last_result_stale'] = False
         with st.spinner("Filtrerar exakt grundram..."):
             filtered_rows = _apply_manual_filters(frame_rows, specs, settings, group_reqs)
         st.session_state['v12_last_result'] = {'filtered_rows': filtered_rows, 'reduced_rows': [], 'settings': settings, 'group_reqs': group_reqs, 'hist_package': {'hit': int(hpkg), 'total': int(htot)}}
@@ -7278,12 +7299,16 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
 
         if correction_mode.startswith("Live"):
             st.caption("Skriv 1/X/2 för matcher som ska rättas och - för matcher som inte ska räknas ännu. Exempel: XX2--1---X---")
-            live_txt = st.text_input("Live-facit", value=st.session_state.get('v12_live_correction_input', ''), placeholder="Exempel: XX2--1---X---")
+            with st.form("v12_live_correction_form", clear_on_submit=False):
+                live_txt = st.text_input("Live-facit", value=st.session_state.get('v12_live_correction_input', ''), placeholder="Exempel: XX2--1---X---")
+                live_submit = st.form_submit_button("Rätta live", use_container_width=True)
+            if live_submit:
+                st.session_state['v12_live_correction_input'] = live_txt
+            live_txt = st.session_state.get('v12_live_correction_input', '')
             live_row, live_err = parse_live_result_row(live_txt, antal_matcher)
             if live_txt and live_err:
                 st.error(live_err)
             if live_row:
-                st.session_state['v12_live_correction_input'] = live_txt
                 known_count = len(live_known_positions(live_row))
                 base_rows_for_corr = frame_rows
                 filtered_rows_for_corr = filtered_rows
