@@ -9,11 +9,12 @@ import bisect
 import matplotlib.pyplot as plt
 import time
 import json
+import hashlib
 from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0bs – Paketkontroll utan manuell mask"
+APP_VERSION = "v12.0bv – Spelfil och paketfix"
 
 
 st.markdown("""
@@ -52,6 +53,110 @@ def tm_download_button(label, data, file_name, mime, **kwargs):
             mime=mime,
             **kwargs,
         )
+
+
+def _v12_debug_code(prefix, payload):
+    """Skapar en kort, stabil felkod av samma felsökningsdata.
+
+    Felkoden är inte ett hemligt id; den är bara en kompakt hash så att samma
+    typ av mismatch får en lätt igenkännbar kod när användaren skickar rapport.
+    """
+    try:
+        raw = json.dumps(_json_safe_value(payload), sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:
+        raw = repr(payload)
+    digest = hashlib.sha1(raw.encode('utf-8', errors='replace')).hexdigest()[:10].upper()
+    return f"{prefix}-{digest}"
+
+
+def _signature_debug_diff(expected_sig, active_sig, max_items=25):
+    """Returnerar skillnad mellan paketets signatur och aktiv filtercentral.
+
+    Signaturen innehåller aktiva filter, intervall, läge och gruppkrav. Detta är
+    den viktigaste felsökningsinformationen vid paketkontroll-mismatch.
+    """
+    try:
+        expected = set(tuple(x) for x in (expected_sig or []))
+        active = set(tuple(x) for x in (active_sig or []))
+        missing = sorted(expected - active, key=lambda x: str(x))[:max_items]
+        extra = sorted(active - expected, key=lambda x: str(x))[:max_items]
+        return {
+            'saknas_i_aktiv_filtercentral': [list(x) for x in missing],
+            'extra_i_aktiv_filtercentral': [list(x) for x in extra],
+            'antal_saknas': int(len(expected - active)),
+            'antal_extra': int(len(active - expected)),
+        }
+    except Exception as e:
+        return {'diff_error': str(e)}
+
+
+def _debug_active_filters(specs, settings, limit=80):
+    rows = []
+    by_key = {s.get('key'): s for s in specs or []}
+    for k, v in sorted((settings or {}).items()):
+        mode = v.get('mode', 'Av')
+        if mode == 'Av':
+            continue
+        spec = by_key.get(k, {})
+        interval = v.get('interval')
+        rows.append({
+            'key': k,
+            'namn': spec.get('name', k),
+            'kategori': spec.get('category', ''),
+            'läge': mode,
+            'intervall': _json_safe_value(interval),
+        })
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _debug_package_filters_from_snapshot(snapshot, limit=80):
+    if not isinstance(snapshot, dict):
+        return []
+    rows = []
+    for c in snapshot.get('filters', []) or []:
+        rows.append({
+            'key': c.get('key'),
+            'namn': c.get('name', c.get('key')),
+            'kategori': c.get('category', ''),
+            'läge': c.get('package_mode', 'Tvingat'),
+            'intervall': _json_safe_value(c.get('interval')),
+            'hist_efter_steg': c.get('package_hist_after'),
+        })
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _render_copyable_error_report(title, prefix, payload, expanded=True):
+    """Visar kopierbar felrapport i appen.
+
+    Användaren kan kopiera hela rutan och skicka den direkt, vilket gör att vi
+    kan felsöka utan skärmbild eller gissningar.
+    """
+    code = _v12_debug_code(prefix, payload)
+    report_payload = _json_safe_value(payload)
+    report = (
+        f"FELKOD: {code}\n"
+        f"APP_VERSION: {APP_VERSION}\n"
+        f"TID: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"TYP: {title}\n\n"
+        f"KOPIERA ALLT UNDER DENNA RAD:\n"
+        f"{json.dumps(report_payload, ensure_ascii=False, indent=2, default=str)}"
+    )
+    st.error(f"{title} · Felkod: {code}")
+    with st.expander("📋 Visa felrapport att skicka", expanded=expanded):
+        st.caption("Kopiera hela texten nedan och skicka den direkt. Den innehåller bara appversion, paket-/filterdata och diagnostik för felet.")
+        st.code(report, language="text")
+        tm_download_button(
+            "⬇️ Ladda ner felrapport",
+            report,
+            file_name=f"{code}.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+    return code
 
 
 # --- v12.0bh: enkel intern profiler för att hitta flaskhalsar i Streamlit-reruns ---
@@ -4846,6 +4951,111 @@ def _json_safe_value(x):
     return x
 
 
+def _json_safe_dataframe(df):
+    """Returnerar DataFrame som JSON-vänliga poster. Tom lista om inget går att spara."""
+    try:
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            return _json_safe_value(df.to_dict(orient='records'))
+    except Exception:
+        pass
+    return []
+
+
+def _sync_frame_widget_token():
+    """Tvingar Streamlit att bygga om grundrams-checkboxar med sparade värden.
+
+    Checkboxar med fasta key-värden behåller annars gammalt widget-state även
+    efter att en spelfil har lästs in. Då kan alla rutor se ikryssade ut medan
+    kolumnen Val visar den sparade ramen. Token i key löser det utan att ändra
+    själva grundramslogiken.
+    """
+    try:
+        st.session_state['v12_frame_widget_token'] = int(st.session_state.get('v12_frame_widget_token', 0) or 0) + 1
+    except Exception:
+        st.session_state['v12_frame_widget_token'] = 1
+
+
+def _sync_frame_widget_state_from_frame(frame, antal_matcher):
+    """Sätter även kända widgetnycklar så äldre sessioner blir stabila direkt."""
+    try:
+        token = int(st.session_state.get('v12_frame_widget_token', 0) or 0)
+    except Exception:
+        token = 0
+    for i in range(int(antal_matcher)):
+        signs = set(normalize_signs(frame[i] if i < len(frame) else ['1', 'X', '2']))
+        # Gamla fasta nycklar + nya token-nycklar. Sätts före widgetarna skapas.
+        for prefix in (f'v12_frame_{i}', f'v12_frame_{token}_{i}'):
+            st.session_state[f'{prefix}_1'] = ('1' in signs)
+            st.session_state[f'{prefix}_x'] = ('X' in signs)
+            st.session_state[f'{prefix}_2'] = ('2' in signs)
+
+
+def _package_for_spelfil(package):
+    """Sparar paket utan stora mask-arrayer.
+
+    Maskerna behövs bara under själva paketberäkningen. För att visa och
+    applicera ett sparat paket räcker filterkey, intervall, steg och metadata.
+    """
+    if not isinstance(package, dict):
+        return package
+    out = {}
+    for k, v in package.items():
+        if k in {'hist_mask', 'frame_mask'}:
+            continue
+        if k == 'filters' and isinstance(v, list):
+            clean_filters = []
+            for c in v:
+                if isinstance(c, dict):
+                    clean_filters.append({kk: _json_safe_value(vv) for kk, vv in c.items() if kk not in {'hist_mask', 'frame_mask'}})
+                else:
+                    clean_filters.append(_json_safe_value(c))
+            out[k] = clean_filters
+        else:
+            out[k] = _json_safe_value(v)
+    return out
+
+
+def _packages_for_spelfil(packages):
+    return [_package_for_spelfil(p) for p in (packages or []) if isinstance(p, dict)]
+
+
+def _last_result_for_spelfil(result):
+    """Sparar senast filtrerade/reducerade rader i spelfilen.
+
+    Spelfilen kan bli större, men användaren slipper köra om reduceringen när
+    systemet öppnas igen. Raderna är redan beräknat resultat och används inte
+    för nya filterbeslut.
+    """
+    if not isinstance(result, dict):
+        return {}
+    out = {}
+    for k in ['filtered_rows', 'reduced_rows']:
+        rows = result.get(k) or []
+        if isinstance(rows, tuple) and len(rows) == 2 and isinstance(rows[0], list):
+            rows = rows[0]
+        out[k] = [str(r).strip().upper() for r in rows if isinstance(r, str)]
+    for k in ['settings', 'group_reqs', 'hist_package', 'tm_meta']:
+        if k in result:
+            out[k] = _json_safe_value(result.get(k))
+    return out
+
+
+def _apply_last_result_from_spelfil(payload):
+    lr = (payload or {}).get('last_result') or {}
+    if not isinstance(lr, dict) or not lr:
+        return
+    restored = {
+        'filtered_rows': [str(r).strip().upper() for r in (lr.get('filtered_rows') or []) if isinstance(r, str)],
+        'reduced_rows': [str(r).strip().upper() for r in (lr.get('reduced_rows') or []) if isinstance(r, str)],
+        'settings': lr.get('settings') or {},
+        'group_reqs': lr.get('group_reqs') or {},
+        'hist_package': lr.get('hist_package') or {},
+        'tm_meta': lr.get('tm_meta') or {},
+    }
+    st.session_state['v12_last_result'] = restored
+    st.session_state['v12_last_result_stale'] = bool((payload or {}).get('last_result_stale', False))
+
+
 def _history_records_for_spelfil(v_m):
     """Sparar bara det som behövs för att återskapa filterstatistik utan ny databasläsning."""
     records = []
@@ -4906,15 +5116,18 @@ def _collect_filter_settings_for_save(specs, filter_hist_target_pct, top_fav_cou
 
 
 def _collect_recommended_package_state_for_save(specs=None):
-    """Sparar paketmotorns styrvärden och senast applicerade paketmetadata.
+    """Sparar paketmotorns styrvärden, obligatoriska filter och paketlista.
 
-    Tidigare sparades bara filtercentralen. Det gjorde att en spelfil kunde
-    ladda tillbaka aktiva filter men tappa paketmotorns val, obligatoriska
-    filter och paketkontrollen. Då såg det ut som om det sparade rekommenderade
-    paketet inte stämde med filen.
+    v12.0bv: obligatoriska paketfilter har en egen lista i session_state
+    (`v12_required_pkg_keys`). Tidigare sparläget läste gamla widgetnycklar,
+    vilket gjorde att kryssade "måste ingå"-filter kunde tappas vid spara/öppna.
+    Nu sparas även beräknade paket och kandidatanalys så en spelfil öppnar med
+    samma rekommenderade paketlista som när den sparades.
     """
     specs = specs or []
-    required_keys = [s.get('key') for s in specs if s.get('key') and st.session_state.get(f"v12_reqpkg_{s.get('key')}", False)]
+    valid_keys = {s.get('key') for s in specs if s.get('key')}
+    required_keys = [k for k in (st.session_state.get('v12_required_pkg_keys', []) or []) if k in valid_keys]
+    candidate_audit = st.session_state.get('v12_recommended_candidate_audit')
     out = {
         'rec_min_step': _json_safe_value(st.session_state.get('v12_rec_min_step')),
         'rec_max_filters': _json_safe_value(st.session_state.get('v12_rec_max_filters')),
@@ -4923,8 +5136,11 @@ def _collect_recommended_package_state_for_save(specs=None):
         'rec_frame_adapt': _json_safe_value(st.session_state.get('v12_rec_frame_adapt')),
         'rec_min_value_filters': _json_safe_value(st.session_state.get('v12_rec_min_value_filters')),
         'required_keys': _json_safe_value(required_keys),
+        'recommended_meta': _json_safe_value(st.session_state.get('v12_recommended_meta', {})),
+        'recommended_packages': _packages_for_spelfil(st.session_state.get('v12_recommended_packages', []) or []),
+        'candidate_audit_records': _json_safe_dataframe(candidate_audit),
         'applied_package_meta': _json_safe_value(st.session_state.get('v12_applied_package_meta', {})),
-        'applied_package_snapshot': _json_safe_value(st.session_state.get('v12_applied_package_snapshot', {})),
+        'applied_package_snapshot': _package_for_spelfil(st.session_state.get('v12_applied_package_snapshot', {})),
     }
     return out
 
@@ -4997,6 +5213,8 @@ def _build_spelfil_payload(specs, group_reqs, filter_hist_target_pct, top_fav_co
         'filter_vec': _json_safe_value(filter_vec or []),
         'history_records': _history_records_for_spelfil(v_m),
         'reducer_settings': _json_safe_value(reducer_settings or {}),
+        'last_result': _last_result_for_spelfil(st.session_state.get('v12_last_result')),
+        'last_result_stale': bool(st.session_state.get('v12_last_result_stale', False)),
     })
     return payload
 
@@ -5015,6 +5233,13 @@ def _load_payload_from_uploaded_file(uploaded):
 def _apply_spelfil_payload(payload):
     """Läser in spelfil/filterpaket i session_state. Körs helst före huvudwidgets skapas."""
     ftype = str((payload or {}).get('file_type', '')).lower()
+    # Rensa beräknade objekt från tidigare session innan filens objekt läggs in.
+    # Annars kan gamla rekommenderade paket eller reduceringsresultat synas efter
+    # att en annan spelfil/filterpaket öppnats.
+    for _k in ['v12_recommended_packages', 'v12_recommended_candidate_audit', 'v12_recommended_meta', 'v12_applied_package_meta', 'v12_applied_package_snapshot']:
+        st.session_state.pop(_k, None)
+    st.session_state['v12_last_result'] = None
+    st.session_state['v12_last_result_stale'] = False
     # Grundinställningar: sätts tidigt i sidebar innan selectbox/text_area byggs.
     if payload.get('spelform'):
         st.session_state['v12_spelform'] = payload.get('spelform')
@@ -5052,9 +5277,20 @@ def _apply_spelfil_payload(payload):
         for src, dst in _map.items():
             if pkg_state.get(src) is not None:
                 st.session_state[dst] = pkg_state.get(src)
-        for rk in pkg_state.get('required_keys', []) or []:
-            if rk:
-                st.session_state[f'v12_reqpkg_{rk}'] = True
+        req_loaded = [str(rk) for rk in (pkg_state.get('required_keys', []) or []) if rk]
+        st.session_state['v12_required_pkg_keys'] = list(dict.fromkeys(req_loaded))
+        # Bakåtkompatibilitet för äldre sessionsnycklar/formulär.
+        for rk in req_loaded:
+            st.session_state[f'v12_reqpkg_{rk}'] = True
+            st.session_state[f'v12_reqpkg_form_{rk}'] = True
+        if isinstance(pkg_state.get('recommended_meta'), dict):
+            st.session_state['v12_recommended_meta'] = pkg_state.get('recommended_meta') or {}
+        if isinstance(pkg_state.get('recommended_packages'), list):
+            st.session_state['v12_recommended_packages'] = pkg_state.get('recommended_packages') or []
+        if isinstance(pkg_state.get('candidate_audit_records'), list) and pkg_state.get('candidate_audit_records'):
+            st.session_state['v12_recommended_candidate_audit'] = pd.DataFrame(pkg_state.get('candidate_audit_records') or [])
+        elif 'candidate_audit_records' in pkg_state:
+            st.session_state['v12_recommended_candidate_audit'] = pd.DataFrame()
         if isinstance(pkg_state.get('applied_package_meta'), dict):
             st.session_state['v12_applied_package_meta'] = pkg_state.get('applied_package_meta') or {}
         if isinstance(pkg_state.get('applied_package_snapshot'), dict):
@@ -5063,10 +5299,13 @@ def _apply_spelfil_payload(payload):
     if ftype == 'tipset_spelfil':
         frame = payload.get('frame') or []
         if frame:
-            st.session_state['v12_saved_frame'] = [[s for s in normalize_signs(x)] for x in frame]
+            clean_frame = [[s for s in normalize_signs(x)] for x in frame]
+            st.session_state['v12_saved_frame'] = clean_frame
             st.session_state['v12_frame_saved'] = True
-            st.session_state['v12_frame_defaults'] = st.session_state['v12_saved_frame']
+            st.session_state['v12_frame_defaults'] = clean_frame
             st.session_state['v12_frame_spelform'] = payload.get('spelform', st.session_state.get('v12_spelform'))
+            _sync_frame_widget_token()
+            _sync_frame_widget_state_from_frame(clean_frame, int(payload.get('antal_matcher') or 13))
         hist_df = _history_df_from_records(payload.get('history_records', []))
         filter_vec = payload.get('filter_vec', []) or []
         if not hist_df.empty and filter_vec:
@@ -5078,6 +5317,7 @@ def _apply_spelfil_payload(payload):
         if isinstance(rs, dict):
             for k, v in rs.items():
                 st.session_state[k] = v
+        _apply_last_result_from_spelfil(payload)
     return ftype
 
 
@@ -6656,9 +6896,10 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                         'Kategori': spec.get('category', ''),
                         'Filter': spec.get('name', ''),
                         'Intervall': iv.get('interval_txt', _display_interval(interval, spec.get('decimals', 0))),
-                        'Orsak': reason,
+                        'Orsak': reason + (' · Överkörd eftersom filtret är markerat som måste ingå.' if spec.get('key') in required_keys else ''),
                     })
-                    continue
+                    if spec.get('key') not in required_keys:
+                        continue
             try:
                 lo, hi = float(interval[0]), float(interval[1])
                 hist_mask = np.isfinite(hist_arr) & (hist_arr >= lo) & (hist_arr <= hi)
@@ -6671,7 +6912,7 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             hist_hit = int((pre_hist_mask & hist_mask).sum())
             frame_keep = int(frame_mask.sum())
             red_pct = 100.0 - 100.0 * frame_keep / max(1, ftot)
-            if frame_keep >= ftot:
+            if frame_keep >= ftot and spec.get('key') not in required_keys:
                 continue
             spec_cands.append({
                 'key': spec['key'],
@@ -6728,7 +6969,10 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                     continue
                 new_frame = cur_frame & cand['frame_mask']
                 new_frame_count = int(new_frame.sum())
-                if new_frame_count >= cur_frame_count:
+                # Obligatoriska filter får följa med även om de inte reducerar
+                # just den manuella radmassan. De är användarens "måste ingå"-val
+                # och ska inte försvinna bara för att ramen redan uppfyller intervallet.
+                if new_frame_count > cur_frame_count:
                     continue
                 if row_matrix is not None:
                     if not _mask_keeps_teckenskydd(row_matrix, new_frame, frame, antal_matcher):
@@ -7109,9 +7353,10 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
 def _package_value_score(p):
     """Spelvärdespoäng för rekommenderade paket.
 
-    Poängen används bara för att välja de 3 mest intressanta paketen i listan:
-    hög samlad historisk träff OCH hög reducering. Värde-/poängfilter får en liten bonus
-    eftersom de bättre styr utdelningsprofilen än rena strukturfilter.
+    Poängen är en effektivitetspoäng: hög samlad historisk träff OCH hög
+    reducering. Värde-/poängfilter får en liten bonus eftersom de bättre styr
+    utdelningsprofilen än rena strukturfilter. Poängen används för sortering,
+    men alla spelbara paket under radgränsen ska kunna väljas manuellt.
     """
     try:
         hit_pct = 100.0 * float(p.get('hist_hit', 0)) / max(1.0, float(p.get('hist_total', 1)))
@@ -7126,14 +7371,18 @@ def _top_playable_packages(packages, n=3):
     pkgs = [p for p in (packages or []) if int(p.get('num_filters', 0)) > 0]
     return sorted(pkgs, key=lambda p: (_package_value_score(p), int(p.get('hist_hit', 0)), -int(p.get('frame_after', 10**12))), reverse=True)[:int(n)]
 
-def _recommended_packages_summary_df(packages):
+def _recommended_packages_summary_df(packages, package_index_map=None):
     rows = []
     for i, p in enumerate(packages, 1):
         group_txt = ''
         if p.get('groups'):
             group_txt = ' | '.join([f"{g.get('name')}: {g.get('req')}-{g.get('max_req', g.get('n'))}/{g.get('n')}" for g in p.get('groups', [])])
+        try:
+            p_label = f"P{int(package_index_map.get(id(p), i))}" if package_index_map else f"P{i}"
+        except Exception:
+            p_label = f"P{i}"
         rows.append({
-            'Paket': f"P{i}",
+            'Paket': p_label,
             'Typ': p.get('package_type', 'Tvingade filter'),
             'Samlad träff': f"{p['hist_hit']}/{p['hist_total']}",
             'Träff %': f"{100.0 * p['hist_hit'] / max(1, p['hist_total']):.1f}%",
@@ -7341,6 +7590,7 @@ for k, v in {
     'v12_frame_saved': False,
     'v12_filter_saved': False,
     'v12_last_result': None,
+    'v12_frame_widget_token': 0,
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -7488,8 +7738,11 @@ st.caption("Tecknen ligger i ett formulär. Appen räknar inte om när du klicka
 if 'v12_frame_defaults' not in st.session_state or st.session_state.get('v12_frame_spelform') != spelform:
     st.session_state['v12_frame_defaults'] = [['1', 'X', '2'] for _ in range(antal_matcher)]
     st.session_state['v12_frame_spelform'] = spelform
+    _sync_frame_widget_token()
 
-with st.form("v12_frame_form"):
+_frame_token = int(st.session_state.get('v12_frame_widget_token', 0) or 0)
+
+with st.form(f"v12_frame_form_{_frame_token}"):
     header_cols = st.columns([0.55, 0.8, 0.8, 0.8, 1.2])
     header_cols[0].markdown("**Match**"); header_cols[1].markdown("**1**"); header_cols[2].markdown("**X**"); header_cols[3].markdown("**2**"); header_cols[4].markdown("**Val**")
     frame_new = []
@@ -7498,9 +7751,9 @@ with st.form("v12_frame_form"):
         signs_prev = prev[i] if i < len(prev) else ['1','X','2']
         c0, c1, c2, c3, c4 = st.columns([0.55, 0.8, 0.8, 0.8, 1.2])
         c0.write(f"M{i+1}")
-        b1 = c1.checkbox("", value=('1' in signs_prev), key=f"v12_frame_{i}_1")
-        bx = c2.checkbox("", value=('X' in signs_prev), key=f"v12_frame_{i}_x")
-        b2 = c3.checkbox("", value=('2' in signs_prev), key=f"v12_frame_{i}_2")
+        b1 = c1.checkbox("", value=('1' in signs_prev), key=f"v12_frame_{_frame_token}_{i}_1")
+        bx = c2.checkbox("", value=('X' in signs_prev), key=f"v12_frame_{_frame_token}_{i}_x")
+        b2 = c3.checkbox("", value=('2' in signs_prev), key=f"v12_frame_{_frame_token}_{i}_2")
         signs = []
         if b1: signs.append('1')
         if bx: signs.append('X')
@@ -7666,7 +7919,12 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 req_save = st.form_submit_button("Spara obligatoriska filter", use_container_width=True)
             if req_save:
                 st.session_state['v12_required_pkg_keys'] = list(dict.fromkeys(required_keys_draft))
-                st.success(f"{len(required_keys_draft)} obligatoriska filter sparade.")
+                # Paket som redan är beräknade bygger på gamla obligatoriska val.
+                # Rensa dem så användaren inte råkar applicera ett paket där de
+                # nya "måste ingå"-filtren saknas.
+                for _k in ['v12_recommended_packages', 'v12_recommended_candidate_audit', 'v12_recommended_meta', 'v12_applied_package_meta', 'v12_applied_package_snapshot']:
+                    st.session_state.pop(_k, None)
+                st.success(f"{len(required_keys_draft)} obligatoriska filter sparade. Beräkna paket igen.")
             required_keys_saved = st.session_state.get('v12_required_pkg_keys', [])
             if required_keys_saved:
                 st.success(f"{len(required_keys_saved)} filter är markerade som måste ingå i paketmotorn.")
@@ -7780,13 +8038,15 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         rec_display_max_rows = int(st.session_state.get('v12_rec_display_max_rows', 5000))
         visible_packages = [p for p in packages if int(p.get('frame_after', 10**12)) <= rec_display_max_rows]
         hidden_packages = [p for p in packages if int(p.get('frame_after', 10**12)) > rec_display_max_rows]
+        visible_package_index_map = {id(p): i for i, p in enumerate(visible_packages, 1)}
+        hidden_package_index_map = {id(p): i for i, p in enumerate(hidden_packages, 1)}
         if packages:
             st.caption(f"Visar bara paket där filtermassan är högst {rec_display_max_rows:,} rader. {len(hidden_packages)} paket är dolda över gränsen.".replace(',', ' '))
             if visible_packages:
                 top_packages = _top_playable_packages(visible_packages, 3)
-                st.markdown("**3 mest spelvärda paket**")
-                st.caption("Sorterat på kombinationen samlad historisk träff + faktisk reducering. Paket med fler värde-/poängfilter får en liten bonus eftersom de styr utdelningsprofilen bättre.")
-                st.dataframe(_style_spelvarde_df(_recommended_packages_summary_df(top_packages)), use_container_width=True, hide_index=True)
+                st.markdown("**3 högst spelvärde**")
+                st.caption("Spelvärde premierar effektiv reducering. Det är inte samma sak som tryggast paket. Alla spelbara paket under radgränsen kan väljas i dropdownen nedanför.")
+                st.dataframe(_style_spelvarde_df(_recommended_packages_summary_df(top_packages, visible_package_index_map)), use_container_width=True, hide_index=True)
                 st.caption(_spelvarde_caption())
 
                 # v12.0ae: visa grupppaketsektionen alltid, även om inga grupppaket
@@ -7804,7 +8064,8 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 rest_packages = [p for p in visible_packages if p not in top_packages and p not in best_group_packages]
                 if rest_packages:
                     with st.expander("Visa övriga spelbara paket under radgränsen", expanded=False):
-                        st.dataframe(_style_spelvarde_df(_recommended_packages_summary_df(rest_packages)), use_container_width=True, hide_index=True)
+                        st.caption("Dessa paket är också valbara i dropdownen nedanför. De kan vara tryggare även om spelvärdepoängen är lägre.")
+                        st.dataframe(_style_spelvarde_df(_recommended_packages_summary_df(rest_packages, visible_package_index_map)), use_container_width=True, hide_index=True)
             else:
                 top_packages = []
                 st.warning("Inga paket hamnade under vald radgräns. Visar därför bästa paketet över gränsen som referens så att listan inte blir tom.")
@@ -7812,7 +8073,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     best_over = _top_playable_packages(hidden_packages, 1)
                     if best_over:
                         st.markdown("**Bästa paket över radgränsen**")
-                        st.dataframe(_style_spelvarde_df(_recommended_packages_summary_df(best_over)), use_container_width=True, hide_index=True)
+                        st.dataframe(_style_spelvarde_df(_recommended_packages_summary_df(best_over, hidden_package_index_map)), use_container_width=True, hide_index=True)
                         st.caption(_spelvarde_caption())
                         st.caption("Detta paket klarar dina krav bäst men lämnar fler rader än vald gräns. Höj radgränsen eller kryssa i fler/lämpligare filter om du vill pressa vidare.")
                 st.markdown("**Bästa hårda grupppaket**")
@@ -7835,9 +8096,10 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     st.caption('Här ser du hela nivåtrappan per filter: säkert, balanserat, aggressivt och valt intervall i paket. Det gör det lättare att se varför t.ex. FAT Summa valdes på en viss nivå.')
                     st.dataframe(candidate_audit, use_container_width=True, hide_index=True)
             if visible_packages:
-                _sel_base = _top_playable_packages(visible_packages, 3)
-                _sel_groups = _top_playable_packages([p for p in visible_packages if _is_hard_group_package(p)], 3)
-                selectable_packages = _dedupe_package_list(_sel_base + _sel_groups)
+                # v12.0bu: alla spelbara paket under radgränsen ska kunna väljas,
+                # inte bara topp 3 på spelvärde och bästa grupppaket. Annars kan
+                # tryggare 30/30- eller 29/30-paket synas i "övriga" men inte gå att använda.
+                selectable_packages = _dedupe_package_list(visible_packages)
             else:
                 _sel_base = _top_playable_packages(hidden_packages, 1)
                 _sel_groups = _top_playable_packages([p for p in hidden_packages if _is_hard_group_package(p)], 2)
@@ -7848,10 +8110,24 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             if not selectable_packages:
                 sel_pkg = None
             else:
-                labels = [f"{p['hist_hit']}/{p['hist_total']} · {p['frame_start']:,}→{p['frame_after']:,} · {p['reduction_pct']:.1f}% · {p['num_filters']} filter · {p.get('value_filters',0)} värde · {p.get('package_type','Tvingat')}".replace(',', ' ') for p in selectable_packages]
+                _label_index_map = visible_package_index_map if visible_packages else hidden_package_index_map
+                def _pkg_select_label(_p):
+                    try:
+                        _pno = int(_label_index_map.get(id(_p), 0))
+                        _prefix = f"P{_pno} · " if _pno else ""
+                    except Exception:
+                        _prefix = ""
+                    return (f"{_prefix}{_p['hist_hit']}/{_p['hist_total']} · "
+                            f"{_p['frame_start']:,}→{_p['frame_after']:,} · "
+                            f"{_p['reduction_pct']:.1f}% · spelvärde {_package_value_score(_p):.0f} · "
+                            f"{_p['num_filters']} filter · {_p.get('value_filters',0)} värde · "
+                            f"{_p.get('package_type','Tvingat')}").replace(',', ' ')
+                labels = [_pkg_select_label(p) for p in selectable_packages]
                 with st.form("v12_select_recommended_package_form"):
-                    pick_idx = st.selectbox("Välj toppaket att använda", list(range(len(selectable_packages))), format_func=lambda i: labels[i], key="v12_recommended_pick")
+                    pick_idx = st.selectbox("Välj paket att använda", list(range(len(selectable_packages))), format_func=lambda i: labels[i], key="v12_recommended_pick")
                     apply_selected_package = st.form_submit_button("✅ Använd valt paket i filtercentralen", use_container_width=True)
+                if visible_packages:
+                    st.caption("Dropdownen innehåller alla paket under radgränsen, även de som visas under övriga spelbara paket.")
                 sel_pkg = selectable_packages[int(pick_idx)]
             if sel_pkg is not None:
                 with st.expander("Visa filter och intervall i valt paket", expanded=False):
@@ -8047,7 +8323,41 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             if int(applied_meta.get('hist_hit', -1)) == int(hpkg) and int(applied_meta.get('hist_total', -1)) == int(htot):
                 st.success(f"Paketkontroll OK: paketet och aktiv filtercentral visar samma samlade träff ({cur_txt}).")
             else:
-                st.error(f"Paketkontroll mismatch: paketet räknades som {pkg_txt}, men aktiv filtercentral visar {cur_txt}.")
+                snapshot = st.session_state.get('v12_applied_package_snapshot', {})
+                debug_payload = {
+                    'feltyp': 'paketkontroll_mismatch',
+                    'förklaring': 'Paketets sparade samlade historikträff skiljer sig från aktiv filtercentrals samlade historikträff trots att signaturen matchar.',
+                    'paket_räknades_som': pkg_txt,
+                    'aktiv_filtercentral_visar': cur_txt,
+                    'paket_meta': {
+                        'hist_hit': int(applied_meta.get('hist_hit', 0)),
+                        'hist_total': int(applied_meta.get('hist_total', 0)),
+                        'frame_after': int(applied_meta.get('frame_after', 0)),
+                        'num_filters': int(applied_meta.get('num_filters', 0)),
+                        'package_type': applied_meta.get('package_type', ''),
+                        'reduction_pct': applied_meta.get('reduction_pct', None),
+                    },
+                    'aktiv_filtercentral': {
+                        'hist_hit': int(hpkg),
+                        'hist_total': int(htot),
+                        'aktiva_filter': int(active_count),
+                        'tvingade_filter': int(forced_count),
+                        'gruppfilter': int(group_count),
+                    },
+                    'signatur_matchar': bool(current_sig == applied_meta.get('signature')),
+                    'signatur_diff': _signature_debug_diff(applied_meta.get('signature'), current_sig),
+                    'gruppkrav': _json_safe_value(group_reqs),
+                    'aktiva_filter_detalj': _debug_active_filters(specs, settings),
+                    'paket_filter_detalj': _debug_package_filters_from_snapshot(snapshot),
+                    'paket_grupper': _json_safe_value(snapshot.get('groups', []) if isinstance(snapshot, dict) else []),
+                    'senaste_applicerade_paket_namn': snapshot.get('package_type', '') if isinstance(snapshot, dict) else '',
+                }
+                _render_copyable_error_report(
+                    f"Paketkontroll mismatch: paketet räknades som {pkg_txt}, men aktiv filtercentral visar {cur_txt}",
+                    'PKG-MISMATCH',
+                    debug_payload,
+                    expanded=True,
+                )
         else:
             st.caption("Filtercentralen har ändrats efter att paketet applicerades; paketkontrollen är därför inte längre aktiv.")
 
