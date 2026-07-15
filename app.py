@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0bw – Paketstandard 28/30"
+APP_VERSION = "v12.0bx – Spelfil återställer applicerat paket"
 
 
 st.markdown("""
@@ -4990,6 +4990,84 @@ def _sync_frame_widget_state_from_frame(frame, antal_matcher):
             st.session_state[f'{prefix}_2'] = ('2' in signs)
 
 
+
+def _clear_filtercentral_widget_state_for_load():
+    """Rensar gamla filterwidgets innan spelfil/filterpaket läses in.
+
+    Streamlit behåller session_state mellan uppladdningar. Om en tidigare kupong
+    hade aktiva filter kan de annars ligga kvar om den nya sparfilen saknar en
+    nyckel, eller om ett intervall har samma widgetnamn men annan innebörd.
+    """
+    for _k in list(st.session_state.keys()):
+        _ks = str(_k)
+        if _ks.startswith('filter_mode_') or _ks.startswith('filter_range_'):
+            st.session_state.pop(_k, None)
+
+
+def _apply_saved_applied_package_snapshot(package, saved_filter_keys=None, filter_hist_target_pct=90, top_fav_count=3):
+    """Återställer exakt det rekommenderade paket som var applicerat när filen sparades.
+
+    v12.0bx: Sparfilen innehåller både en vanlig filtercentral och en snapshot
+    av valt rekommenderat paket. Vid uppladdning ska paket-snapshoten vara
+    auktoritativ när paketet fortfarande var aktivt vid sparning; annars kan
+    filterintervall tappas när träffmålets slider bygger nya nycklar.
+    """
+    if not isinstance(package, dict):
+        return False
+    filters = package.get('filters') or []
+    groups = package.get('groups') or []
+    if not filters and not groups:
+        return False
+    fhp = int(filter_hist_target_pct or 90)
+    tfc = int(top_fav_count or 3)
+
+    # Stäng av alla filter som sparfilen känner till innan paketets egna filter sätts.
+    for _k in set(saved_filter_keys or []):
+        if _k:
+            st.session_state[f'filter_mode_{_k}'] = 'Av'
+
+    for c in filters:
+        if not isinstance(c, dict):
+            continue
+        k = c.get('key')
+        if not k:
+            continue
+        st.session_state[f'filter_mode_{k}'] = c.get('package_mode', 'Tvingat')
+        interval = c.get('interval')
+        if isinstance(interval, (list, tuple)) and len(interval) >= 2:
+            st.session_state[f'filter_range_{k}_h{fhp}_tf{tfc}'] = (interval[0], interval[1])
+
+    # Gruppkrav från paketet ska ersätta gamla sidomenykrav.
+    for i in range(1, 7):
+        st.session_state[f'group_req_{i}'] = 0
+        st.session_state[f'group_req_min_{i}'] = 0
+        st.session_state[f'group_req_max_{i}'] = 40
+    for g in groups:
+        if not isinstance(g, dict):
+            continue
+        try:
+            gi = int(str(g.get('name', 'Grupp 0')).split()[-1])
+            if 1 <= gi <= 6:
+                mn = int(g.get('req', g.get('min_req', 0)) or 0)
+                mx = int(g.get('max_req', g.get('n', 40)) or 40)
+                st.session_state[f'group_req_{gi}'] = mn
+                st.session_state[f'group_req_min_{gi}'] = mn
+                st.session_state[f'group_req_max_{gi}'] = mx
+        except Exception:
+            pass
+
+    st.session_state['v12_applied_package_meta'] = {
+        'hist_hit': int(package.get('hist_hit', 0) or 0),
+        'hist_total': int(package.get('hist_total', 0) or 0),
+        'frame_after': int(package.get('frame_after', 0) or 0),
+        'num_filters': int(package.get('num_filters', len(filters)) or 0),
+        'signature': _package_signature(package),
+        'package_type': package.get('package_type', ''),
+        'reduction_pct': float(package.get('reduction_pct', 0.0) or 0.0),
+    }
+    st.session_state['v12_applied_package_snapshot'] = _json_safe_value(package)
+    return True
+
 def _package_for_spelfil(package):
     """Sparar paket utan stora mask-arrayer.
 
@@ -5115,7 +5193,7 @@ def _collect_filter_settings_for_save(specs, filter_hist_target_pct, top_fav_cou
     return out
 
 
-def _collect_recommended_package_state_for_save(specs=None):
+def _collect_recommended_package_state_for_save(specs=None, settings=None, group_reqs=None):
     """Sparar paketmotorns styrvärden, obligatoriska filter och paketlista.
 
     v12.0bv: obligatoriska paketfilter har en egen lista i session_state
@@ -5128,6 +5206,13 @@ def _collect_recommended_package_state_for_save(specs=None):
     valid_keys = {s.get('key') for s in specs if s.get('key')}
     required_keys = [k for k in (st.session_state.get('v12_required_pkg_keys', []) or []) if k in valid_keys]
     candidate_audit = st.session_state.get('v12_recommended_candidate_audit')
+    applied_meta = st.session_state.get('v12_applied_package_meta') or {}
+    applied_is_active = None
+    if isinstance(settings, dict) and isinstance(applied_meta, dict) and applied_meta.get('signature'):
+        try:
+            applied_is_active = (_settings_package_signature(settings, group_reqs or {}) == applied_meta.get('signature'))
+        except Exception:
+            applied_is_active = None
     out = {
         'rec_min_step': _json_safe_value(st.session_state.get('v12_rec_min_step')),
         'rec_max_filters': _json_safe_value(st.session_state.get('v12_rec_max_filters')),
@@ -5141,6 +5226,7 @@ def _collect_recommended_package_state_for_save(specs=None):
         'candidate_audit_records': _json_safe_dataframe(candidate_audit),
         'applied_package_meta': _json_safe_value(st.session_state.get('v12_applied_package_meta', {})),
         'applied_package_snapshot': _package_for_spelfil(st.session_state.get('v12_applied_package_snapshot', {})),
+        'applied_package_is_active': _json_safe_value(applied_is_active),
     }
     return out
 
@@ -5255,6 +5341,12 @@ def _apply_spelfil_payload(payload):
     # Använd fast bakåtkompatibel slidernyckel så gamla sparade intervall kan läsas in stabilt.
     fhp = int(st.session_state.get('v12_filter_hist_target_pct', payload.get('filter_hist_target_pct', 90)) or 90)
     tfc = 3
+    # Viktigt vid uppladdning: gamla filter/slidervärden från tidigare kupong
+    # ska bort, och träffmålets prev-nyckel ska synkas. Annars raderas de
+    # nyss laddade intervallen direkt i filtercentralen och paketet kan visas
+    # som t.ex. 11/30 fast sparad snapshot var 29/30.
+    _clear_filtercentral_widget_state_for_load()
+    st.session_state['v12_filter_hist_target_prev'] = int(fhp)
     _apply_u_rows_to_session(payload.get('u_rows', {}))
     if payload.get('manual_sign_groups') is not None:
         st.session_state['v12_manual_sign_groups'] = _normalize_manual_sign_groups(payload.get('manual_sign_groups') or [], int(payload.get('antal_matcher') or 13))
@@ -5301,6 +5393,16 @@ def _apply_spelfil_payload(payload):
             st.session_state['v12_applied_package_meta'] = pkg_state.get('applied_package_meta') or {}
         if isinstance(pkg_state.get('applied_package_snapshot'), dict):
             st.session_state['v12_applied_package_snapshot'] = pkg_state.get('applied_package_snapshot') or {}
+        # Om sparfilen hade ett applicerat rekommenderat paket ska samma paket
+        # läggas in i filtercentralen igen. Nya v12.0bx-filer anger om paketet
+        # fortfarande var aktivt vid sparning; äldre filer saknar flaggan och då
+        # väljer vi paket-snapshoten framför en potentiellt stale filterlista.
+        _restore_applied = pkg_state.get('applied_package_is_active', None)
+        _snapshot = pkg_state.get('applied_package_snapshot') or {}
+        if _restore_applied is not False and isinstance(_snapshot, dict) and (_snapshot.get('filters') or _snapshot.get('groups')):
+            _saved_filter_keys = list((payload.get('filters') or {}).keys())
+            if _apply_saved_applied_package_snapshot(_snapshot, _saved_filter_keys, fhp, tfc):
+                st.session_state['v12_loaded_applied_package_restored'] = True
 
     if ftype == 'tipset_spelfil':
         frame = payload.get('frame') or []
@@ -8463,7 +8565,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         'v12_reducer_mode': reducer_mode,
         'v12_target_13_pct': float(target_13_pct),
     }
-    package_save_state = _collect_recommended_package_state_for_save(specs)
+    package_save_state = _collect_recommended_package_state_for_save(specs, settings=settings, group_reqs=group_reqs)
     filter_payload = _build_filterpaket_payload(
         specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher,
         settings_override=settings, package_state=package_save_state, manual_sign_groups=manual_sign_groups,
