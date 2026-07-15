@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0bx – Spelfil återställer applicerat paket"
+APP_VERSION = "v12.0by – Backtest av paketmotorn"
 
 
 st.markdown("""
@@ -7458,6 +7458,319 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
     return final_packages, audit_df
 
 
+
+def _similar_history_for_backtest(global_db, input_vec, antal_matcher, top_n=30, pay_min=0, pay_max=10000000, exclude_index=None, mode='leave-one-out', test_date=None):
+    """Hämtar liknande historik för ett backtestfall.
+
+    Backtestet ska inte låta testomgången själv ingå i sin liknande historik.
+    Leave-one-out använder alla andra omgångar. Kronologiskt använder bara
+    omgångar före testdatumet när datum finns.
+    """
+    try:
+        df = global_db.copy()
+    except Exception:
+        return pd.DataFrame()
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame()
+    try:
+        if exclude_index is not None and exclude_index in df.index:
+            df = df.drop(index=exclude_index)
+    except Exception:
+        pass
+    try:
+        if 'Payout' in df.columns:
+            df = df[(pd.to_numeric(df['Payout'], errors='coerce').fillna(0) >= int(pay_min)) & (pd.to_numeric(df['Payout'], errors='coerce').fillna(0) <= int(pay_max))]
+    except Exception:
+        pass
+    if str(mode).lower().startswith('krono') and test_date is not None and 'Datum' in df.columns:
+        try:
+            dates = pd.to_datetime(df['Datum'], errors='coerce')
+            td = pd.to_datetime(test_date, errors='coerce')
+            if pd.notna(td):
+                df = df[dates < td]
+        except Exception:
+            pass
+    if df.empty:
+        return df
+    krav_odds = int(antal_matcher) * 3
+    try:
+        input_vec = [float(x) for x in list(input_vec)]
+    except Exception:
+        return pd.DataFrame()
+    if len(input_vec) != krav_odds:
+        return pd.DataFrame()
+    similarity_vec = get_structural_vector(input_vec)
+    weights_arr = np.array([w for i in range(0, krav_odds, 3) for w in [(max(similarity_vec[i:i+3])/100.0)**2]*3])
+    sims = []
+    for _, r in df.iterrows():
+        pv = r.get('Prob_Vector', [])
+        if not isinstance(pv, list) or len(pv) != krav_odds:
+            sims.append(999999.0)
+            continue
+        try:
+            sims.append(weighted_euclidean(similarity_vec, get_structural_vector(pv), weights_arr))
+        except Exception:
+            sims.append(999999.0)
+    out = df.copy()
+    out['Sim'] = sims
+    return out.sort_values('Sim').head(int(top_n))
+
+
+def _package_passes_row(row_str, specs, package):
+    """Kontrollerar om en facitrad klarar ett rekommenderat paket.
+
+    Tvingade paket kräver att alla filter passerar. Hårda grupppaket räknar
+    antal passerade filter per grupp och jämför mot gruppens min/max.
+    """
+    row_str = normalize_single_row_text(row_str)
+    if not row_str or not isinstance(package, dict):
+        return False, 'saknar rad eller paket'
+    spec_by_key = {sp.get('key'): sp for sp in (specs or [])}
+    filters = list(package.get('filters', []) or [])
+    if not filters:
+        return True, 'paket utan filter'
+
+    def cand_pass(cand):
+        sp = spec_by_key.get(cand.get('key'))
+        if sp is None:
+            return False
+        try:
+            val = float(sp.get('getter')(row_str))
+            lo, hi = cand.get('interval', (None, None))
+            return float(lo) <= val <= float(hi)
+        except Exception:
+            return False
+
+    if package.get('groups'):
+        passed_by_key = {c.get('key'): bool(cand_pass(c)) for c in filters}
+        for gm in package.get('groups', []) or []:
+            gname = gm.get('name')
+            gfilters = [c for c in filters if c.get('package_mode') == gname]
+            if not gfilters:
+                continue
+            hits = sum(1 for c in gfilters if passed_by_key.get(c.get('key'), False))
+            mn = int(gm.get('req', 0) or 0)
+            mx = int(gm.get('max_req', gm.get('n', len(gfilters))) or len(gfilters))
+            if not (mn <= hits <= mx):
+                return False, f"{gname} {hits}/{len(gfilters)} utanför {mn}-{mx}"
+        forced_left = [c for c in filters if not c.get('package_mode')]
+        for c in forced_left:
+            if not passed_by_key.get(c.get('key'), False):
+                return False, str(c.get('name', 'filter'))
+        return True, 'OK'
+
+    for c in filters:
+        if not cand_pass(c):
+            return False, str(c.get('name', 'filter'))
+    return True, 'OK'
+
+
+def _choose_backtest_package(packages, max_rows):
+    """Väljer paket i backtest med samma praktiska princip som diskussionen:
+    högsta samlad träff inom radbudget först, sedan lägre radantal.
+    """
+    packages = list(packages or [])
+    if not packages:
+        return None, 'inget paket'
+    try:
+        max_rows = int(max_rows)
+    except Exception:
+        max_rows = 10**12
+    under = [p for p in packages if int(p.get('frame_after', 10**12)) <= max_rows]
+    base = under if under else packages
+    base = _dedupe_package_list(base)
+    base.sort(key=lambda p: (
+        -int(p.get('hist_hit', 0)),
+        int(p.get('frame_after', 10**12)),
+        -float(_package_value_score(p)),
+        0 if not _is_hard_group_package(p) else 1,
+    ))
+    note = 'under radgräns' if under else 'över radgräns'
+    return (base[0] if base else None), note
+
+
+def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_matcher, top_n, pay_min, filter_hist_target_pct, rec_settings, required_keys=None, max_tests=10, mode='leave-one-out', progress_cb=None):
+    """Kör backtest av paketmotorn på historiska omgångar.
+
+    Varje testomgång låtsas vara dagens kupong: dess procentvektor blir input,
+    liknande historik väljs utan testomgången, filterdefinitioner byggs om och
+    paketmotorn körs med aktuella paketinställningar. Testet kontrollerar sedan
+    om testomgångens facitrad hade klarat grundram, manuell teckengrupp och valt
+    paket före TipsetMatrix.
+    """
+    if not isinstance(global_db, pd.DataFrame) or global_db.empty:
+        return pd.DataFrame(), {'error': 'Ingen historikdatabas laddad.'}
+    try:
+        db = global_db.copy()
+        if 'Payout' in db.columns:
+            db = db[pd.to_numeric(db['Payout'], errors='coerce').fillna(0) >= int(pay_min)]
+        db['_bt_row_ok'] = db['Correct_Row'].apply(lambda r: len(normalize_single_row_text(r)) == int(antal_matcher))
+        db['_bt_vec_ok'] = db['Prob_Vector'].apply(lambda v: isinstance(v, list) and len(v) == int(antal_matcher) * 3)
+        db = db[db['_bt_row_ok'] & db['_bt_vec_ok']].copy()
+    except Exception as e:
+        return pd.DataFrame(), {'error': f'Kunde inte förbereda historik: {e}'}
+    if db.empty:
+        return pd.DataFrame(), {'error': 'Inga giltiga historiska omgångar att testa.'}
+
+    if 'Datum' in db.columns:
+        try:
+            db['_bt_date'] = pd.to_datetime(db['Datum'], errors='coerce')
+            db = db.sort_values('_bt_date', ascending=False, na_position='last')
+        except Exception:
+            pass
+    else:
+        db = db.sort_index(ascending=False)
+
+    try:
+        frame_rows, _, ok, msg = generate_rows_from_frame(frame, max_rows=None)
+        if not ok:
+            return pd.DataFrame(), {'error': msg}
+    except Exception as e:
+        return pd.DataFrame(), {'error': f'Kunde inte skapa grundram: {e}'}
+
+    active_manual_groups = _normalize_manual_sign_groups(manual_sign_groups or [], antal_matcher)
+    test_rows = list(db.iterrows())[:int(max_tests)]
+    rows = []
+    skipped = 0
+    total = len(test_rows)
+    for ti, (idx, test_row) in enumerate(test_rows, 1):
+        if progress_cb is not None:
+            try:
+                progress_cb(ti - 1, max(1, total), f"Backtest {ti}/{total}: väljer liknande historik")
+            except Exception:
+                pass
+        correct = normalize_single_row_text(test_row.get('Correct_Row', ''))
+        input_vec = test_row.get('Prob_Vector', [])
+        test_date = test_row.get('Datum', None)
+        sim_df = _similar_history_for_backtest(
+            global_db,
+            input_vec,
+            antal_matcher,
+            top_n=int(top_n),
+            pay_min=int(pay_min),
+            pay_max=10000000,
+            exclude_index=idx,
+            mode=mode,
+            test_date=test_date,
+        )
+        if len(sim_df) < max(10, min(int(top_n), 20)):
+            skipped += 1
+            rows.append({
+                'Datum': str(test_date)[:10] if test_date is not None else str(idx),
+                'Facit': correct,
+                'Status': 'Hoppad över',
+                'Orsak': f'För få liknande/priorhistoriska omgångar ({len(sim_df)})',
+            })
+            continue
+        try:
+            manual_frame_rows_bt = _apply_manual_sign_groups_to_rows(frame_rows, active_manual_groups, antal_matcher)
+            if not manual_frame_rows_bt:
+                rows.append({
+                    'Datum': str(test_date)[:10] if test_date is not None else str(idx),
+                    'Facit': correct,
+                    'Status': 'Hoppad över',
+                    'Orsak': 'Manuella teckengrupper lämnar 0 rader',
+                })
+                skipped += 1
+                continue
+            specs_bt = build_clean_filter_specs(
+                sim_df,
+                input_vec,
+                int(antal_matcher),
+                slider_u_count=3,
+                target_hist_pct=int(filter_hist_target_pct),
+                u_rows=None,
+                hist_df=global_db,
+                max_shock_pct=22,
+                candidate_rows=manual_frame_rows_bt,
+                include_supermakro=True,
+            )
+            if progress_cb is not None:
+                try:
+                    progress_cb(ti - 1, max(1, total), f"Backtest {ti}/{total}: kör paketmotor")
+                except Exception:
+                    pass
+            rec_result = _build_recommended_filter_packages(
+                sim_df,
+                specs_bt,
+                manual_frame_rows_bt,
+                frame,
+                int(antal_matcher),
+                min_step_reduction_pct=float(rec_settings.get('min_step', 1.0)),
+                max_filters=int(rec_settings.get('max_filters', 30)),
+                min_hit_count=min(int(rec_settings.get('min_hit', 28)), int(len(sim_df))),
+                frame_adapt=bool(rec_settings.get('frame_adapt', True)),
+                min_value_filters=int(rec_settings.get('min_value_filters', 3)),
+                required_keys=required_keys or [],
+                target_frame_after=int(rec_settings.get('display_max_rows', 5000)),
+                progress_cb=None,
+                manual_hist_mask=None,
+            )
+            packages_bt = rec_result[0] if isinstance(rec_result, tuple) else rec_result
+            pkg, pkg_note = _choose_backtest_package(packages_bt, int(rec_settings.get('display_max_rows', 5000)))
+            in_frame = result_in_frame(correct, frame)
+            after_manual = bool(_manual_sign_groups_pass(correct, active_manual_groups)) if in_frame else False
+            if pkg is None:
+                pkg_pass = False
+                fail_reason = 'Inget paket hittades'
+                pkg_hit = pkg_total = pkg_rows = None
+                pkg_type = '-'
+            else:
+                pkg_pass, fail_reason = _package_passes_row(correct, specs_bt, pkg)
+                pkg_hit = int(pkg.get('hist_hit', 0))
+                pkg_total = int(pkg.get('hist_total', len(sim_df)))
+                pkg_rows = int(pkg.get('frame_after', 0))
+                pkg_type = str(pkg.get('package_type', 'Tvingade filter'))
+            survives = bool(in_frame and after_manual and pkg_pass)
+            rows.append({
+                'Datum': str(test_date)[:10] if test_date is not None else str(idx),
+                'Facit': correct,
+                'Status': 'OK',
+                'Liknande': int(len(sim_df)),
+                'I grundram': 'Ja' if in_frame else 'Nej',
+                'Efter manuell': 'Ja' if after_manual else 'Nej',
+                'Paket klarar facit': 'Ja' if pkg_pass else 'Nej',
+                'Överlever före TM': 'Ja' if survives else 'Nej',
+                'Paketträff': f"{pkg_hit}/{pkg_total}" if pkg is not None else '-',
+                'Paketrader': pkg_rows if pkg_rows is not None else '-',
+                'Pakettyp': pkg_type,
+                'Valprincip': pkg_note,
+                'Orsak': 'OK' if survives else fail_reason,
+            })
+        except Exception as e:
+            rows.append({
+                'Datum': str(test_date)[:10] if test_date is not None else str(idx),
+                'Facit': correct,
+                'Status': 'Fel',
+                'Orsak': str(e)[:220],
+            })
+        if progress_cb is not None:
+            try:
+                progress_cb(ti, max(1, total), f"Backtest {ti}/{total}: klar")
+            except Exception:
+                pass
+
+    out = pd.DataFrame(rows)
+    ok_df = out[out.get('Status', '') == 'OK'] if not out.empty and 'Status' in out.columns else pd.DataFrame()
+    def _count_yes(col):
+        try:
+            return int((ok_df[col] == 'Ja').sum())
+        except Exception:
+            return 0
+    meta = {
+        'tested': int(len(ok_df)),
+        'requested': int(total),
+        'skipped': int(skipped),
+        'ground_hits': _count_yes('I grundram'),
+        'manual_hits': _count_yes('Efter manuell'),
+        'package_hits': _count_yes('Paket klarar facit'),
+        'survivors': _count_yes('Överlever före TM'),
+        'mode': str(mode),
+        'top_n': int(top_n),
+        'pay_min': int(pay_min),
+    }
+    return out, meta
+
 def _package_value_score(p):
     """Spelvärdespoäng för rekommenderade paket.
 
@@ -8222,6 +8535,77 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 with st.expander('Visa kandidatanalys – alla filter som paketmotorn testade', expanded=False):
                     st.caption('Här ser du hela nivåtrappan per filter: säkert, balanserat, aggressivt och valt intervall i paket. Det gör det lättare att se varför t.ex. FAT Summa valdes på en viss nivå.')
                     st.dataframe(candidate_audit, use_container_width=True, hide_index=True)
+            with st.expander('🧪 Backtest av paketmotorn', expanded=False):
+                st.caption('Tungt men ärligt test: varje historisk omgång låtsas vara dagens kupong. Testomgången tas bort från sin egen liknande historik. Appen bygger om filter, kör paketmotorn och kontrollerar om facit hade överlevt före TipsetMatrix.')
+                st.warning('Backtest kör paketmotorn flera gånger och kan ta tid. Börja med 5–10 omgångar. Det används ingen sampling i själva paketbeslutet.')
+                bt_c1, bt_c2, bt_c3 = st.columns([1, 1, 1])
+                with bt_c1:
+                    bt_cases = st.number_input('Antal omgångar att testa', min_value=3, max_value=50, value=int(st.session_state.get('v12_bt_cases', 5)), step=1, key='v12_bt_cases', help='Backtestar de senaste giltiga historiska omgångarna efter utdelningskravet. Högre antal kan bli mycket långsamt.')
+                with bt_c2:
+                    bt_mode = st.selectbox('Historikläge', ['Leave-one-out', 'Kronologiskt'], index=0 if st.session_state.get('v12_bt_mode', 'Leave-one-out') == 'Leave-one-out' else 1, key='v12_bt_mode', help='Leave-one-out använder alla historiska omgångar utom testomgången. Kronologiskt använder bara omgångar före testdatumet, vilket är striktare men kan ge färre testfall.')
+                with bt_c3:
+                    bt_require_budget = st.checkbox('Välj paket under radgräns', value=bool(st.session_state.get('v12_bt_require_budget', True)), key='v12_bt_require_budget', help='På: backtestet väljer högsta träffpaket under Visa paket under. Av: kan välja bästa paket även över gränsen.')
+                run_bt = st.button('Kör backtest av paketmotorn', use_container_width=True, key='v12_run_package_backtest')
+                if run_bt:
+                    db_path_bt = find_local_database(spelform)
+                    if not db_path_bt:
+                        st.error('Hittade ingen historikfil för backtest.')
+                    else:
+                        db_bt = load_database(db_path_bt, antal_matcher)
+                        bt_progress = st.progress(0, text='Startar backtest...')
+                        bt_status = st.empty()
+                        bt_start = time.time()
+                        def _bt_progress(done, total, label):
+                            try:
+                                pct = int(max(0, min(100, round(100 * int(done) / max(1, int(total))))))
+                                bt_progress.progress(pct, text=f'{label} · {pct}%')
+                                elapsed = time.time() - bt_start
+                                bt_status.caption(f'Förfluten tid: {_fmt_elapsed(elapsed)}')
+                            except Exception:
+                                pass
+                        bt_display_rows = int(rec_display_max_rows) if bool(bt_require_budget) else 10**12
+                        bt_settings = {
+                            'min_step': float(st.session_state.get('v12_rec_min_step', rec_min_step)),
+                            'max_filters': int(st.session_state.get('v12_rec_max_filters', rec_max_filters)),
+                            'min_hit': int(st.session_state.get('v12_rec_min_hit', rec_min_hit)),
+                            'display_max_rows': int(bt_display_rows),
+                            'frame_adapt': bool(st.session_state.get('v12_rec_frame_adapt', rec_frame_adapt)),
+                            'min_value_filters': int(st.session_state.get('v12_rec_min_value_filters', rec_min_value_filters)),
+                        }
+                        bt_df, bt_meta = _run_package_engine_backtest(
+                            db_bt,
+                            frame,
+                            manual_sign_groups,
+                            int(antal_matcher),
+                            int(top_n),
+                            int(pay_min),
+                            int(filter_hist_target_pct),
+                            bt_settings,
+                            required_keys=required_keys_now,
+                            max_tests=int(bt_cases),
+                            mode='kronologiskt' if str(bt_mode).lower().startswith('krono') else 'leave-one-out',
+                            progress_cb=_bt_progress,
+                        )
+                        bt_progress.progress(100, text=f'Backtest klart på {_fmt_elapsed(time.time() - bt_start)}')
+                        st.session_state['v12_package_backtest_df'] = bt_df
+                        st.session_state['v12_package_backtest_meta'] = bt_meta
+                bt_df_show = st.session_state.get('v12_package_backtest_df')
+                bt_meta_show = st.session_state.get('v12_package_backtest_meta') or {}
+                if isinstance(bt_df_show, pd.DataFrame) and not bt_df_show.empty:
+                    if bt_meta_show.get('error'):
+                        st.error(bt_meta_show.get('error'))
+                    tested = int(bt_meta_show.get('tested', 0) or 0)
+                    if tested > 0:
+                        b1, b2, b3, b4 = st.columns(4)
+                        b1.metric('Testade paketfall', f"{tested}/{int(bt_meta_show.get('requested', 0) or 0)}")
+                        b2.metric('Facit i grundram', f"{int(bt_meta_show.get('ground_hits', 0))}/{tested}")
+                        b3.metric('Facit klarar paket', f"{int(bt_meta_show.get('package_hits', 0))}/{tested}")
+                        b4.metric('Överlever före TM', f"{int(bt_meta_show.get('survivors', 0))}/{tested}")
+                        surv_pct = 100.0 * int(bt_meta_show.get('survivors', 0)) / max(1, tested)
+                        st.info(f"Backtestresultat: {int(bt_meta_show.get('survivors', 0))}/{tested} ({surv_pct:.1f}%) historiska facit överlevde grundram + manuell teckengrupp + valt rekommenderat paket före TipsetMatrix.")
+                    st.dataframe(bt_df_show, use_container_width=True, hide_index=True)
+                    st.caption('Backtestet testar filterpaket före TipsetMatrix-reducering. Om facit inte finns i grundramen eller stoppas av manuell teckengrupp räknas det som att hela flödet inte hade överlevt, men tabellen visar var tappet uppstod.')
+
             if visible_packages:
                 # v12.0bu: alla spelbara paket under radgränsen ska kunna väljas,
                 # inte bara topp 3 på spelvärde och bästa grupppaket. Annars kan
