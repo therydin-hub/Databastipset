@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0by – Backtest av paketmotorn"
+APP_VERSION = "v12.0bz – Backtest paketfilter"
 
 
 st.markdown("""
@@ -7589,14 +7589,50 @@ def _choose_backtest_package(packages, max_rows):
     return (base[0] if base else None), note
 
 
-def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_matcher, top_n, pay_min, filter_hist_target_pct, rec_settings, required_keys=None, max_tests=10, mode='leave-one-out', progress_cb=None):
+def _ranked_frame_like_widths(base_frame, prob_vector, antal_matcher):
+    """Bygger en historiskt rimlig backtestram från testkupongens streck.
+
+    Den använder INTE dagens valda tecken. Den använder bara bredden i dagens
+    grundram som mall: har du 1 tecken i en match väljs testkupongens största
+    tecken, har du 2 tecken väljs testkupongens två största, och har du 3 tecken
+    väljs helgardering. Det gör backtestet relevant utan att testa gamla facit
+    mot dagens specifika matchval.
+    """
+    signs = ['1', 'X', '2']
+    out = []
+    try:
+        pv = [float(x) for x in list(prob_vector)]
+    except Exception:
+        pv = []
+    for i in range(int(antal_matcher)):
+        try:
+            width = len(normalize_signs((base_frame or [])[i]))
+        except Exception:
+            width = 3
+        width = int(max(1, min(3, width)))
+        try:
+            vals = pv[i*3:i*3+3]
+            order = sorted(range(3), key=lambda j: (-float(vals[j]), j))
+            picked = [signs[j] for j in order[:width]]
+            out.append(normalize_signs(picked))
+        except Exception:
+            out.append(signs[:width])
+    return out
+
+
+def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_matcher, top_n, pay_min, filter_hist_target_pct, rec_settings, required_keys=None, max_tests=10, mode='leave-one-out', progress_cb=None, test_scope='package_only', frame_mode='ranked_widths'):
     """Kör backtest av paketmotorn på historiska omgångar.
 
     Varje testomgång låtsas vara dagens kupong: dess procentvektor blir input,
     liknande historik väljs utan testomgången, filterdefinitioner byggs om och
-    paketmotorn körs med aktuella paketinställningar. Testet kontrollerar sedan
-    om testomgångens facitrad hade klarat grundram, manuell teckengrupp och valt
-    paket före TipsetMatrix.
+    paketmotorn körs med aktuella paketinställningar.
+
+    Viktigt i v12.0bz: standardläget testar paketfiltren, inte dagens manuella
+    grundram. Dagens specifika teckenval hör bara till aktuell kupong och ska
+    inte döma historiska facit. Därför används en automatisk backtestram som
+    behåller samma bredd per match som din grundram men väljer testkupongens
+    högst streckade tecken i respektive match. Facitmåttet är primärt:
+    "Paket klarar facit".
     """
     if not isinstance(global_db, pd.DataFrame) or global_db.empty:
         return pd.DataFrame(), {'error': 'Ingen historikdatabas laddad.'}
@@ -7621,14 +7657,8 @@ def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_mat
     else:
         db = db.sort_index(ascending=False)
 
-    try:
-        frame_rows, _, ok, msg = generate_rows_from_frame(frame, max_rows=None)
-        if not ok:
-            return pd.DataFrame(), {'error': msg}
-    except Exception as e:
-        return pd.DataFrame(), {'error': f'Kunde inte skapa grundram: {e}'}
-
-    active_manual_groups = _normalize_manual_sign_groups(manual_sign_groups or [], antal_matcher)
+    package_only = str(test_scope or 'package_only') == 'package_only'
+    active_manual_groups_current = _normalize_manual_sign_groups(manual_sign_groups or [], antal_matcher)
     test_rows = list(db.iterrows())[:int(max_tests)]
     rows = []
     skipped = 0
@@ -7663,16 +7693,39 @@ def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_mat
             })
             continue
         try:
-            manual_frame_rows_bt = _apply_manual_sign_groups_to_rows(frame_rows, active_manual_groups, antal_matcher)
-            if not manual_frame_rows_bt:
+            if package_only:
+                # Historiskt rättvisare än dagens tecken: använd bara breddmallen.
+                engine_frame = _ranked_frame_like_widths(frame, input_vec, antal_matcher)
+                active_manual_groups = []
+                frame_label = 'Auto-rankad breddram'
+            else:
+                # Gammalt/felsökningsläge: exakt dagens grundram och manuella grupper.
+                engine_frame = frame
+                active_manual_groups = active_manual_groups_current
+                frame_label = 'Aktuell grundram'
+
+            engine_frame_rows, _, ok, msg = generate_rows_from_frame(engine_frame, max_rows=None)
+            if not ok:
                 rows.append({
                     'Datum': str(test_date)[:10] if test_date is not None else str(idx),
                     'Facit': correct,
                     'Status': 'Hoppad över',
-                    'Orsak': 'Manuella teckengrupper lämnar 0 rader',
+                    'Orsak': f'Kunde inte skapa backtestram: {msg}',
                 })
                 skipped += 1
                 continue
+
+            engine_rows_after_manual = _apply_manual_sign_groups_to_rows(engine_frame_rows, active_manual_groups, antal_matcher)
+            if not engine_rows_after_manual:
+                rows.append({
+                    'Datum': str(test_date)[:10] if test_date is not None else str(idx),
+                    'Facit': correct,
+                    'Status': 'Hoppad över',
+                    'Orsak': 'Backtestram/manuella teckengrupper lämnar 0 rader',
+                })
+                skipped += 1
+                continue
+
             specs_bt = build_clean_filter_specs(
                 sim_df,
                 input_vec,
@@ -7682,7 +7735,7 @@ def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_mat
                 u_rows=None,
                 hist_df=global_db,
                 max_shock_pct=22,
-                candidate_rows=manual_frame_rows_bt,
+                candidate_rows=engine_rows_after_manual,
                 include_supermakro=True,
             )
             if progress_cb is not None:
@@ -7693,8 +7746,8 @@ def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_mat
             rec_result = _build_recommended_filter_packages(
                 sim_df,
                 specs_bt,
-                manual_frame_rows_bt,
-                frame,
+                engine_rows_after_manual,
+                engine_frame,
                 int(antal_matcher),
                 min_step_reduction_pct=float(rec_settings.get('min_step', 1.0)),
                 max_filters=int(rec_settings.get('max_filters', 30)),
@@ -7708,8 +7761,9 @@ def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_mat
             )
             packages_bt = rec_result[0] if isinstance(rec_result, tuple) else rec_result
             pkg, pkg_note = _choose_backtest_package(packages_bt, int(rec_settings.get('display_max_rows', 5000)))
-            in_frame = result_in_frame(correct, frame)
-            after_manual = bool(_manual_sign_groups_pass(correct, active_manual_groups)) if in_frame else False
+
+            in_backtest_frame = result_in_frame(correct, engine_frame)
+            after_manual = bool(_manual_sign_groups_pass(correct, active_manual_groups)) if (in_backtest_frame and active_manual_groups) else (True if not active_manual_groups else False)
             if pkg is None:
                 pkg_pass = False
                 fail_reason = 'Inget paket hittades'
@@ -7721,16 +7775,19 @@ def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_mat
                 pkg_total = int(pkg.get('hist_total', len(sim_df)))
                 pkg_rows = int(pkg.get('frame_after', 0))
                 pkg_type = str(pkg.get('package_type', 'Tvingade filter'))
-            survives = bool(in_frame and after_manual and pkg_pass)
+
+            # Standardläget ska mäta paketfiltren. Fullflödesläge finns bara som diagnos.
+            survives = bool(pkg_pass) if package_only else bool(in_backtest_frame and after_manual and pkg_pass)
             rows.append({
                 'Datum': str(test_date)[:10] if test_date is not None else str(idx),
                 'Facit': correct,
                 'Status': 'OK',
                 'Liknande': int(len(sim_df)),
-                'I grundram': 'Ja' if in_frame else 'Nej',
-                'Efter manuell': 'Ja' if after_manual else 'Nej',
+                'Backtestram': frame_label,
+                'Facit i backtestram': 'Ja' if in_backtest_frame else 'Nej',
+                'Efter manuell': 'Ej använd' if package_only else ('Ja' if after_manual else 'Nej'),
                 'Paket klarar facit': 'Ja' if pkg_pass else 'Nej',
-                'Överlever före TM': 'Ja' if survives else 'Nej',
+                'Huvudresultat': 'Ja' if survives else 'Nej',
                 'Paketträff': f"{pkg_hit}/{pkg_total}" if pkg is not None else '-',
                 'Paketrader': pkg_rows if pkg_rows is not None else '-',
                 'Pakettyp': pkg_type,
@@ -7761,13 +7818,14 @@ def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_mat
         'tested': int(len(ok_df)),
         'requested': int(total),
         'skipped': int(skipped),
-        'ground_hits': _count_yes('I grundram'),
+        'ground_hits': _count_yes('Facit i backtestram'),
         'manual_hits': _count_yes('Efter manuell'),
         'package_hits': _count_yes('Paket klarar facit'),
-        'survivors': _count_yes('Överlever före TM'),
+        'survivors': _count_yes('Huvudresultat'),
         'mode': str(mode),
         'top_n': int(top_n),
         'pay_min': int(pay_min),
+        'test_scope': 'package_only' if package_only else 'current_full_flow',
     }
     return out, meta
 
@@ -8536,8 +8594,8 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     st.caption('Här ser du hela nivåtrappan per filter: säkert, balanserat, aggressivt och valt intervall i paket. Det gör det lättare att se varför t.ex. FAT Summa valdes på en viss nivå.')
                     st.dataframe(candidate_audit, use_container_width=True, hide_index=True)
             with st.expander('🧪 Backtest av paketmotorn', expanded=False):
-                st.caption('Tungt men ärligt test: varje historisk omgång låtsas vara dagens kupong. Testomgången tas bort från sin egen liknande historik. Appen bygger om filter, kör paketmotorn och kontrollerar om facit hade överlevt före TipsetMatrix.')
-                st.warning('Backtest kör paketmotorn flera gånger och kan ta tid. Börja med 5–10 omgångar. Det används ingen sampling i själva paketbeslutet.')
+                st.caption('Tungt men ärligt test: varje historisk omgång låtsas vara dagens kupong. Testomgången tas bort från sin egen liknande historik. Standardläget testar paketfiltren – inte dagens specifika grundram.')
+                st.warning('Backtest kör paketmotorn flera gånger och kan ta tid. Börja med 3–5 omgångar. Det används ingen sampling i själva paketbeslutet.')
                 bt_c1, bt_c2, bt_c3 = st.columns([1, 1, 1])
                 with bt_c1:
                     bt_cases = st.number_input('Antal omgångar att testa', min_value=3, max_value=50, value=int(st.session_state.get('v12_bt_cases', 5)), step=1, key='v12_bt_cases', help='Backtestar de senaste giltiga historiska omgångarna efter utdelningskravet. Högre antal kan bli mycket långsamt.')
@@ -8545,6 +8603,14 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     bt_mode = st.selectbox('Historikläge', ['Leave-one-out', 'Kronologiskt'], index=0 if st.session_state.get('v12_bt_mode', 'Leave-one-out') == 'Leave-one-out' else 1, key='v12_bt_mode', help='Leave-one-out använder alla historiska omgångar utom testomgången. Kronologiskt använder bara omgångar före testdatumet, vilket är striktare men kan ge färre testfall.')
                 with bt_c3:
                     bt_require_budget = st.checkbox('Välj paket under radgräns', value=bool(st.session_state.get('v12_bt_require_budget', True)), key='v12_bt_require_budget', help='På: backtestet väljer högsta träffpaket under Visa paket under. Av: kan välja bästa paket även över gränsen.')
+                bt_scope = st.radio(
+                    'Backtestmått',
+                    ['Paketfilter endast', 'Fullt flöde med aktuell grundram'],
+                    index=0 if st.session_state.get('v12_bt_scope', 'Paketfilter endast') == 'Paketfilter endast' else 1,
+                    key='v12_bt_scope',
+                    horizontal=True,
+                    help='Paketfilter endast är rekommenderat: historiska facit testas mot paketets filter, inte mot dagens specifika grundram/manuella tecken. Fullt flöde är bara felsökningsdiagnos för aktuell kupong.'
+                )
                 run_bt = st.button('Kör backtest av paketmotorn', use_container_width=True, key='v12_run_package_backtest')
                 if run_bt:
                     db_path_bt = find_local_database(spelform)
@@ -8585,6 +8651,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                             max_tests=int(bt_cases),
                             mode='kronologiskt' if str(bt_mode).lower().startswith('krono') else 'leave-one-out',
                             progress_cb=_bt_progress,
+                            test_scope='current_full_flow' if str(bt_scope).startswith('Fullt') else 'package_only',
                         )
                         bt_progress.progress(100, text=f'Backtest klart på {_fmt_elapsed(time.time() - bt_start)}')
                         st.session_state['v12_package_backtest_df'] = bt_df
@@ -8596,15 +8663,21 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                         st.error(bt_meta_show.get('error'))
                     tested = int(bt_meta_show.get('tested', 0) or 0)
                     if tested > 0:
+                        package_hits = int(bt_meta_show.get('package_hits', 0) or 0)
+                        main_hits = int(bt_meta_show.get('survivors', 0) or 0)
+                        scope_now = str(bt_meta_show.get('test_scope', 'package_only'))
                         b1, b2, b3, b4 = st.columns(4)
                         b1.metric('Testade paketfall', f"{tested}/{int(bt_meta_show.get('requested', 0) or 0)}")
-                        b2.metric('Facit i grundram', f"{int(bt_meta_show.get('ground_hits', 0))}/{tested}")
-                        b3.metric('Facit klarar paket', f"{int(bt_meta_show.get('package_hits', 0))}/{tested}")
-                        b4.metric('Överlever före TM', f"{int(bt_meta_show.get('survivors', 0))}/{tested}")
-                        surv_pct = 100.0 * int(bt_meta_show.get('survivors', 0)) / max(1, tested)
-                        st.info(f"Backtestresultat: {int(bt_meta_show.get('survivors', 0))}/{tested} ({surv_pct:.1f}%) historiska facit överlevde grundram + manuell teckengrupp + valt rekommenderat paket före TipsetMatrix.")
+                        b2.metric('Facit klarar paket', f"{package_hits}/{tested}")
+                        b3.metric('Facit i backtestram', f"{int(bt_meta_show.get('ground_hits', 0))}/{tested}")
+                        b4.metric('Huvudresultat', f"{main_hits}/{tested}")
+                        main_pct = 100.0 * main_hits / max(1, tested)
+                        if scope_now == 'package_only':
+                            st.info(f"Backtestresultat: {package_hits}/{tested} ({100.0 * package_hits / max(1, tested):.1f}%) historiska facit klarade valt rekommenderat paket. Dagens grundram och manuella teckengrupper ingår inte i huvudmåttet.")
+                        else:
+                            st.info(f"Backtestresultat: {main_hits}/{tested} ({main_pct:.1f}%) historiska facit överlevde aktuell grundram + manuell teckengrupp + valt rekommenderat paket. Detta läge är bara diagnostiskt för dagens kupong.")
                     st.dataframe(bt_df_show, use_container_width=True, hide_index=True)
-                    st.caption('Backtestet testar filterpaket före TipsetMatrix-reducering. Om facit inte finns i grundramen eller stoppas av manuell teckengrupp räknas det som att hela flödet inte hade överlevt, men tabellen visar var tappet uppstod.')
+                    st.caption('Standardläget testar paketfiltren. Backtestramen är auto-rankad efter testkupongens streck och samma breddmönster som din grundram, så gamla facit testas inte mot dagens specifika matchtecken.')
 
             if visible_packages:
                 # v12.0bu: alla spelbara paket under radgränsen ska kunna väljas,
