@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0bv – Spelfil och paketfix"
+APP_VERSION = "v12.0bw – Paketstandard 28/30"
 
 
 st.markdown("""
@@ -5274,9 +5274,15 @@ def _apply_spelfil_payload(payload):
             'rec_frame_adapt': 'v12_rec_frame_adapt',
             'rec_min_value_filters': 'v12_rec_min_value_filters',
         }
+        _pkg_settings_loaded = False
         for src, dst in _map.items():
             if pkg_state.get(src) is not None:
                 st.session_state[dst] = pkg_state.get(src)
+                _pkg_settings_loaded = True
+        if _pkg_settings_loaded:
+            # En sparad spelfil/filterpaket ska få behålla sina egna paketmotorvärden
+            # och inte skrivas över av nya standardvärden längre ner i gränssnittet.
+            st.session_state['v12_pkg_defaults_version'] = 'v12.0bw'
         req_loaded = [str(rk) for rk in (pkg_state.get('required_keys', []) or []) if rk]
         st.session_state['v12_required_pkg_keys'] = list(dict.fromkeys(req_loaded))
         # Bakåtkompatibilitet för äldre sessionsnycklar/formulär.
@@ -7932,30 +7938,49 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 st.info("Inga obligatoriska filter valda. Paketmotorn söker fritt.")
         required_keys_now = list(st.session_state.get('v12_required_pkg_keys', []))
 
+        # Standard för paketmotorn. Dessa värden gäller bara när inget redan är sparat
+        # i session/spelfil. För att uppdatera gamla öppna sessioner byts det gamla
+        # standardvärdet 22/30 till nya 28/30 en gång, men egna val lämnas i fred.
+        default_rec_min_step = 1.0
+        default_rec_max_filters = 30
+        default_rec_min_hit = min(28, int(len(v_m)))
+        default_rec_display_max_rows = int(st.session_state.get("v12_matrix_limit", 5000))
+        default_rec_frame_adapt = True
+        default_rec_min_value_filters = 3
+        if st.session_state.get("v12_pkg_defaults_version") != "v12.0bw":
+            if "v12_rec_min_hit" not in st.session_state or int(st.session_state.get("v12_rec_min_hit", 22)) <= 22:
+                st.session_state["v12_rec_min_hit"] = default_rec_min_hit
+            st.session_state.setdefault("v12_rec_min_step", default_rec_min_step)
+            st.session_state.setdefault("v12_rec_max_filters", default_rec_max_filters)
+            st.session_state.setdefault("v12_rec_display_max_rows", default_rec_display_max_rows)
+            st.session_state.setdefault("v12_rec_frame_adapt", default_rec_frame_adapt)
+            st.session_state.setdefault("v12_rec_min_value_filters", default_rec_min_value_filters)
+            st.session_state["v12_pkg_defaults_version"] = "v12.0bw"
+
         with st.form("v12_recommended_package_engine_form"):
-            st.caption("Paketmotorns inställningar ligger i formulär. Ändra flera saker och tryck Beräkna paket en gång.")
+            st.caption("Paketmotorns standard är nu: sök ner till 28/30, max 30 filter, minsta extra reducering 1,00, anpassa mot grundram och minst 3 värde-/poängfilter. Ändra flera saker och tryck Beräkna paket en gång.")
             rp_c1, rp_c2, rp_c3, rp_c4, rp_c5, rp_c6 = st.columns([1, 1, 1, 1, 1, 1])
             with rp_c1:
                 rec_min_step = st.number_input(
                     "Minsta extra reducering",
                     min_value=0.5,
                     max_value=20.0,
-                    value=float(st.session_state.get("v12_rec_min_step", 1.0)),
+                    value=float(st.session_state.get("v12_rec_min_step", default_rec_min_step)),
                     step=0.25,
                     format="%.2f",
                     key="v12_rec_min_step",
                     help="Gäller främst efter att värdekärnan är byggd. Värde-/poängfilter som behövs för kvoten får läggas till med lägre marginalkrav om de håller samlad träff.",
                 )
             with rp_c2:
-                rec_max_filters = st.number_input("Max filter i paket", min_value=1, max_value=40, value=int(st.session_state.get("v12_rec_max_filters", 30)), step=1, key="v12_rec_max_filters")
+                rec_max_filters = st.number_input("Max filter i paket", min_value=1, max_value=40, value=int(st.session_state.get("v12_rec_max_filters", default_rec_max_filters)), step=1, key="v12_rec_max_filters")
             with rp_c3:
-                rec_min_hit = st.number_input("Sök ner till träff", min_value=1, max_value=int(len(v_m)), value=min(int(st.session_state.get("v12_rec_min_hit", min(22, int(len(v_m))))), int(len(v_m))), step=1, key="v12_rec_min_hit", help="Exempel: 15 betyder att paketmotorn söker ända ner till 15/30 när historikbasen är 30.")
+                rec_min_hit = st.number_input("Sök ner till träff", min_value=1, max_value=int(len(v_m)), value=min(int(st.session_state.get("v12_rec_min_hit", default_rec_min_hit)), int(len(v_m))), step=1, key="v12_rec_min_hit", help="Standard 28/30. Höj till 29–30 för tryggare paket, sänk bara om du behöver pressa radantalet hårdare.")
             with rp_c4:
-                rec_display_max_rows = st.number_input("Visa paket under", min_value=100, max_value=75000, value=int(st.session_state.get("v12_rec_display_max_rows", 5000)), step=100, key="v12_rec_display_max_rows", help="Paket över denna filtermassa döljs i huvudlistan. Standard 5 000 eftersom bredare paket oftast är opraktiska inför TipsetMatrix.")
+                rec_display_max_rows = st.number_input("Visa paket under", min_value=100, max_value=75000, value=int(st.session_state.get("v12_rec_display_max_rows", default_rec_display_max_rows)), step=100, key="v12_rec_display_max_rows", help="Sätt detta till din riktiga radbudget före TipsetMatrix. Standard följer TipsetMatrix-spärren om den finns, annars 5 000.")
             with rp_c5:
                 rec_frame_adapt = st.checkbox(
                     "Anpassa mot grundram",
-                    value=bool(st.session_state.get("v12_rec_frame_adapt", True)),
+                    value=bool(st.session_state.get("v12_rec_frame_adapt", default_rec_frame_adapt)),
                     key="v12_rec_frame_adapt",
                     help="Undviker paketfilter som ligger för nära grundramens yttergränser. Gäller även FAT-sekvenser som blir grundramsdrivna, t.ex. när ramen redan låser minst 3 sekvensträffar och filtret bara kapar max.",
                 )
@@ -7964,7 +7989,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     "Min värde-/poängfilter",
                     min_value=0,
                     max_value=10,
-                    value=int(st.session_state.get("v12_rec_min_value_filters", 3)),
+                    value=int(st.session_state.get("v12_rec_min_value_filters", default_rec_min_value_filters)),
                     step=1,
                     key="v12_rec_min_value_filters",
                     help="Hård spärr: ett rekommenderat paket måste innehålla minst detta antal filter från Värde & svårighet. Annars visas paketet inte i listan.",
