@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0cb – Synlig utdelningsprognos"
+APP_VERSION = "v12.0cc – Utdelningsrisk och min/max"
 
 
 st.markdown("""
@@ -2762,7 +2762,7 @@ def _forecast_pool_value(turnover, jackpot_million):
 
 
 def _forecast_from_similar_df(sim_df, today_turnover=0.0, today_jackpot_million=0.0):
-    """Bygger en transparent True_Rank- och utdelningsprognos från liknande omgångar."""
+    """Bygger en transparent True_Rank- och utdelningsrisk från liknande omgångar."""
     if sim_df is None or len(sim_df) == 0:
         return {}
     work = sim_df.copy().reset_index(drop=True)
@@ -2795,7 +2795,7 @@ def _forecast_from_similar_df(sim_df, today_turnover=0.0, today_jackpot_million=
         zone_weights[zone] += float(weights[i])
         support_counts[zone] += 1
 
-    # Liten utjämning skyddar mot falska 0 %-prognoser i små urval.
+    # Liten utjämning skyddar mot falska 0 %-riskprofiler i små urval.
     alpha = 0.20
     probs = (zone_weights + alpha) / max(1e-9, float(zone_weights.sum() + alpha * len(zone_weights)))
     order = list(np.argsort(probs)[::-1])
@@ -2862,14 +2862,254 @@ def _forecast_from_similar_df(sim_df, today_turnover=0.0, today_jackpot_million=
     }
 
 
+def _risk_probabilities_from_forecast(forecast):
+    if not isinstance(forecast, dict):
+        return [0.0] * len(PAYOUT_ZONE_DEFS)
+    probs = forecast.get('risk_probabilities') or forecast.get('probabilities') or []
+    try:
+        arr = np.asarray(probs, dtype=float)
+        if len(arr) != len(PAYOUT_ZONE_DEFS) or float(arr.sum()) <= 0:
+            return [0.0] * len(PAYOUT_ZONE_DEFS)
+        arr = arr / float(arr.sum())
+        return [float(x) for x in arr]
+    except Exception:
+        return [0.0] * len(PAYOUT_ZONE_DEFS)
+
+
+def _risk_label_500plus(p500):
+    try:
+        p500 = float(p500)
+    except Exception:
+        return 'Okänd'
+    if p500 < 0.20:
+        return 'Låg'
+    if p500 < 0.30:
+        return 'Normal/spretig'
+    return 'Hög'
+
+
+def _risk_label_extreme(p3m):
+    try:
+        p3m = float(p3m)
+    except Exception:
+        return 'Okänd'
+    if p3m < 0.10:
+        return 'Låg'
+    if p3m < 0.18:
+        return 'Möjlig'
+    return 'Tydlig'
+
+
+def _risk_profile_text_from_probs(probs):
+    arr = np.asarray(probs, dtype=float)
+    if len(arr) != len(PAYOUT_ZONE_DEFS) or float(arr.sum()) <= 0:
+        return 'Okänd profil'
+    arr = arr / float(arr.sum())
+    p_under200 = float(arr[0] + arr[1])
+    p_200plus = float(arr[2] + arr[3] + arr[4])
+    p_500plus = float(arr[3] + arr[4])
+    p_extreme = float(arr[4])
+    if p_500plus >= 0.30:
+        return 'Högutdelningsrisk'
+    if p_extreme >= 0.18:
+        return 'Extremvarning'
+    if p_under200 >= 0.58 and p_500plus < 0.20:
+        return 'Låg/normal utdelningsprofil'
+    if p_200plus >= 0.55:
+        return 'Svårare profil'
+    return 'Spretig/normal profil'
+
+
+def _add_risk_metrics_to_forecast(forecast):
+    if not isinstance(forecast, dict) or not forecast:
+        return forecast
+    probs = _risk_probabilities_from_forecast(forecast)
+    arr = np.asarray(probs, dtype=float)
+    if len(arr) == len(PAYOUT_ZONE_DEFS) and float(arr.sum()) > 0:
+        arr = arr / float(arr.sum())
+        forecast['risk_probabilities'] = [float(x) for x in arr]
+        forecast['p_under_200k'] = float(arr[0] + arr[1])
+        forecast['p_200k_plus'] = float(arr[2] + arr[3] + arr[4])
+        forecast['p_500k_plus'] = float(arr[3] + arr[4])
+        forecast['p_3m_plus_no_winner'] = float(arr[4])
+        forecast['risk_500k_label'] = _risk_label_500plus(forecast['p_500k_plus'])
+        forecast['risk_extreme_label'] = _risk_label_extreme(forecast['p_3m_plus_no_winner'])
+        forecast['risk_profile_label'] = _risk_profile_text_from_probs(arr)
+    return forecast
+
+
+def _historical_pct_matrix_from_row(row, antal_matcher):
+    mat = []
+    for m in range(1, int(antal_matcher) + 1):
+        vals = []
+        for sgn in ['1', 'X', '2']:
+            vals.append(_parse_swedish_number(row.get(f'M{m}-{sgn}', np.nan), default=np.nan))
+        if any(not np.isfinite(float(v)) for v in vals):
+            return None
+        mat.append(vals)
+    return np.asarray(mat, dtype=float)
+
+
+def _current_pct_matrix_from_filter_vec(filter_vec, antal_matcher):
+    try:
+        arr = np.asarray(list(filter_vec), dtype=float)[:int(antal_matcher) * 3]
+        return arr.reshape((int(antal_matcher), 3))
+    except Exception:
+        return None
+
+
+def _correct_row_to_indices(row, antal_matcher):
+    cr = str(row.get('Correct_Row', '') or '').strip().upper().replace(' ', '')
+    if len(cr) != int(antal_matcher) or any(c not in '1X2' for c in cr):
+        parts = []
+        for m in range(1, int(antal_matcher) + 1):
+            c = str(row.get(f'M{m}', '') or '').strip().upper()
+            parts.append(c[:1] if c[:1] in '1X2' else '')
+        cr = ''.join(parts)
+    if len(cr) != int(antal_matcher) or any(c not in '1X2' for c in cr):
+        return None
+    mapping = {'1': 0, 'X': 1, '2': 2}
+    return np.asarray([mapping[c] for c in cr], dtype=np.int8)
+
+
+def _row_profile_features_batch(pct_mat, idx_matrix):
+    mat = np.asarray(pct_mat, dtype=float)
+    idx = np.asarray(idx_matrix, dtype=np.int64)
+    if idx.ndim == 1:
+        idx = idx.reshape((1, -1))
+    n, m = idx.shape
+    p = mat[np.arange(m)[None, :], idx] / 100.0
+    order = np.argsort(-mat, axis=1)
+    rank_map = np.empty_like(order)
+    for i in range(m):
+        for rnk, col in enumerate(order[i], start=1):
+            rank_map[i, col] = rnk
+    ranks = rank_map[np.arange(m)[None, :], idx]
+    feats = [
+        p.sum(axis=1),
+        p.mean(axis=1),
+        p.std(axis=1),
+        p.min(axis=1),
+        np.median(p, axis=1),
+        np.sum(-np.log(np.clip(p, 1e-12, 1.0)), axis=1),
+        (ranks == 1).sum(axis=1),
+        (ranks == 2).sum(axis=1),
+        (ranks == 3).sum(axis=1),
+        ranks.sum(axis=1),
+    ]
+    for th in [0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.60]:
+        feats.append((p <= th).sum(axis=1))
+    return np.vstack(feats).T.astype(float)
+
+
+def _build_historical_outcome_profiles(db_all, antal_matcher):
+    X, y = [], []
+    if db_all is None or len(db_all) == 0:
+        return np.empty((0, 1), dtype=float), np.asarray([], dtype=int)
+    for _, row in db_all.iterrows():
+        mat = _historical_pct_matrix_from_row(row, antal_matcher)
+        idx = _correct_row_to_indices(row, antal_matcher)
+        if mat is None or idx is None:
+            continue
+        zone = _payout_zone_index(row.get('Payout', 0), bool(row.get('No_13_Winner', False)))
+        try:
+            X.append(_row_profile_features_batch(mat, idx)[0])
+            y.append(int(zone))
+        except Exception:
+            continue
+    if not X:
+        return np.empty((0, 1), dtype=float), np.asarray([], dtype=int)
+    return np.vstack(X).astype(float), np.asarray(y, dtype=int)
+
+
+def _simulate_current_indices_from_streck(pct_mat, n_samples=8000):
+    mat = np.asarray(pct_mat, dtype=float)
+    probs = np.clip(mat / 100.0, 1e-6, None)
+    probs = probs / probs.sum(axis=1, keepdims=True)
+    seed_raw = hashlib.sha1(np.asarray(mat.round(3), dtype=float).tobytes()).hexdigest()[:12]
+    rng = np.random.default_rng(int(seed_raw, 16) % (2**32 - 1))
+    cum = np.cumsum(probs, axis=1)
+    u = rng.random((int(n_samples), mat.shape[0]))
+    return (u[:, :, None] > cum[None, :, :]).sum(axis=2).astype(np.int8)
+
+
+def _nearest_profile_zone_probabilities(X_train, y_train, X_sim, k=25):
+    if X_train is None or X_sim is None or len(X_train) < 20 or len(X_sim) == 0:
+        return None
+    y_train = np.asarray(y_train, dtype=int)
+    prior = np.bincount(y_train, minlength=len(PAYOUT_ZONE_DEFS)).astype(float)
+    prior = prior / max(1e-9, float(prior.sum()))
+    mu = np.nanmean(X_train, axis=0)
+    sd = np.nanstd(X_train, axis=0) + 1e-9
+    Xt = np.nan_to_num((X_train - mu) / sd, nan=0.0, posinf=0.0, neginf=0.0)
+    Xs = np.nan_to_num((X_sim - mu) / sd, nan=0.0, posinf=0.0, neginf=0.0)
+    k = int(max(5, min(k, len(Xt))))
+    probs_sum = np.zeros(len(PAYOUT_ZONE_DEFS), dtype=float)
+    total = 0
+    chunk = 700
+    for start in range(0, len(Xs), chunk):
+        C = Xs[start:start+chunk]
+        d2 = ((C[:, None, :] - Xt[None, :, :]) ** 2).sum(axis=2)
+        idx = np.argpartition(d2, kth=k-1, axis=1)[:, :k]
+        local_d = np.take_along_axis(d2, idx, axis=1)
+        w = 1.0 / (np.sqrt(np.maximum(local_d, 1e-12)) + 1e-6)
+        for row_idx, row_w in zip(idx, w):
+            p = np.zeros(len(PAYOUT_ZONE_DEFS), dtype=float)
+            for hist_i, wi in zip(row_idx, row_w):
+                p[int(y_train[int(hist_i)])] += float(wi)
+            if float(p.sum()) > 0:
+                p = p / float(p.sum())
+                probs_sum += p
+                total += 1
+    if total <= 0:
+        return [float(x) for x in prior]
+    probs = probs_sum / float(total)
+    probs = 0.85 * probs + 0.15 * prior
+    probs = probs / max(1e-9, float(probs.sum()))
+    return [float(x) for x in probs]
+
+
+def _simulated_row_risk_profile(db_all, filter_vec, antal_matcher, n_samples=8000):
+    """Snabb, transparent radprofilmodell för utdelningsrisk. Ingen hård filterstyrning."""
+    mat = _current_pct_matrix_from_filter_vec(filter_vec, antal_matcher)
+    if mat is None or db_all is None or len(db_all) < 40:
+        return {}
+    X_train, y_train = _build_historical_outcome_profiles(db_all, antal_matcher)
+    if len(y_train) < 40:
+        return {}
+    idx_sim = _simulate_current_indices_from_streck(mat, n_samples=n_samples)
+    X_sim = _row_profile_features_batch(mat, idx_sim)
+    probs = _nearest_profile_zone_probabilities(X_train, y_train, X_sim, k=25)
+    if not probs:
+        return {}
+    arr = np.asarray(probs, dtype=float)
+    arr = arr / max(1e-9, float(arr.sum()))
+    rows = []
+    for z in PAYOUT_ZONE_DEFS:
+        idx = int(z['idx'])
+        rows.append({
+            'Zon': z['label'],
+            'Sannolikhet': float(arr[idx]),
+            'Sannolikhet %': round(100.0 * float(arr[idx]), 1),
+        })
+    return {
+        'risk_method': 'simulerad_radprofil',
+        'risk_probabilities': [float(x) for x in arr],
+        'risk_probability_rows': rows,
+        'risk_samples': int(n_samples),
+        'risk_train_rows': int(len(y_train)),
+    }
+
+
+
 def _forecast_package_row_weights(v_m, forecast):
     """Viktar huvudzon starkast och alternativ zon som skydd för paketmotorn."""
     if not isinstance(forecast, dict) or v_m is None or len(v_m) == 0:
         return None
     main_idx = int(forecast.get('main_zone_idx', -1))
     alt_idx = int(forecast.get('alt_zone_idx', -1))
-    # Paketets historikbas kan skilja sig från prognosens neutrala historik om
-    # användaren aktiverat manuellt utdelningsmål. Vikta därför alltid den
+    # Paketets historikbas kan skilja sig från riskprofilens neutrala historik om
+    # användaren aktiverat utdelningsintervall. Vikta därför alltid den
     # faktiska v_m-radmassan på nytt i stället för att återanvända positionsvikter.
     if 'Sim' in v_m.columns:
         sim_w = _similarity_weights(pd.to_numeric(v_m['Sim'], errors='coerce').fillna(np.inf).to_numpy(dtype=float))
@@ -2893,7 +3133,7 @@ def _forecast_package_row_weights(v_m, forecast):
 
 
 def _forecast_guided_intervals_for_spec(spec, forecast_weights):
-    """Skapar extra kandidatintervall från prognosviktad historik, aldrig som hårt tvång."""
+    """Skapar extra kandidatintervall från riskprofilviktad historik, aldrig som hårt tvång."""
     if forecast_weights is None:
         return []
     vals = np.asarray([np.nan if pd.isna(v) else float(v) for v in spec.get('hist_values', [])], dtype=float)
@@ -2905,9 +3145,9 @@ def _forecast_guided_intervals_for_spec(spec, forecast_weights):
         return []
     dec = int(spec.get('decimals', 0))
     variants = [
-        (0.10, 0.90, 'Prognos säkerhetszon', 91.0),
-        (0.20, 0.80, 'Prognos huvudzon', 82.0),
-        (0.30, 0.70, 'Prognos kärna', 72.0),
+        (0.10, 0.90, 'Riskprofil säkerhetszon', 91.0),
+        (0.20, 0.80, 'Riskprofil huvudzon', 82.0),
+        (0.30, 0.70, 'Riskprofil kärna', 72.0),
     ]
     out = []
     seen = set()
@@ -2953,7 +3193,7 @@ def _forecast_candidate_fit(hist_mask, forecast_weights):
 
 
 def _select_similar_history_df(global_db, input_vec, antal_matcher, top_n, use_structure=True, pay_min=None, pay_max=None):
-    """Gemensamt neutralt likhetsurval för filterhistorik och utdelningsprognos."""
+    """Gemensamt neutralt likhetsurval för filterhistorik och utdelningsrisk."""
     krav_odds = int(antal_matcher) * 3
     if global_db is None or len(global_db) == 0:
         return pd.DataFrame()
@@ -3155,73 +3395,78 @@ def _forecast_probability_text(value):
 def _forecast_main_summary(forecast):
     if not isinstance(forecast, dict) or not forecast:
         return ''
-    main_zone = str(forecast.get('main_zone', '—'))
-    alt_zone = str(forecast.get('alt_zone', '—'))
-    main_p = _forecast_probability_text(forecast.get('main_probability', 0.0))
-    alt_p = _forecast_probability_text(forecast.get('alt_probability', 0.0))
-    med = _fmt_rank_value(forecast.get('true_rank_median'))
-    lo = _fmt_rank_value(forecast.get('true_rank_main_low'))
-    hi = _fmt_rank_value(forecast.get('true_rank_main_high'))
-    conf = str(forecast.get('confidence', '—'))
-    return f"Vald huvudzon: {main_zone} ({main_p}) · Alternativ: {alt_zone} ({alt_p}) · True_Rank median {med}, huvudintervall {lo}–{hi} · Säkerhet {conf}"
+    _add_risk_metrics_to_forecast(forecast)
+    p_under = _forecast_probability_text(forecast.get('p_under_200k', 0.0))
+    p_200 = _forecast_probability_text(forecast.get('p_200k_plus', 0.0))
+    p_500 = _forecast_probability_text(forecast.get('p_500k_plus', 0.0))
+    p_ext = _forecast_probability_text(forecast.get('p_3m_plus_no_winner', 0.0))
+    profile = str(forecast.get('risk_profile_label', 'Okänd profil'))
+    r500 = str(forecast.get('risk_500k_label', '—'))
+    method = str(forecast.get('risk_method', forecast.get('method', '')))
+    method_txt = 'simulerad radprofil' if 'simulerad' in method else 'liknande historik'
+    return f"{profile} · 500k+ risk {r500} ({p_500}) · Under 200k {p_under} · 200k+ {p_200} · 3m+/ingen {p_ext} · metod {method_txt}"
 
 
 def _render_payout_forecast_panel(forecast, calibration=None, forecast_mode='Endast information', database_report=None):
     if not isinstance(forecast, dict) or not forecast:
         return
+    _add_risk_metrics_to_forecast(forecast)
     st.markdown("<div class='v12-card'>", unsafe_allow_html=True)
-    st.markdown("<div class='v12-step'>Prognos</div><div class='v12-title'>Prognostiserad utdelningsprofil</div>", unsafe_allow_html=True)
-    mode_txt = str(forecast_mode or 'Endast information')
+    st.markdown("<div class='v12-step'>Riskprofil</div><div class='v12-title'>Utdelningsriskprofil</div>", unsafe_allow_html=True)
     summary_txt = _forecast_main_summary(forecast)
     if summary_txt:
-        st.success(f"✅ {summary_txt}")
-    if mode_txt.startswith('Automatisk'):
-        st.caption('Huvudzonen prioriterar värde-, favorit- och FAT-filter i paketmotorn. Samlad historikträff och teckenskydd är fortfarande hårda krav.')
-    elif mode_txt.startswith('Endast'):
-        st.info('Prognosen visas som beslutsstöd men påverkar inte paketmotorn.')
-    else:
-        st.info('Prognosen är avstängd för paketmotorn.')
+        st.info(f"📈 {summary_txt}")
+    st.caption('Riskprofilen är beslutsstöd. Den påverkar inte paketmotorn automatiskt och ska inte användas som hårt utdelningsfilter.')
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric('Vald huvudzon', str(forecast.get('main_zone', '—')), _forecast_probability_text(forecast.get('main_probability', 0.0)))
-    c2.metric('Skyddszon / näst troligast', str(forecast.get('alt_zone', '—')), _forecast_probability_text(forecast.get('alt_probability', 0.0)))
-    c3.metric('Viktad median True_Rank', _fmt_rank_value(forecast.get('true_rank_median')), f"{int(forecast.get('n_similar', 0))} liknande")
-    c4.metric('Prognossäkerhet', str(forecast.get('confidence', '—')), f"effektivt urval {float(forecast.get('effective_n', 0.0)):.1f}")
+    c1.metric('Under 200k', _forecast_probability_text(forecast.get('p_under_200k', 0.0)))
+    c2.metric('200k+', _forecast_probability_text(forecast.get('p_200k_plus', 0.0)))
+    c3.metric('500k+ risk', str(forecast.get('risk_500k_label', '—')), _forecast_probability_text(forecast.get('p_500k_plus', 0.0)))
+    c4.metric('3m+ / ingen 13', str(forecast.get('risk_extreme_label', '—')), _forecast_probability_text(forecast.get('p_3m_plus_no_winner', 0.0)))
 
+    med = _fmt_rank_value(forecast.get('true_rank_median'))
     main_lo = _fmt_rank_value(forecast.get('true_rank_main_low'))
     main_hi = _fmt_rank_value(forecast.get('true_rank_main_high'))
     safe_lo = _fmt_rank_value(forecast.get('true_rank_safe_low'))
     safe_hi = _fmt_rank_value(forecast.get('true_rank_safe_high'))
-    st.caption(f"True_Rank huvudintervall: {main_lo}–{main_hi} · säkerhetsintervall: {safe_lo}–{safe_hi}. Noll kronor med 0 vinnare på 13 rätt behandlas som den svåraste zonen, inte som låg utdelning.")
-    if forecast.get('pool_adjusted'):
-        st.caption(f"Kronzonerna är försiktigt justerade mot angiven omsättning {float(forecast.get('today_turnover',0)):,.0f} kr och jackpot {float(forecast.get('today_jackpot_million',0)):.1f} milj. Justeringen är begränsad så den inte kan dominera streckbilden.".replace(',', ' '))
+    st.caption(f"True_Rank enligt liknande historik: median {med} · huvudintervall {main_lo}–{main_hi} · säkerhetsintervall {safe_lo}–{safe_hi}.")
+    if forecast.get('risk_method') == 'simulerad_radprofil':
+        st.caption(f"500k+ risk bygger på simulerad radprofil: {int(forecast.get('risk_samples', 0)):,} simulerade möjliga rätta rader jämförda mot {int(forecast.get('risk_train_rows', 0)):,} historiska vinnarrader.".replace(',', ' '))
     else:
-        st.caption('Prognosen är streckbaserad. Fyll i dagens omsättning/jackpot under Avancerat om du vill göra en försiktig pottjustering.')
+        st.caption(f"Riskprofilen bygger på {int(forecast.get('n_similar', 0))} mest liknande historiska omgångar.")
+    if forecast.get('pool_adjusted'):
+        st.caption(f"Liknande-historikens kronzoner är försiktigt justerade mot angiven omsättning {float(forecast.get('today_turnover',0)):,.0f} kr och jackpot {float(forecast.get('today_jackpot_million',0)):.1f} milj.".replace(',', ' '))
 
-    prob_rows = forecast.get('probability_rows') or []
-    if prob_rows:
-        p_df = pd.DataFrame(prob_rows)
-        p_df['Sannolikhet'] = p_df['Sannolikhet %'].map(lambda x: f"{float(x):.1f}%")
-        st.dataframe(p_df[['Zon', 'Sannolikhet', 'Historiskt stöd']], use_container_width=True, hide_index=True)
+    risk_rows = forecast.get('risk_probability_rows') or []
+    if not risk_rows:
+        base_rows = forecast.get('probability_rows') or []
+        risk_rows = []
+        for r in base_rows:
+            risk_rows.append({
+                'Zon': r.get('Zon'),
+                'Sannolikhet %': r.get('Sannolikhet %', 0),
+                'Historiskt stöd': r.get('Historiskt stöd', ''),
+            })
+    if risk_rows:
+        p_df = pd.DataFrame(risk_rows)
+        if 'Sannolikhet' not in p_df.columns and 'Sannolikhet %' in p_df.columns:
+            p_df['Sannolikhet'] = p_df['Sannolikhet %'].map(lambda x: f"{float(x):.1f}%")
+        cols = [c for c in ['Zon', 'Sannolikhet', 'Historiskt stöd'] if c in p_df.columns]
+        st.dataframe(p_df[cols], use_container_width=True, hide_index=True)
+
+    similar_rows = forecast.get('probability_rows') or []
+    if forecast.get('risk_method') == 'simulerad_radprofil' and similar_rows:
+        with st.expander('Visa jämförelse: 30/liknande historik', expanded=False):
+            s_df = pd.DataFrame(similar_rows)
+            s_df['Sannolikhet'] = s_df['Sannolikhet %'].map(lambda x: f"{float(x):.1f}%")
+            st.dataframe(s_df[['Zon', 'Sannolikhet', 'Historiskt stöd']], use_container_width=True, hide_index=True)
+            st.caption('Denna tabell är enklare: den visar hur de mest liknande historiska omgångarna fördelade sig. Huvudpanelen använder radprofilrisk när den finns.')
 
     if isinstance(calibration, dict) and calibration.get('rows'):
-        try:
-            _rec_n = int(calibration.get('recommended_n', forecast.get('n_similar', 30)))
-            _chosen_bt = next((r for r in calibration.get('rows', []) if int(r.get('Liknande omgångar', -1)) == _rec_n), None)
-            if _chosen_bt:
-                _top2 = float(_chosen_bt.get('Rätt bland två %', 0.0))
-                _exact = float(_chosen_bt.get('Rätt huvudzon %', 0.0))
-                if _top2 < 55.0:
-                    st.warning(f"Prognosbacktestet är ännu måttligt: rätt huvudzon {_exact:.1f}% och rätt bland två zoner {_top2:.1f}%. Därför används prognosen bara som säker prioritering/tie-breaker, aldrig som ensamt hårt filter.")
-                else:
-                    st.caption(f"Kronologiskt backtest för valt historikantal: rätt huvudzon {_exact:.1f}% · rätt bland två {_top2:.1f}%.")
-        except Exception:
-            pass
-        with st.expander('Visa kronologiskt prognosbacktest', expanded=False):
-            st.caption('Varje testomgång använder bara äldre omgångar. Tabellen jämför hur många liknande omgångar som ger bäst balans mellan zonträff och intervallbredd.')
+        with st.expander('Visa tidigare riskprofilbacktest', expanded=False):
+            st.caption('Gammalt zonbacktest finns kvar som referens, men huvudtalet i appen är nu 500k+ riskprofil, inte exakt vald utdelningszon.')
             cdf = pd.DataFrame(calibration.get('rows') or [])
             st.dataframe(cdf, use_container_width=True, hide_index=True)
-            st.caption(f"Automatiskt valt historikantal: {int(calibration.get('recommended_n', forecast.get('n_similar', 30)))}. {calibration.get('selection_reason', '')}")
     if isinstance(database_report, pd.DataFrame) and not database_report.empty:
         with st.expander('Visa databaskontroll', expanded=False):
             st.dataframe(database_report, use_container_width=True, hide_index=True)
@@ -3320,7 +3565,7 @@ def load_database(filepath, antal_matcher, file_mtime=None):
     else:
         global_db['Payout'] = 0.0
 
-    # Standardiserade prognoskolumner. Originalkolumnerna lämnas orörda.
+    # Standardiserade riskprofilkolumner. Originalkolumnerna lämnas orörda.
     clean_map = {_clean_col_name(c): c for c in global_db.columns}
     winners_col = clean_map.get(f'vinnare{antal_matcher}') or clean_map.get('vinnare13')
     turnover_col = next((c for c in global_db.columns if 'omsättning' in str(c).lower() or 'omsattning' in str(c).lower()), None)
@@ -5787,7 +6032,7 @@ def _apply_last_result_from_spelfil(payload):
 
 
 def _history_records_for_spelfil(v_m):
-    """Sparar liknande historik inklusive prognosfält så spelfilen blir självbärande."""
+    """Sparar liknande historik inklusive riskprofilfält så spelfilen blir självbärande."""
     records = []
     keep_fields = ['Datum', 'Payout', 'True_Rank', 'Winners_13', 'Turnover', 'Jackpot_Million', 'No_13_Winner', 'Payout_Zone', 'Sim']
     try:
@@ -5963,7 +6208,7 @@ def _build_spelfil_payload(specs, group_reqs, filter_hist_target_pct, top_fav_co
         'last_result': _last_result_for_spelfil(st.session_state.get('v12_last_result')),
         'last_result_stale': bool(st.session_state.get('v12_last_result_stale', False)),
         'forecast_state': _json_safe_value({
-            'mode': st.session_state.get('v12_forecast_mode', 'Automatisk – påverkar paketmotorn'),
+            'mode': st.session_state.get('v12_forecast_mode', 'Endast information'),
             'forecast_auto_n': bool(st.session_state.get('v12_forecast_auto_n', True)),
             'forecast_manual_n': int(st.session_state.get('v12_forecast_manual_n', 30) or 30),
             'forecast_effective_n': int(st.session_state.get('v12_forecast_effective_n', 30) or 30),
@@ -6018,7 +6263,7 @@ def _apply_spelfil_payload(payload):
         st.session_state['v12_pay_min'] = int(payload.get('pay_min') or 0)
     forecast_state = payload.get('forecast_state') or {}
     if isinstance(forecast_state, dict):
-        st.session_state['v12_forecast_mode'] = forecast_state.get('mode', st.session_state.get('v12_forecast_mode', 'Automatisk – påverkar paketmotorn'))
+        st.session_state['v12_forecast_mode'] = forecast_state.get('mode', st.session_state.get('v12_forecast_mode', 'Endast information'))
         st.session_state['v12_forecast_auto_n'] = bool(forecast_state.get('forecast_auto_n', forecast_state.get('history_auto_n', True)))
         st.session_state['v12_forecast_manual_n'] = int(forecast_state.get('forecast_manual_n', forecast_state.get('forecast_effective_n', 30)) or 30)
         st.session_state['v12_forecast_effective_n'] = int(forecast_state.get('forecast_effective_n', (forecast_state.get('forecast') or {}).get('n_similar', 30)) or 30)
@@ -6622,7 +6867,7 @@ def _render_inline_filter_info(spec, interval, frame_rows, frame, antal_matcher)
                 pass
 
     st.markdown(f"**ℹ️ {spec['name']} — statistik**")
-    st.caption("Historisk träff räknas på den aktiva liknande historiken. Neutral historik är standard; ett manuellt utdelningsmål används bara om du uttryckligen aktiverat det. Rek. träff gäller rekommenderat intervall; nuvarande träff gäller dina sliders.")
+    st.caption("Historisk träff räknas på den aktiva liknande historiken. Neutral historik är standard; ett utdelningsintervall används bara om du uttryckligen aktiverat det. Rek. träff gäller rekommenderat intervall; nuvarande träff gäller dina sliders.")
     if spec.get('help'):
         st.caption(spec.get('help'))
 
@@ -7083,7 +7328,7 @@ def _rebuild_forced_package_steps(chosen, htot, ftot, initial_hist_mask=None):
         step_red_pct = 100.0 * (prev_count - new_count) / max(1, prev_count)
         test_level = f"{float(cand.get('coverage', 0.0)):.0f}%"
         if cand.get('forecast_guided'):
-            test_level += f" · {cand.get('forecast_level', 'prognos')}"
+            test_level += f" · {cand.get('forecast_level', 'riskprofil')}"
         if cand.get('required_in_package'):
             test_level += " · måste ingå"
         steps.append({
@@ -7212,7 +7457,7 @@ def _pick_best_variant_per_filter_for_group(candidates, category_filter, target,
         # t.ex. AI-Rank 3/30 väljs bara för att den reducerar brutalt.
         score = (
             # När en kandidat redan når gruppens mål räcker den säkerhetsnivån;
-            # därefter får prognosens huvud-/säkerhetszon vara utslagsgivande.
+            # därefter får riskprofilens huvud-/säkerhetszon vara utslagsgivande.
             # Gruppens slutliga samlade träff och teckenskydd testas fortfarande exakt.
             min(int(c.get('hist_hit', 0)), int(target)),
             1 if bool(c.get('forecast_guided')) else 0,
@@ -7950,7 +8195,7 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 'Kategori': cand['category'],
                 'Intervall': cand['interval_txt'],
                 'Intervallträff': f"{cand['hist_hit']}/{htot}",
-                'Testnivå': f"{cand['coverage']:.0f}%" + (f" · {cand.get('forecast_level','prognos')}" if cand.get('forecast_guided') else ''),
+                'Testnivå': f"{cand['coverage']:.0f}%" + (f" · {cand.get('forecast_level','riskprofil')}" if cand.get('forecast_guided') else ''),
                 'Stegreducering': f"{step_red_pct:.1f}%",
                 'Efter filter': int(new_frame_count),
                 'Samlad träff efter steg': f"{hist_hit}/{htot}",
@@ -8041,10 +8286,10 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
         if combo_notes:
             post_trim_notes = list(combo_notes) + list(post_trim_notes or [])
 
-        # Säker prognosankare: i automatiskt läge försöker motorn alltid få med
-        # minst ett prognosstyrt värde-/favorit-/FAT-intervall. Det läggs bara till
+        # Säker riskprofilankare: i automatiskt läge försöker motorn alltid få med
+        # minst ett riskprofilstyrt värde-/favorit-/FAT-intervall. Det läggs bara till
         # om paketets valda historikmål och teckenskydd fortfarande hålls. I första
-        # hand väljs den balanserade "Prognos huvudzon"; säkerhetszon används bara
+        # hand väljs den balanserade "Riskprofil huvudzon"; säkerhetszon används bara
         # om ingen huvudzon kan läggas till utan att bryta de hårda kraven.
         forecast_anchor_added = False
         if forecast_active and len(chosen) < int(max_filters):
@@ -8057,7 +8302,7 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 if not cand.get('forecast_guided') or cand.get('key') in used_now:
                     continue
                 level_txt = str(cand.get('forecast_level', '')).lower()
-                # Om paketet redan har prognosstyrning behöver vi bara komplettera
+                # Om paketet redan har riskprofilstyrning behöver vi bara komplettera
                 # när den balanserade huvudzonen saknas.
                 if has_forecast and has_main_forecast:
                     continue
@@ -8091,10 +8336,10 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 chosen.append(dict(anchor))
                 forecast_anchor_added = True
                 post_trim_notes = list(post_trim_notes or []) + [{
-                    'Typ': 'Prognosankare',
+                    'Typ': 'Riskprofilankare',
                     'Filter': anchor.get('name', ''),
                     'Intervall': anchor.get('interval_txt', '-'),
-                    'Prognosnivå': anchor.get('forecast_level', 'prognos'),
+                    'Riskprofilnivå': anchor.get('forecast_level', 'riskprofil'),
                     'Stegreducering': f"{float(_asp):.1f}%",
                     'Efter filter': int(_ac),
                     'Samlad träff bevarad': f"{int(_ah)}/{int(htot)}",
@@ -8216,8 +8461,8 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 'Mest reducerande intervall': '-',
                 'Mest reducerande träff': '-',
                 'Mest reducerar': '-',
-                'Prognosnivåer': 0,
-                'Bästa prognosfit': '0.0%',
+                'Riskprofilnivåer': 0,
+                'Bästa riskprofilfit': '0.0%',
                 'Valt i paket': 'Nej',
                 'Valt intervall': '-',
                 'Kommentar': comment,
@@ -8251,8 +8496,8 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             'Mest reducerande intervall': best_red.get('interval_txt', '-'),
             'Mest reducerande träff': f"{int(best_red.get('hist_hit', 0))}/{htot}",
             'Mest reducerar': f"{float(best_red.get('red_pct', 0.0)):.1f}%",
-            'Prognosnivåer': int(sum(1 for c in cand_list if c.get('forecast_guided'))),
-            'Bästa prognosfit': f"{100.0 * max([float(c.get('forecast_fit', 0.0)) for c in cand_list] or [0.0]):.1f}%",
+            'Riskprofilnivåer': int(sum(1 for c in cand_list if c.get('forecast_guided'))),
+            'Bästa riskprofilfit': f"{100.0 * max([float(c.get('forecast_fit', 0.0)) for c in cand_list] or [0.0]):.1f}%",
             'Valt i paket': ', '.join(selected) if selected else 'Nej',
             'Valt intervall': ' | '.join(selected_details) if selected_details else '-',
             'Kommentar': comment,
@@ -8676,7 +8921,7 @@ def _recommended_packages_summary_df(packages, package_index_map=None):
             'Eftertrim': int(len(p.get('post_trim_notes', []) or [])),
             'Gruppkrav': group_txt or '—',
             'Värde-/poängfilter': int(p.get('value_filters', 0)),
-            'Prognosstyrda': int(p.get('forecast_filters', 0)),
+            'Riskprofilstyrda': int(p.get('forecast_filters', 0)),
             'FAT/sekvens': int(p.get('fat_filters', 0)),
             'Struktur': int(p.get('structure_filters', 0)),
             'Spelvärde': f"{_package_value_score(p):.0f}",
@@ -8927,11 +9172,11 @@ with st.sidebar:
             st.session_state.pop(_k, None)
         st.success("Cache tömd.")
 
-    # v12.0cb: prognosen ska synas även när man har scrollat förbi Steg 1.
+    # v12.0cc: riskprofilen ska synas även när man har scrollat förbi Steg 1.
     _sb_forecast = st.session_state.get('v12_payout_forecast') or {}
     if isinstance(_sb_forecast, dict) and _sb_forecast:
         st.markdown('---')
-        st.subheader('📈 Utdelningsprognos')
+        st.subheader('📈 Utdelningsrisk')
         st.success(_forecast_main_summary(_sb_forecast))
         st.caption(f"Läge: {st.session_state.get('v12_forecast_mode', '—')} · {int(_sb_forecast.get('n_similar', st.session_state.get('v12_forecast_effective_n', 0)) or 0)} liknande omgångar")
 
@@ -8944,53 +9189,78 @@ else:
 
 # Step 1 – kupongdata / historik
 st.markdown("<div class='v12-card'>", unsafe_allow_html=True)
-st.markdown("<div class='v12-step'>Steg 1</div><div class='v12-title'>Kupongdata, databas och utdelningsprognos</div>", unsafe_allow_html=True)
+st.markdown("<div class='v12-step'>Steg 1</div><div class='v12-title'>Kupongdata, historik och utdelningsrisk</div>", unsafe_allow_html=True)
 
-st.session_state.setdefault('v12_forecast_mode', 'Automatisk – påverkar paketmotorn')
+st.session_state.setdefault('v12_forecast_mode', 'Endast information')
+if st.session_state.get('v12_forecast_mode') == 'Automatisk – påverkar paketmotorn':
+    st.session_state['v12_forecast_mode'] = 'Endast information'
 st.session_state.setdefault('v12_forecast_auto_n', bool(st.session_state.get('v12_history_auto_n', True)))
 st.session_state.setdefault('v12_forecast_manual_n', 30)
 st.session_state.setdefault('v12_forecast_effective_n', 30)
 st.session_state.setdefault('v12_history_auto_n', bool(st.session_state.get('v12_forecast_auto_n', True)))  # bakåtkompatibilitet
 st.session_state.setdefault('v12_top_n', 30)  # filtercentralens/paketmotorns historikbas
-st.session_state.setdefault('v12_manual_payout_target', False)
+st.session_state.setdefault('v12_manual_payout_target', True)
 st.session_state.setdefault('v12_pay_min', 0)
 st.session_state.setdefault('v12_pay_max', 10_000_000)
 st.session_state.setdefault('v12_today_turnover', 0.0)
 st.session_state.setdefault('v12_today_jackpot_million', 0.0)
 
-col_a, col_b = st.columns([1.0, 1.6])
+col_a, col_b, col_c, col_d = st.columns([1.15, 1.0, 1.0, 1.0])
 with col_a:
     spelform = st.selectbox("Spelform", ["Stryktips", "Europatips", "Topptips ST", "Topptips EU", "Topptips Övrigt", "Powerplay"], key="v12_spelform")
-with col_b:
-    forecast_mode = st.selectbox(
-        "Utdelningsprognos",
-        ["Automatisk – påverkar paketmotorn", "Endast information", "Av"],
-        key="v12_forecast_mode",
-        help="Automatisk prioriterar prognosanpassade värde-/favorit-/FAT-filter men ändrar aldrig kravet på samlad historikträff eller teckenskydd.",
-    )
 antal_matcher = 13 if spelform in ["Stryktips", "Europatips"] else 8
 krav_odds = antal_matcher * 3
+with col_b:
+    filter_top_n = st.number_input(
+        "Historikbas – liknande omgångar",
+        min_value=15,
+        max_value=100,
+        value=int(st.session_state.get('v12_top_n', 30)),
+        step=5,
+        key="v12_top_n",
+        help="Rekommenderat: 30. Detta är historikbasen som ger paketträffar som 30/30, 29/30 och 28/30.",
+    )
+with col_c:
+    pay_min = st.number_input(
+        "Min utdelning i historik",
+        min_value=0,
+        max_value=100_000_000,
+        value=int(st.session_state.get('v12_pay_min', 0)),
+        step=50_000,
+        key="v12_pay_min",
+    )
+with col_d:
+    pay_max = st.number_input(
+        "Max utdelning i historik",
+        min_value=0,
+        max_value=100_000_000,
+        value=int(st.session_state.get('v12_pay_max', 10_000_000)),
+        step=100_000,
+        key="v12_pay_max",
+    )
+if int(pay_max) < int(pay_min):
+    st.warning("Max utdelning är lägre än min utdelning. Byt värden innan du läser in kupongen.")
 
-with st.expander("Avancerat – historikbas, omsättning och manuellt utdelningsmål", expanded=False):
+manual_payout_target = True
+st.session_state['v12_manual_payout_target'] = True
+forecast_mode = st.selectbox(
+    "Utdelningsriskprofil",
+    ["Endast information", "Av"],
+    key="v12_forecast_mode",
+    help="Visar riskprofil, framför allt 500k+ risk. Den påverkar inte paketmotorn automatiskt.",
+)
+
+with st.expander("Avancerat – riskprofil och pottjustering", expanded=False):
     ac1, ac2 = st.columns(2)
     with ac1:
-        filter_top_n = st.number_input(
-            "Liknande omgångar för filtercentral/paket",
-            min_value=15,
-            max_value=100,
-            value=int(st.session_state.get('v12_top_n', 30)),
-            step=5,
-            key="v12_top_n",
-            help="Behåll normalt 30. Detta är den historikbas som ger paketträffar som 30/30, 29/30 och 28/30.",
-        )
         forecast_auto_n = st.checkbox(
-            "Välj prognosens historikantal automatiskt",
+            "Välj riskprofilens historikantal automatiskt",
             value=bool(st.session_state.get('v12_forecast_auto_n', True)),
             key='v12_forecast_auto_n',
-            help="Prognosen jämför 15/20/25/30/40/50 kronologiskt. Detta ändrar inte filtercentralens historikantal ovan.",
+            help="Riskprofilen jämför 15/20/25/30/40/50 kronologiskt. Detta ändrar inte filtercentralens historikantal ovan.",
         )
         forecast_manual_n = st.number_input(
-            "Manuellt antal liknande för prognosen",
+            "Manuellt antal liknande för riskprofilen",
             min_value=15,
             max_value=100,
             value=int(st.session_state.get('v12_forecast_manual_n', 30)),
@@ -9000,23 +9270,9 @@ with st.expander("Avancerat – historikbas, omsättning och manuellt utdelnings
         )
         st.session_state['v12_history_auto_n'] = bool(forecast_auto_n)  # bakåtkompatibilitet
     with ac2:
-        manual_payout_target = st.checkbox(
-            "Aktivera manuellt utdelningsmål",
-            value=bool(st.session_state.get('v12_manual_payout_target', False)),
-            key='v12_manual_payout_target',
-            help="Avancerat strategiskt urval. Prognosen förblir neutral, men filterhistoriken väljs bara bland omgångar inom angivet faktiskt utdelningsintervall.",
-        )
-        pc1, pc2 = st.columns(2)
-        with pc1:
-            pay_min = st.number_input("Min utdelning", min_value=0, max_value=50_000_000, value=int(st.session_state.get('v12_pay_min', 0)), step=50_000, key="v12_pay_min", disabled=not bool(manual_payout_target))
-        with pc2:
-            pay_max = st.number_input("Max utdelning", min_value=0, max_value=100_000_000, value=int(st.session_state.get('v12_pay_max', 10_000_000)), step=100_000, key="v12_pay_max", disabled=not bool(manual_payout_target))
-    pc3, pc4 = st.columns(2)
-    with pc3:
         today_turnover = st.number_input("Dagens uppskattade omsättning (kr, frivilligt)", min_value=0.0, max_value=500_000_000.0, value=float(st.session_state.get('v12_today_turnover', 0.0)), step=1_000_000.0, key='v12_today_turnover', format='%.0f')
-    with pc4:
         today_jackpot_million = st.number_input("Dagens jackpot (miljoner, frivilligt)", min_value=0.0, max_value=500.0, value=float(st.session_state.get('v12_today_jackpot_million', 0.0)), step=1.0, key='v12_today_jackpot_million', format='%.1f')
-    st.caption("Neutral historik är standard. Manuellt utdelningsmål påverkar filterunderlaget men får aldrig skapa prognosen, eftersom det annars blir en cirkelprognos.")
+    st.caption("Min/max utdelning styr historikunderlaget för filter och rekommenderade paket. Riskprofilen är bara beslutsstöd och påverkar inte paketmotorn automatiskt.")
 
 input_text = st.text_area(
     f"Klistra in {krav_odds} procent/odds-värden",
@@ -9035,7 +9291,7 @@ _analysis_inputs_stale = bool(
     and _saved_analysis_config_sig != _current_analysis_config_sig
 )
 if _analysis_inputs_stale:
-    st.warning('Kupong-, historik- eller prognosinställningar har ändrats sedan senaste inläsningen. Tryck på Läs in kupong innan du beräknar nya paket.')
+    st.warning('Kupong-, historik- eller riskprofilinställningar har ändrats sedan senaste inläsningen. Tryck på Läs in kupong innan du beräknar nya paket.')
 col_run, col_status = st.columns([1, 3])
 with col_run:
     run_analysis = st.button("📥 Läs in kupong", use_container_width=True)
@@ -9049,14 +9305,14 @@ with col_status:
         _forecast_auto_txt = 'auto' if bool(st.session_state.get('v12_forecast_auto_n', True)) else 'manuellt'
         if _db_total is not None:
             if bool(st.session_state.get('v12_manual_payout_target', False)) and _db_after is not None and int(_db_after) != int(_db_total):
-                st.success(f"Filterhistorik: {_hist_n} liknande från {_db_name}. Prognos: {_forecast_n} liknande ({_forecast_auto_txt}). Läste {int(_db_total):,} giltiga · {int(_db_after):,} kvar efter manuellt utdelningsmål för filtren.".replace(',', ' '))
+                st.success(f"Filterhistorik: {_hist_n} liknande från {_db_name}. Riskprofil: {_forecast_n} liknande ({_forecast_auto_txt}). Läste {int(_db_total):,} giltiga · {int(_db_after):,} kvar efter utdelningsintervall för filtren.".replace(',', ' '))
             else:
-                st.success(f"Filterhistorik: {_hist_n} neutralt valda från {_db_name}. Prognos: {_forecast_n} liknande ({_forecast_auto_txt}). Databas {int(_db_total):,} giltiga omgångar.".replace(',', ' '))
+                st.success(f"Filterhistorik: {_hist_n} neutralt valda från {_db_name}. Riskprofil: {_forecast_n} liknande ({_forecast_auto_txt}). Databas {int(_db_total):,} giltiga omgångar.".replace(',', ' '))
         else:
             st.success(f"Filterhistorik klar: {_hist_n} liknande omgångar från {_db_name}.")
 
 if run_analysis:
-    with st.spinner("Läser databas, kalibrerar historikantal och bygger prognos..."):
+    with st.spinner("Läser databas, kalibrerar historikantal och bygger riskprofil..."):
         db_path_now = find_local_database(spelform)
         calibration = {}
         if db_path_now:
@@ -9087,7 +9343,7 @@ if run_analysis:
         st.session_state['v12_analysis_ready'] = True
         st.session_state['v12_analysis_config_signature'] = _current_analysis_config_sig
         _analysis_inputs_stale = False
-        # Ny kupong/prognos gör gamla paket och reduceringsresultat stale.
+        # Ny kupong/riskprofil gör gamla paket och reduceringsresultat stale.
         for _k in ['v12_recommended_packages', 'v12_recommended_candidate_audit', 'v12_recommended_meta', 'v12_applied_package_meta', 'v12_applied_package_snapshot']:
             st.session_state.pop(_k, None)
         st.session_state['v12_last_result'] = None
@@ -9112,10 +9368,18 @@ if run_analysis:
             db_report = build_database_quality_report(_db_all_now, antal_matcher) if not _db_all_now.empty else pd.DataFrame()
             st.session_state['v12_database_quality_report'] = db_report
 
-            # Prognosen är alltid neutral även om användaren aktiverar manuellt utdelningsmål.
+            # Riskprofilen är alltid neutral även om användaren aktiverar utdelningsintervall.
             neutral_v_m = _select_similar_history_df(_db_all_now, filter_vec, antal_matcher, int(effective_forecast_n), use_structure=True)
             if forecast_mode != 'Av' and not neutral_v_m.empty:
                 forecast = _forecast_from_similar_df(neutral_v_m, float(today_turnover), float(today_jackpot_million))
+                # v12.0cc: huvudsignalen är 500k+ risk via simulerad radprofil när datan räcker.
+                try:
+                    sim_risk = _simulated_row_risk_profile(_db_all_now, filter_vec, antal_matcher, n_samples=8000)
+                    if sim_risk:
+                        forecast.update(sim_risk)
+                except Exception as _risk_err:
+                    forecast['risk_error'] = str(_risk_err)
+                forecast = _add_risk_metrics_to_forecast(forecast)
                 forecast['forecast_mode'] = forecast_mode
                 forecast['effective_top_n'] = int(effective_forecast_n)
                 forecast['filter_history_n'] = int(effective_filter_top_n)
@@ -9128,12 +9392,12 @@ if run_analysis:
             st.session_state['v12_db_after_payout_rows'] = None
             st.session_state['v12_database_quality_report'] = pd.DataFrame()
             st.session_state['v12_payout_forecast'] = {}
-            st.warning(f"Kupongen lästes in men prognosen kunde inte byggas: {e}")
+            st.warning(f"Kupongen lästes in men riskprofilen kunde inte byggas: {e}")
         st.session_state['v12_filter_saved'] = False
-        st.success(f"Klart: filtercentral/paket använder {len(v_m)} liknande omgångar. Prognosen använder {int(effective_forecast_n)} ({'automatiskt valt' if forecast_auto_n else 'manuellt valt'}).")
+        st.success(f"Klart: filtercentral/paket använder {len(v_m)} liknande omgångar. Riskprofilen använder {int(effective_forecast_n)} ({'automatiskt valt' if forecast_auto_n else 'manuellt valt'}).")
         _loaded_forecast = st.session_state.get('v12_payout_forecast') or {}
         if _loaded_forecast:
-            st.success(f"📈 Utdelningsprognos vald: {_forecast_main_summary(_loaded_forecast)}")
+            st.success(f"📈 Utdelningsrisk vald: {_forecast_main_summary(_loaded_forecast)}")
 
 if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_analysis_spelform', spelform) == spelform and forecast_mode != 'Av':
     _current_forecast = st.session_state.get('v12_payout_forecast') or {}
@@ -9145,7 +9409,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_anal
             database_report=st.session_state.get('v12_database_quality_report'),
         )
     else:
-        st.info('Kupongen är laddad utan utdelningsprognos. Tryck på Läs in kupong igen för att bygga prognosen från databasen.')
+        st.info('Kupongen är laddad utan utdelningsriskprofil. Tryck på Läs in kupong igen för att bygga riskprofilen från databasen.')
 
 # Den faktiska historikbasen som sparas och används längre ner.
 top_n = int(st.session_state.get('v12_effective_top_n', st.session_state.get('v12_top_n', 30)))
@@ -9325,7 +9589,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         st.caption("Testar Pareto-bästa paket på radmassan efter dina manuella teckengrupper. De manuella teckengrupperna visas separat och drar inte ner paketens historiska filterträff. Paketmotorn bygger nivåtrappa per filter, testar även kombinationslyft av småfilter, visar progressklocka/ETA, eftertrimmar valt paket och visar hårda grupppaket som egen pakettyp.")
         _pkg_forecast = st.session_state.get('v12_payout_forecast') or {}
         if str(st.session_state.get('v12_forecast_mode', '')).startswith('Automatisk') and _pkg_forecast:
-            st.info(f"Prognosstyrning aktiv: {_pkg_forecast.get('main_zone','—')} prioriteras, {_pkg_forecast.get('alt_zone','—')} används som skydd. Prognosen får aldrig sänka valt krav på samlad historikträff eller bryta teckenskyddet.")
+            st.info(f"Riskprofilstyrning aktiv: {_pkg_forecast.get('main_zone','—')} prioriteras, {_pkg_forecast.get('alt_zone','—')} används som skydd. Riskprofilen får aldrig sänka valt krav på samlad historikträff eller bryta teckenskyddet.")
 
         with st.expander("Välj filter som måste ingå i rekommenderade paket", expanded=False):
             st.caption("Kryssa i filter du vill att paketmotorn ska använda. Ändringar ligger i ett formulär och sparas först när du trycker på knappen, så sidan laddar inte om för varje kryss.")
@@ -9417,7 +9681,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 )
             build_recs = st.form_submit_button("Beräkna paket", use_container_width=True)
         if build_recs and _analysis_inputs_stale:
-            st.error('Läs in kupongen igen först. Paketmotorn får inte använda en gammal historik/prognos mot nya inställningar.')
+            st.error('Läs in kupongen igen först. Paketmotorn får inte använda en gammal historik/riskprofil mot nya inställningar.')
             build_recs = False
         if build_recs:
             start_clock = time.time()
@@ -9490,14 +9754,14 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         packages = st.session_state.get('v12_recommended_packages') or []
         _pkg_meta = st.session_state.get('v12_recommended_meta') or {}
         if packages and _analysis_inputs_stale:
-            st.warning('Paketlistan hör till tidigare kupong-/historik-/prognosinställningar. Läs in kupongen och beräkna paket igen.')
+            st.warning('Paketlistan hör till tidigare kupong-/historik-/riskprofilinställningar. Läs in kupongen och beräkna paket igen.')
             packages = []
         if packages and _pkg_meta.get('manual_sign_groups_sig') != manual_sign_groups_sig:
             st.warning('Manuella teckengrupper har ändrats sedan paketen beräknades. Beräkna rekommenderade paket igen innan du använder ett paket.')
             packages = []
         _current_forecast_sig = _forecast_signature(st.session_state.get('v12_payout_forecast') or {}, st.session_state.get('v12_forecast_mode', 'Av'))
         if packages and _pkg_meta.get('forecast_signature') not in {None, _current_forecast_sig}:
-            st.warning('Utdelningsprognosen eller prognosläget har ändrats sedan paketen beräknades. Beräkna rekommenderade paket igen.')
+            st.warning('Utdelningsrisken eller riskprofilläget har ändrats sedan paketen beräknades. Beräkna rekommenderade paket igen.')
             packages = []
         rec_display_max_rows = int(st.session_state.get('v12_rec_display_max_rows', 5000))
         visible_packages = [p for p in packages if int(p.get('frame_after', 10**12)) <= rec_display_max_rows]
