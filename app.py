@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0ca – Utdelningsprognos"
+APP_VERSION = "v12.0cb – Synlig utdelningsprognos"
 
 
 st.markdown("""
@@ -3145,22 +3145,46 @@ def _fmt_rank_value(value):
         return '—'
 
 
+def _forecast_probability_text(value):
+    try:
+        return f"{100.0 * float(value):.1f}%"
+    except Exception:
+        return '—'
+
+
+def _forecast_main_summary(forecast):
+    if not isinstance(forecast, dict) or not forecast:
+        return ''
+    main_zone = str(forecast.get('main_zone', '—'))
+    alt_zone = str(forecast.get('alt_zone', '—'))
+    main_p = _forecast_probability_text(forecast.get('main_probability', 0.0))
+    alt_p = _forecast_probability_text(forecast.get('alt_probability', 0.0))
+    med = _fmt_rank_value(forecast.get('true_rank_median'))
+    lo = _fmt_rank_value(forecast.get('true_rank_main_low'))
+    hi = _fmt_rank_value(forecast.get('true_rank_main_high'))
+    conf = str(forecast.get('confidence', '—'))
+    return f"Vald huvudzon: {main_zone} ({main_p}) · Alternativ: {alt_zone} ({alt_p}) · True_Rank median {med}, huvudintervall {lo}–{hi} · Säkerhet {conf}"
+
+
 def _render_payout_forecast_panel(forecast, calibration=None, forecast_mode='Endast information', database_report=None):
     if not isinstance(forecast, dict) or not forecast:
         return
     st.markdown("<div class='v12-card'>", unsafe_allow_html=True)
     st.markdown("<div class='v12-step'>Prognos</div><div class='v12-title'>Prognostiserad utdelningsprofil</div>", unsafe_allow_html=True)
     mode_txt = str(forecast_mode or 'Endast information')
+    summary_txt = _forecast_main_summary(forecast)
+    if summary_txt:
+        st.success(f"✅ {summary_txt}")
     if mode_txt.startswith('Automatisk'):
-        st.success('Huvudzonen prioriterar värde-, favorit- och FAT-filter i paketmotorn. Samlad historikträff och teckenskydd är fortfarande hårda krav.')
+        st.caption('Huvudzonen prioriterar värde-, favorit- och FAT-filter i paketmotorn. Samlad historikträff och teckenskydd är fortfarande hårda krav.')
     elif mode_txt.startswith('Endast'):
         st.info('Prognosen visas som beslutsstöd men påverkar inte paketmotorn.')
     else:
         st.info('Prognosen är avstängd för paketmotorn.')
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric('Huvudzon', str(forecast.get('main_zone', '—')), f"{100.0 * float(forecast.get('main_probability', 0.0)):.1f}%")
-    c2.metric('Näst troligast', str(forecast.get('alt_zone', '—')), f"{100.0 * float(forecast.get('alt_probability', 0.0)):.1f}%")
+    c1.metric('Vald huvudzon', str(forecast.get('main_zone', '—')), _forecast_probability_text(forecast.get('main_probability', 0.0)))
+    c2.metric('Skyddszon / näst troligast', str(forecast.get('alt_zone', '—')), _forecast_probability_text(forecast.get('alt_probability', 0.0)))
     c3.metric('Viktad median True_Rank', _fmt_rank_value(forecast.get('true_rank_median')), f"{int(forecast.get('n_similar', 0))} liknande")
     c4.metric('Prognossäkerhet', str(forecast.get('confidence', '—')), f"effektivt urval {float(forecast.get('effective_n', 0.0)):.1f}")
 
@@ -8903,6 +8927,14 @@ with st.sidebar:
             st.session_state.pop(_k, None)
         st.success("Cache tömd.")
 
+    # v12.0cb: prognosen ska synas även när man har scrollat förbi Steg 1.
+    _sb_forecast = st.session_state.get('v12_payout_forecast') or {}
+    if isinstance(_sb_forecast, dict) and _sb_forecast:
+        st.markdown('---')
+        st.subheader('📈 Utdelningsprognos')
+        st.success(_forecast_main_summary(_sb_forecast))
+        st.caption(f"Läge: {st.session_state.get('v12_forecast_mode', '—')} · {int(_sb_forecast.get('n_similar', st.session_state.get('v12_forecast_effective_n', 0)) or 0)} liknande omgångar")
+
 # v12.0bh performance profile resets per rerun
 if _perf_enabled():
     st.session_state['v12_perf_marks'] = []
@@ -9099,6 +9131,9 @@ if run_analysis:
             st.warning(f"Kupongen lästes in men prognosen kunde inte byggas: {e}")
         st.session_state['v12_filter_saved'] = False
         st.success(f"Klart: filtercentral/paket använder {len(v_m)} liknande omgångar. Prognosen använder {int(effective_forecast_n)} ({'automatiskt valt' if forecast_auto_n else 'manuellt valt'}).")
+        _loaded_forecast = st.session_state.get('v12_payout_forecast') or {}
+        if _loaded_forecast:
+            st.success(f"📈 Utdelningsprognos vald: {_forecast_main_summary(_loaded_forecast)}")
 
 if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_analysis_spelform', spelform) == spelform and forecast_mode != 'Av':
     _current_forecast = st.session_state.get('v12_payout_forecast') or {}
