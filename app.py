@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0bz – Backtest paketfilter"
+APP_VERSION = "v12.0ca – Utdelningsprognos"
 
 
 st.markdown("""
@@ -2599,10 +2599,609 @@ def build_database_quality_report(df, antal_matcher):
         bad = ranks.isna() | (ranks < 1) | (ranks > max_rank)
         report.append(("Ogiltiga True_Rank", int(bad.sum())))
     if 'Payout' in df.columns:
-        report.append(("Utdelning min", int(df['Payout'].min())))
-        report.append(("Utdelning max", int(df['Payout'].max())))
+        report.append(("Utdelning min", int(pd.to_numeric(df['Payout'], errors='coerce').fillna(0).min())))
+        report.append(("Utdelning max", int(pd.to_numeric(df['Payout'], errors='coerce').fillna(0).max())))
+    if 'No_13_Winner' in df.columns:
+        report.append(("Ingen vinnare på 13 rätt", int(pd.Series(df['No_13_Winner']).fillna(False).astype(bool).sum())))
+    if 'Turnover' in df.columns:
+        report.append(("Omgångar med omsättning", int((pd.to_numeric(df['Turnover'], errors='coerce').fillna(0) > 0).sum())))
+    if 'Jackpot_Million' in df.columns:
+        report.append(("Omgångar med jackpotdata", int((pd.to_numeric(df['Jackpot_Million'], errors='coerce').fillna(0) > 0).sum())))
+    if 'True_Rank' in df.columns:
+        report.append(("Omgångar med True_Rank", int((pd.to_numeric(df['True_Rank'], errors='coerce').fillna(0) > 0).sum())))
     return pd.DataFrame(report, columns=["Kontroll", "Värde"])
 
+
+# ==========================================
+# 1C. TRANSPARENT UTDELNINGSPROGNOS
+# ==========================================
+
+PAYOUT_ZONE_DEFS = [
+    {'idx': 0, 'key': 'under_50k', 'label': 'Under 50 000 kr', 'short': '<50k'},
+    {'idx': 1, 'key': '50_200k', 'label': '50 000–200 000 kr', 'short': '50–200k'},
+    {'idx': 2, 'key': '200_500k', 'label': '200 000–500 000 kr', 'short': '200–500k'},
+    {'idx': 3, 'key': '500k_3m', 'label': '500 000–3 000 000 kr', 'short': '500k–3m'},
+    {'idx': 4, 'key': 'over_3m_no_winner', 'label': 'Över 3 000 000 kr / ingen 13-vinnare', 'short': '>3m / ingen vinnare'},
+]
+
+FORECAST_PACKAGE_CATEGORIES = {'Värde & svårighet', 'Favorit & skräll', 'FAT', 'FAT-sekvenser'}
+
+
+def _clean_col_name(value):
+    return re.sub(r'[^a-z0-9åäö]', '', str(value or '').strip().lower().replace('\ufeff', ''))
+
+
+def _parse_swedish_number(value, default=np.nan):
+    """Läser svenska tal som '38 168 348,00 kr', '26' och tomma celler."""
+    try:
+        if value is None or (isinstance(value, float) and np.isnan(value)):
+            return default
+    except Exception:
+        pass
+    txt = str(value).strip().replace('\xa0', ' ')
+    if not txt or txt.lower() in {'nan', 'none', '-'}:
+        return default
+    txt = re.sub(r'[^0-9,\.\-]', '', txt)
+    if not txt or txt in {'-', '.', ','}:
+        return default
+    if ',' in txt and '.' in txt:
+        # Sista skiljetecknet antas vara decimaltecken.
+        if txt.rfind(',') > txt.rfind('.'):
+            txt = txt.replace('.', '').replace(',', '.')
+        else:
+            txt = txt.replace(',', '')
+    elif ',' in txt:
+        parts = txt.split(',')
+        if len(parts[-1]) <= 2:
+            txt = ''.join(parts[:-1]).replace('.', '') + '.' + parts[-1]
+        else:
+            txt = ''.join(parts)
+    elif txt.count('.') > 1:
+        txt = txt.replace('.', '')
+    try:
+        return float(txt)
+    except Exception:
+        return default
+
+
+def _parse_numeric_series(series):
+    try:
+        return series.apply(_parse_swedish_number)
+    except Exception:
+        return pd.Series([], dtype=float)
+
+
+def _payout_zone_index(payout, no_winner=False):
+    try:
+        if bool(no_winner):
+            return 4
+    except Exception:
+        pass
+    try:
+        p = float(payout)
+    except Exception:
+        p = 0.0
+    if p <= 0:
+        # Noll kronor utan verifierat vinnarantal behandlas försiktigt som superhårt.
+        return 4
+    if p < 50_000:
+        return 0
+    if p < 200_000:
+        return 1
+    if p < 500_000:
+        return 2
+    if p < 3_000_000:
+        return 3
+    return 4
+
+
+def _payout_zone_label(idx):
+    try:
+        return PAYOUT_ZONE_DEFS[int(idx)]['label']
+    except Exception:
+        return 'Okänd zon'
+
+
+def _weighted_quantile(values, weights, quantile, log_scale=False):
+    """Viktad kvantil. Log-skala används för True_Rank som är kraftigt högerskev."""
+    vals = np.asarray(values, dtype=float)
+    w = np.asarray(weights, dtype=float)
+    valid = np.isfinite(vals) & np.isfinite(w) & (w > 0)
+    if log_scale:
+        valid = valid & (vals > 0)
+    vals = vals[valid]
+    w = w[valid]
+    if len(vals) == 0:
+        return np.nan
+    if log_scale:
+        vals = np.log10(vals)
+    order = np.argsort(vals)
+    vals = vals[order]
+    w = w[order]
+    total = float(w.sum())
+    if total <= 0:
+        return np.nan
+    cdf = (np.cumsum(w) - 0.5 * w) / total
+    q = float(max(0.0, min(1.0, quantile)))
+    result = float(np.interp(q, cdf, vals, left=vals[0], right=vals[-1]))
+    return float(10 ** result) if log_scale else result
+
+
+def _similarity_weights(sim_values):
+    """Ger närmaste historiska omgångar högst vikt utan att en enda rad tar över."""
+    sims = np.asarray(sim_values, dtype=float)
+    valid = np.isfinite(sims)
+    if not valid.any():
+        return np.ones(len(sims), dtype=float)
+    clean = sims[valid]
+    pos = clean[clean > 0]
+    scale = float(np.median(pos)) if len(pos) else 1.0
+    scale = max(scale, 1e-6)
+    base = np.exp(-np.clip(sims, 0, None) / scale)
+    # Rankdelen gör viktningen stabil när avstånden ligger mycket nära varandra.
+    order = np.argsort(np.where(valid, sims, np.inf))
+    ranks = np.empty(len(sims), dtype=float)
+    ranks[order] = np.arange(1, len(sims) + 1, dtype=float)
+    rank_weight = 1.0 / np.sqrt(ranks)
+    out = np.where(valid, base * rank_weight, 0.0)
+    if float(out.sum()) <= 0:
+        out = np.where(valid, rank_weight, 0.0)
+    return out.astype(float)
+
+
+def _forecast_pool_value(turnover, jackpot_million):
+    try:
+        turnover = float(turnover)
+    except Exception:
+        turnover = 0.0
+    try:
+        jackpot_million = float(jackpot_million)
+    except Exception:
+        jackpot_million = 0.0
+    return max(0.0, turnover) + max(0.0, jackpot_million) * 1_000_000.0
+
+
+def _forecast_from_similar_df(sim_df, today_turnover=0.0, today_jackpot_million=0.0):
+    """Bygger en transparent True_Rank- och utdelningsprognos från liknande omgångar."""
+    if sim_df is None or len(sim_df) == 0:
+        return {}
+    work = sim_df.copy().reset_index(drop=True)
+    if 'Sim' in work.columns:
+        sim_values = pd.to_numeric(work['Sim'], errors='coerce').fillna(np.inf).to_numpy(dtype=float)
+    else:
+        sim_values = np.arange(1, len(work) + 1, dtype=float)
+    weights = _similarity_weights(sim_values)
+    if float(weights.sum()) <= 0:
+        weights = np.ones(len(work), dtype=float)
+
+    current_pool = _forecast_pool_value(today_turnover, today_jackpot_million)
+    zone_weights = np.zeros(len(PAYOUT_ZONE_DEFS), dtype=float)
+    support_counts = np.zeros(len(PAYOUT_ZONE_DEFS), dtype=int)
+    adjusted_payouts = []
+    zone_indices = []
+
+    for i, (_, row) in enumerate(work.iterrows()):
+        no_winner = bool(row.get('No_13_Winner', False))
+        payout = _parse_swedish_number(row.get('Payout', 0), default=0.0)
+        adjusted = float(payout or 0.0)
+        if not no_winner and current_pool > 0:
+            hist_pool = _forecast_pool_value(row.get('Turnover', 0), row.get('Jackpot_Million', 0))
+            if hist_pool > 0:
+                factor = max(0.60, min(1.80, current_pool / hist_pool))
+                adjusted *= factor
+        zone = _payout_zone_index(adjusted, no_winner=no_winner)
+        zone_indices.append(int(zone))
+        adjusted_payouts.append(float(adjusted))
+        zone_weights[zone] += float(weights[i])
+        support_counts[zone] += 1
+
+    # Liten utjämning skyddar mot falska 0 %-prognoser i små urval.
+    alpha = 0.20
+    probs = (zone_weights + alpha) / max(1e-9, float(zone_weights.sum() + alpha * len(zone_weights)))
+    order = list(np.argsort(probs)[::-1])
+    main_idx = int(order[0])
+    alt_idx = int(order[1]) if len(order) > 1 else main_idx
+
+    ranks = pd.to_numeric(work.get('True_Rank', pd.Series([np.nan] * len(work))), errors='coerce').to_numpy(dtype=float)
+    rank_valid = np.isfinite(ranks) & (ranks > 0)
+    if rank_valid.any():
+        rank_median = _weighted_quantile(ranks[rank_valid], weights[rank_valid], 0.50, log_scale=True)
+        rank_q25 = _weighted_quantile(ranks[rank_valid], weights[rank_valid], 0.25, log_scale=True)
+        rank_q75 = _weighted_quantile(ranks[rank_valid], weights[rank_valid], 0.75, log_scale=True)
+        rank_q10 = _weighted_quantile(ranks[rank_valid], weights[rank_valid], 0.10, log_scale=True)
+        rank_q90 = _weighted_quantile(ranks[rank_valid], weights[rank_valid], 0.90, log_scale=True)
+    else:
+        rank_median = rank_q25 = rank_q75 = rank_q10 = rank_q90 = np.nan
+
+    norm_w = weights / max(1e-9, float(weights.sum()))
+    effective_n = float(1.0 / max(1e-9, np.sum(norm_w ** 2)))
+    main_prob = float(probs[main_idx])
+    alt_prob = float(probs[alt_idx])
+    gap = main_prob - alt_prob
+    if main_prob >= 0.46 and gap >= 0.13 and effective_n >= 9:
+        confidence = 'Hög'
+    elif main_prob >= 0.31 and gap >= 0.05 and effective_n >= 7:
+        confidence = 'Medel'
+    else:
+        confidence = 'Låg'
+
+    rows = []
+    for z in PAYOUT_ZONE_DEFS:
+        idx = int(z['idx'])
+        rows.append({
+            'Zon': z['label'],
+            'Sannolikhet': float(probs[idx]),
+            'Sannolikhet %': round(100.0 * float(probs[idx]), 1),
+            'Historiskt stöd': int(support_counts[idx]),
+        })
+
+    return {
+        'method': 'viktad_närmaste_historik',
+        'n_similar': int(len(work)),
+        'main_zone_idx': main_idx,
+        'main_zone': _payout_zone_label(main_idx),
+        'main_probability': main_prob,
+        'alt_zone_idx': alt_idx,
+        'alt_zone': _payout_zone_label(alt_idx),
+        'alt_probability': alt_prob,
+        'probabilities': [float(x) for x in probs],
+        'probability_rows': rows,
+        'true_rank_median': None if not np.isfinite(rank_median) else float(rank_median),
+        'true_rank_main_low': None if not np.isfinite(rank_q25) else float(rank_q25),
+        'true_rank_main_high': None if not np.isfinite(rank_q75) else float(rank_q75),
+        'true_rank_safe_low': None if not np.isfinite(rank_q10) else float(rank_q10),
+        'true_rank_safe_high': None if not np.isfinite(rank_q90) else float(rank_q90),
+        'confidence': confidence,
+        'effective_n': effective_n,
+        'pool_adjusted': bool(current_pool > 0),
+        'today_turnover': float(today_turnover or 0.0),
+        'today_jackpot_million': float(today_jackpot_million or 0.0),
+        'zone_indices': [int(x) for x in zone_indices],
+        'similarity_weights': [float(x) for x in weights],
+        'adjusted_payouts': [float(x) for x in adjusted_payouts],
+    }
+
+
+def _forecast_package_row_weights(v_m, forecast):
+    """Viktar huvudzon starkast och alternativ zon som skydd för paketmotorn."""
+    if not isinstance(forecast, dict) or v_m is None or len(v_m) == 0:
+        return None
+    main_idx = int(forecast.get('main_zone_idx', -1))
+    alt_idx = int(forecast.get('alt_zone_idx', -1))
+    # Paketets historikbas kan skilja sig från prognosens neutrala historik om
+    # användaren aktiverat manuellt utdelningsmål. Vikta därför alltid den
+    # faktiska v_m-radmassan på nytt i stället för att återanvända positionsvikter.
+    if 'Sim' in v_m.columns:
+        sim_w = _similarity_weights(pd.to_numeric(v_m['Sim'], errors='coerce').fillna(np.inf).to_numpy(dtype=float))
+    else:
+        sim_w = np.ones(len(v_m), dtype=float)
+    out = np.zeros(len(v_m), dtype=float)
+    for i, (_, row) in enumerate(v_m.reset_index(drop=True).iterrows()):
+        zone = _payout_zone_index(row.get('Payout', 0), bool(row.get('No_13_Winner', False)))
+        if zone == main_idx:
+            zone_factor = 1.00
+        elif zone == alt_idx:
+            zone_factor = 0.58
+        elif abs(int(zone) - int(main_idx)) == 1:
+            zone_factor = 0.25
+        else:
+            zone_factor = 0.08
+        out[i] = max(1e-6, float(sim_w[i])) * zone_factor
+    if float(out.sum()) <= 0:
+        return None
+    return out
+
+
+def _forecast_guided_intervals_for_spec(spec, forecast_weights):
+    """Skapar extra kandidatintervall från prognosviktad historik, aldrig som hårt tvång."""
+    if forecast_weights is None:
+        return []
+    vals = np.asarray([np.nan if pd.isna(v) else float(v) for v in spec.get('hist_values', [])], dtype=float)
+    w = np.asarray(forecast_weights, dtype=float)
+    if len(vals) != len(w):
+        return []
+    valid = np.isfinite(vals) & np.isfinite(w) & (w > 0)
+    if int(valid.sum()) < 5:
+        return []
+    dec = int(spec.get('decimals', 0))
+    variants = [
+        (0.10, 0.90, 'Prognos säkerhetszon', 91.0),
+        (0.20, 0.80, 'Prognos huvudzon', 82.0),
+        (0.30, 0.70, 'Prognos kärna', 72.0),
+    ]
+    out = []
+    seen = set()
+    for qlo, qhi, label, coverage in variants:
+        lo = _weighted_quantile(vals[valid], w[valid], qlo, log_scale=False)
+        hi = _weighted_quantile(vals[valid], w[valid], qhi, log_scale=False)
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            continue
+        if dec <= 0:
+            lo, hi = int(np.floor(lo)), int(np.ceil(hi))
+        else:
+            lo, hi = round(float(lo), dec), round(float(hi), dec)
+        if lo > hi:
+            lo, hi = hi, lo
+        key = (float(lo), float(hi))
+        if key in seen:
+            continue
+        seen.add(key)
+        hp, ht, pct = _hist_pass_count(vals[valid].tolist(), (lo, hi))
+        out.append({
+            'coverage': float(coverage),
+            'interval': (lo, hi),
+            'hist_pass': int(hp),
+            'hist_total': int(ht),
+            'hist_pct': float(pct),
+            'interval_txt': _display_interval((lo, hi), dec),
+            'forecast_guided': True,
+            'forecast_level': label,
+        })
+    return out
+
+
+def _forecast_candidate_fit(hist_mask, forecast_weights):
+    if forecast_weights is None:
+        return 0.0
+    mask = np.asarray(hist_mask, dtype=bool)
+    w = np.asarray(forecast_weights, dtype=float)
+    if len(mask) != len(w) or float(w.sum()) <= 0:
+        return 0.0
+    capture = float(w[mask].sum() / w.sum())
+    selectivity = 1.0 - float(mask.mean()) if len(mask) else 0.0
+    return float(max(0.0, min(1.0, 0.72 * capture + 0.28 * selectivity)))
+
+
+def _select_similar_history_df(global_db, input_vec, antal_matcher, top_n, use_structure=True, pay_min=None, pay_max=None):
+    """Gemensamt neutralt likhetsurval för filterhistorik och utdelningsprognos."""
+    krav_odds = int(antal_matcher) * 3
+    if global_db is None or len(global_db) == 0:
+        return pd.DataFrame()
+    df_s = global_db.copy()
+    if pay_min is not None or pay_max is not None:
+        lo = 0 if pay_min is None else float(pay_min)
+        hi = float('inf') if pay_max is None else float(pay_max)
+        df_s = df_s[(pd.to_numeric(df_s.get('Payout', 0), errors='coerce').fillna(0) >= lo) & (pd.to_numeric(df_s.get('Payout', 0), errors='coerce').fillna(0) <= hi)]
+    if len(df_s) == 0:
+        return df_s
+    similarity_vec = get_structural_vector(input_vec) if use_structure else list(input_vec)
+    weights_arr = np.array([w for i in range(0, krav_odds, 3) for w in [(max(similarity_vec[i:i+3]) / 100.0) ** 2] * 3])
+    sims = []
+    for _, row in df_s.iterrows():
+        pv = row.get('Prob_Vector', [])
+        if not isinstance(pv, list) or len(pv) != krav_odds:
+            sims.append(9999.0)
+            continue
+        compare_vec = get_structural_vector(pv) if use_structure else pv
+        sims.append(float(weighted_euclidean(similarity_vec, compare_vec, weights_arr)))
+    df_s = df_s.copy()
+    df_s['Sim'] = sims
+    return df_s.sort_values('Sim').head(int(max(1, top_n))).copy()
+
+
+@st.cache_data(show_spinner=False)
+def calibrate_payout_forecast(filepath, file_mtime, antal_matcher):
+    """Kronologiskt snabbtest av 15/20/25/30/40/50 liknande omgångar."""
+    try:
+        db = load_database(filepath, antal_matcher, file_mtime).copy()
+    except Exception as e:
+        return {'error': str(e), 'recommended_n': 30, 'rows': []}
+    if db is None or len(db) < 80:
+        return {'error': 'För få omgångar för stabil kalibrering.', 'recommended_n': 30, 'rows': []}
+
+    if 'Datum' in db.columns:
+        dates = pd.to_datetime(db['Datum'], errors='coerce')
+    else:
+        dates = pd.Series(pd.NaT, index=db.index)
+    db = db.assign(_forecast_date=dates, _forecast_order=np.arange(len(db)))
+    if dates.notna().sum() >= max(20, int(len(db) * 0.7)):
+        db = db.sort_values(['_forecast_date', '_forecast_order']).reset_index(drop=True)
+    else:
+        db = db.reset_index(drop=True)
+
+    ks = [15, 20, 25, 30, 40, 50]
+    max_k = max(ks)
+    start_idx = max(60, max_k + 5)
+    accum = {k: {'tested': 0, 'exact': 0, 'top2': 0, 'adjacent': 0, 'main_rank': 0, 'safe_rank': 0, 'rank_tests': 0, 'main_widths': [], 'safe_widths': []} for k in ks}
+
+    for i in range(start_idx, len(db)):
+        target = db.iloc[i]
+        input_vec = target.get('Prob_Vector', [])
+        if not isinstance(input_vec, list) or len(input_vec) != int(antal_matcher) * 3:
+            continue
+        prior = db.iloc[:i]
+        neutral = _select_similar_history_df(prior, input_vec, antal_matcher, max_k, use_structure=True)
+        if len(neutral) < min(ks):
+            continue
+        actual_zone = _payout_zone_index(target.get('Payout', 0), bool(target.get('No_13_Winner', False)))
+        actual_rank = _parse_swedish_number(target.get('True_Rank', np.nan))
+        for k in ks:
+            sim_df = neutral.head(k)
+            fc = _forecast_from_similar_df(sim_df)
+            if not fc:
+                continue
+            a = accum[k]
+            a['tested'] += 1
+            main = int(fc.get('main_zone_idx', -1))
+            alt = int(fc.get('alt_zone_idx', -1))
+            a['exact'] += int(actual_zone == main)
+            a['top2'] += int(actual_zone in {main, alt})
+            a['adjacent'] += int(abs(actual_zone - main) <= 1)
+            if np.isfinite(actual_rank) and actual_rank > 0 and fc.get('true_rank_main_low') is not None:
+                a['rank_tests'] += 1
+                lo = float(fc['true_rank_main_low']); hi = float(fc['true_rank_main_high'])
+                slo = float(fc['true_rank_safe_low']); shi = float(fc['true_rank_safe_high'])
+                a['main_rank'] += int(lo <= actual_rank <= hi)
+                a['safe_rank'] += int(slo <= actual_rank <= shi)
+                if lo > 0 and hi >= lo:
+                    a['main_widths'].append(float(np.log10(max(1.0, hi / lo))))
+                if slo > 0 and shi >= slo:
+                    a['safe_widths'].append(float(np.log10(max(1.0, shi / slo))))
+
+    rows = []
+    for k in ks:
+        a = accum[k]
+        n = max(1, int(a['tested']))
+        rn = max(1, int(a['rank_tests']))
+        exact = 100.0 * a['exact'] / n
+        top2 = 100.0 * a['top2'] / n
+        adjacent = 100.0 * a['adjacent'] / n
+        main_cov = 100.0 * a['main_rank'] / rn if a['rank_tests'] else 0.0
+        safe_cov = 100.0 * a['safe_rank'] / rn if a['rank_tests'] else 0.0
+        main_width = float(np.median(a['main_widths'])) if a['main_widths'] else 9.0
+        safe_width = float(np.median(a['safe_widths'])) if a['safe_widths'] else 9.0
+        # Nyttopoäng: rätt huvudzon + tvåzonsträff, med en liten kostnad för mycket breda intervall.
+        utility = 0.44 * exact + 0.42 * top2 + 0.14 * adjacent - 2.2 * max(0.0, main_width - 0.9) - 1.0 * max(0.0, safe_width - 1.5)
+        rows.append({
+            'Liknande omgångar': int(k),
+            'Testade': int(a['tested']),
+            'Rätt huvudzon %': round(exact, 1),
+            'Rätt bland två %': round(top2, 1),
+            'Högst en zon fel %': round(adjacent, 1),
+            'True_Rank i huvudintervall %': round(main_cov, 1),
+            'True_Rank i säkerhetsintervall %': round(safe_cov, 1),
+            'Median logbredd huvud': round(main_width, 3),
+            'Nyttopoäng': round(utility, 3),
+        })
+    valid_rows = [r for r in rows if int(r.get('Testade', 0)) >= 20]
+    raw_best_n = 30
+    selection_reason = 'Standard 30 – för få stabila testfall.'
+    if valid_rows:
+        raw_best = max(valid_rows, key=lambda r: (float(r['Nyttopoäng']), float(r['Rätt bland två %']), float(r['Rätt huvudzon %']), -int(r['Liknande omgångar'])))
+        raw_best_n = int(raw_best['Liknande omgångar'])
+        # Skillnader på under cirka 0,8 nyttopoäng är små i den här datamängden.
+        # Välj då det stabilare alternativet närmast 30 i stället för att överanpassa
+        # historikantalet efter några få omgångars skillnad.
+        tolerance = 0.80
+        near_best = [r for r in valid_rows if float(r['Nyttopoäng']) >= float(raw_best['Nyttopoäng']) - tolerance]
+        stable_best = min(
+            near_best,
+            key=lambda r: (
+                abs(int(r['Liknande omgångar']) - 30),
+                -float(r['Rätt bland två %']),
+                -float(r['Rätt huvudzon %']),
+                -float(r['Nyttopoäng']),
+            ),
+        )
+        recommended_n = int(stable_best['Liknande omgångar'])
+        if recommended_n == raw_best_n:
+            selection_reason = f'Valde {recommended_n}: högst backtestad nyttopoäng.'
+        else:
+            selection_reason = f'Råvinnare {raw_best_n}, men {recommended_n} låg inom {tolerance:.2f} poäng och valdes för stabilitet nära 30.'
+    else:
+        recommended_n = 30
+    return {
+        'recommended_n': int(recommended_n),
+        'raw_best_n': int(raw_best_n),
+        'selection_reason': selection_reason,
+        'rows': rows,
+        'tested_from': int(start_idx),
+        'database_rows': int(len(db)),
+        'method': 'kronologiskt_närmaste_historik',
+    }
+
+
+def _forecast_signature(forecast, mode=None):
+    if not isinstance(forecast, dict) or not forecast:
+        return 'forecast:none'
+    payload = {
+        'mode': mode if mode is not None else forecast.get('forecast_mode', ''),
+        'n': forecast.get('n_similar'),
+        'main': forecast.get('main_zone_idx'),
+        'alt': forecast.get('alt_zone_idx'),
+        'rank_main': [forecast.get('true_rank_main_low'), forecast.get('true_rank_main_high')],
+        'rank_safe': [forecast.get('true_rank_safe_low'), forecast.get('true_rank_safe_high')],
+        'turnover': forecast.get('today_turnover', 0),
+        'jackpot': forecast.get('today_jackpot_million', 0),
+    }
+    raw = json.dumps(_json_safe_value(payload), ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha1(raw.encode('utf-8', errors='replace')).hexdigest()[:16]
+
+
+def _analysis_config_signature(input_text, spelform, filter_top_n, forecast_auto_n, forecast_manual_n, manual_payout_target, pay_min, pay_max, today_turnover, today_jackpot_million):
+    """Signatur för allt som kräver att kupongen läses om."""
+    payload = {
+        'input': re.sub(r'\s+', ' ', str(input_text or '').strip()),
+        'spelform': str(spelform or ''),
+        'filter_top_n': int(filter_top_n or 30),
+        'forecast_auto_n': bool(forecast_auto_n),
+        'forecast_manual_n': int(forecast_manual_n or 30),
+        'manual_payout_target': bool(manual_payout_target),
+        'pay_min': int(pay_min or 0),
+        'pay_max': int(pay_max or 0),
+        'today_turnover': round(float(today_turnover or 0.0), 2),
+        'today_jackpot_million': round(float(today_jackpot_million or 0.0), 3),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha1(raw.encode('utf-8', errors='replace')).hexdigest()[:16]
+
+
+def _fmt_rank_value(value):
+    try:
+        if value is None or not np.isfinite(float(value)):
+            return '—'
+        return f"{int(round(float(value))):,}".replace(',', ' ')
+    except Exception:
+        return '—'
+
+
+def _render_payout_forecast_panel(forecast, calibration=None, forecast_mode='Endast information', database_report=None):
+    if not isinstance(forecast, dict) or not forecast:
+        return
+    st.markdown("<div class='v12-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='v12-step'>Prognos</div><div class='v12-title'>Prognostiserad utdelningsprofil</div>", unsafe_allow_html=True)
+    mode_txt = str(forecast_mode or 'Endast information')
+    if mode_txt.startswith('Automatisk'):
+        st.success('Huvudzonen prioriterar värde-, favorit- och FAT-filter i paketmotorn. Samlad historikträff och teckenskydd är fortfarande hårda krav.')
+    elif mode_txt.startswith('Endast'):
+        st.info('Prognosen visas som beslutsstöd men påverkar inte paketmotorn.')
+    else:
+        st.info('Prognosen är avstängd för paketmotorn.')
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric('Huvudzon', str(forecast.get('main_zone', '—')), f"{100.0 * float(forecast.get('main_probability', 0.0)):.1f}%")
+    c2.metric('Näst troligast', str(forecast.get('alt_zone', '—')), f"{100.0 * float(forecast.get('alt_probability', 0.0)):.1f}%")
+    c3.metric('Viktad median True_Rank', _fmt_rank_value(forecast.get('true_rank_median')), f"{int(forecast.get('n_similar', 0))} liknande")
+    c4.metric('Prognossäkerhet', str(forecast.get('confidence', '—')), f"effektivt urval {float(forecast.get('effective_n', 0.0)):.1f}")
+
+    main_lo = _fmt_rank_value(forecast.get('true_rank_main_low'))
+    main_hi = _fmt_rank_value(forecast.get('true_rank_main_high'))
+    safe_lo = _fmt_rank_value(forecast.get('true_rank_safe_low'))
+    safe_hi = _fmt_rank_value(forecast.get('true_rank_safe_high'))
+    st.caption(f"True_Rank huvudintervall: {main_lo}–{main_hi} · säkerhetsintervall: {safe_lo}–{safe_hi}. Noll kronor med 0 vinnare på 13 rätt behandlas som den svåraste zonen, inte som låg utdelning.")
+    if forecast.get('pool_adjusted'):
+        st.caption(f"Kronzonerna är försiktigt justerade mot angiven omsättning {float(forecast.get('today_turnover',0)):,.0f} kr och jackpot {float(forecast.get('today_jackpot_million',0)):.1f} milj. Justeringen är begränsad så den inte kan dominera streckbilden.".replace(',', ' '))
+    else:
+        st.caption('Prognosen är streckbaserad. Fyll i dagens omsättning/jackpot under Avancerat om du vill göra en försiktig pottjustering.')
+
+    prob_rows = forecast.get('probability_rows') or []
+    if prob_rows:
+        p_df = pd.DataFrame(prob_rows)
+        p_df['Sannolikhet'] = p_df['Sannolikhet %'].map(lambda x: f"{float(x):.1f}%")
+        st.dataframe(p_df[['Zon', 'Sannolikhet', 'Historiskt stöd']], use_container_width=True, hide_index=True)
+
+    if isinstance(calibration, dict) and calibration.get('rows'):
+        try:
+            _rec_n = int(calibration.get('recommended_n', forecast.get('n_similar', 30)))
+            _chosen_bt = next((r for r in calibration.get('rows', []) if int(r.get('Liknande omgångar', -1)) == _rec_n), None)
+            if _chosen_bt:
+                _top2 = float(_chosen_bt.get('Rätt bland två %', 0.0))
+                _exact = float(_chosen_bt.get('Rätt huvudzon %', 0.0))
+                if _top2 < 55.0:
+                    st.warning(f"Prognosbacktestet är ännu måttligt: rätt huvudzon {_exact:.1f}% och rätt bland två zoner {_top2:.1f}%. Därför används prognosen bara som säker prioritering/tie-breaker, aldrig som ensamt hårt filter.")
+                else:
+                    st.caption(f"Kronologiskt backtest för valt historikantal: rätt huvudzon {_exact:.1f}% · rätt bland två {_top2:.1f}%.")
+        except Exception:
+            pass
+        with st.expander('Visa kronologiskt prognosbacktest', expanded=False):
+            st.caption('Varje testomgång använder bara äldre omgångar. Tabellen jämför hur många liknande omgångar som ger bäst balans mellan zonträff och intervallbredd.')
+            cdf = pd.DataFrame(calibration.get('rows') or [])
+            st.dataframe(cdf, use_container_width=True, hide_index=True)
+            st.caption(f"Automatiskt valt historikantal: {int(calibration.get('recommended_n', forecast.get('n_similar', 30)))}. {calibration.get('selection_reason', '')}")
+    if isinstance(database_report, pd.DataFrame) and not database_report.empty:
+        with st.expander('Visa databaskontroll', expanded=False):
+            st.dataframe(database_report, use_container_width=True, hide_index=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ==========================================
 # 2. AUTO-LADDNING & DATABAS
@@ -2622,13 +3221,29 @@ def find_local_database(spelform):
     elif spelform == "Topptips Övrigt": kandidater = [f for f in alla_filer if match(f, ["topp", "övrig"], [])]
     elif spelform == "Powerplay": kandidater = [f for f in alla_filer if match(f, ["powerplay"], [])]
 
-    if not kandidater: return None
-    for k in kandidater:
-        if "med_rank" in k.lower(): return os.path.join(mapp, k)
-    return os.path.join(mapp, kandidater[0])
+    if not kandidater:
+        return None
+    # Om flera kopior finns väljs den mest kompletta Med_Rank-filen. Filstorlek
+    # är en robust snabb signal för fler omgångar; kopiesuffix som '(4)' får
+    # lägre prioritet vid i övrigt lika filer.
+    def _db_priority(name):
+        full = os.path.join(mapp, name)
+        try:
+            size = int(os.path.getsize(full))
+            mtime = float(os.path.getmtime(full))
+        except Exception:
+            size, mtime = 0, 0.0
+        return (
+            1 if 'med_rank' in name.lower() else 0,
+            0 if re.search(r'\(\d+\)', name) else 1,
+            size,
+            mtime,
+        )
+    best = max(kandidater, key=_db_priority)
+    return os.path.join(mapp, best)
 
 @st.cache_data
-def load_database(filepath, antal_matcher):
+def load_database(filepath, antal_matcher, file_mtime=None):
     if filepath.endswith('.xlsx'): global_db = pd.read_excel(filepath)
     else:
         try:
@@ -2642,7 +3257,7 @@ def load_database(filepath, antal_matcher):
             if '\t' in first_line and ';' not in first_line and ',' not in first_line: sep = '\t'
             global_db = pd.read_csv(filepath, sep=sep, encoding='latin-1', on_bad_lines='skip')
 
-    global_db.columns = [str(c).strip() for c in global_db.columns]
+    global_db.columns = [str(c).strip().lstrip('\ufeff') for c in global_db.columns]
 
     col_m = [f'M{i}' for i in range(1, antal_matcher + 1)]
     if all(c in global_db.columns for c in col_m):
@@ -2676,14 +3291,35 @@ def load_database(filepath, antal_matcher):
             payout_col = col
             break
             
-    if payout_col: 
-        raw_payout = global_db[payout_col].astype(str)
-        clean_payout = raw_payout.str.replace(r'[,.]00', '', regex=True)
-        clean_payout = clean_payout.str.replace(r'[^\d]', '', regex=True).replace('', '0')
-        global_db['Payout'] = pd.to_numeric(clean_payout, errors='coerce').fillna(0)
-    else: 
-        global_db['Payout'] = 0
-        
+    if payout_col:
+        global_db['Payout'] = _parse_numeric_series(global_db[payout_col]).fillna(0.0)
+    else:
+        global_db['Payout'] = 0.0
+
+    # Standardiserade prognoskolumner. Originalkolumnerna lämnas orörda.
+    clean_map = {_clean_col_name(c): c for c in global_db.columns}
+    winners_col = clean_map.get(f'vinnare{antal_matcher}') or clean_map.get('vinnare13')
+    turnover_col = next((c for c in global_db.columns if 'omsättning' in str(c).lower() or 'omsattning' in str(c).lower()), None)
+    jackpot_col = next((c for c in global_db.columns if 'jackpot' in str(c).lower().replace('_', '').replace(' ', '')), None)
+    date_col = next((c for c in global_db.columns if _clean_col_name(c) in {'datum', 'date'}), None)
+
+    global_db['Winners_13'] = _parse_numeric_series(global_db[winners_col]).fillna(np.nan) if winners_col else np.nan
+    global_db['Turnover'] = _parse_numeric_series(global_db[turnover_col]).fillna(0.0) if turnover_col else 0.0
+    global_db['Jackpot_Million'] = _parse_numeric_series(global_db[jackpot_col]).fillna(0.0) if jackpot_col else 0.0
+    if 'True_Rank' in global_db.columns:
+        global_db['True_Rank'] = pd.to_numeric(global_db['True_Rank'], errors='coerce')
+    else:
+        global_db['True_Rank'] = np.nan
+    if date_col and date_col != 'Datum':
+        global_db['Datum'] = global_db[date_col]
+    global_db['No_13_Winner'] = (
+        (pd.to_numeric(global_db['Winners_13'], errors='coerce').fillna(-1) == 0)
+        | ((pd.to_numeric(global_db['Payout'], errors='coerce').fillna(0) <= 0) & (pd.to_numeric(global_db['Winners_13'], errors='coerce').fillna(0) == 0))
+    )
+    global_db['Payout_Zone'] = [
+        _payout_zone_index(p, nw) for p, nw in zip(global_db['Payout'], global_db['No_13_Winner'])
+    ]
+
     return global_db[valid_rows]
 
 
@@ -3688,7 +4324,7 @@ def _compact_rec_preview_df(df, source):
 
 
 @st.cache_data(show_spinner=False)
-def run_core_analysis(input_text, spelform, antal_matcher, krav_odds, cb_structure, slider_top_n, cb_payout, pay_min, pay_max):
+def run_core_analysis(input_text, spelform, antal_matcher, krav_odds, cb_structure, slider_top_n, cb_payout, pay_min, pay_max, database_cache_sig=None):
     fil_sökväg = find_local_database(spelform)
     if not fil_sökväg:
         return None, None, None, f"❌ Hittade ingen fil för {spelform} i mappen!"
@@ -3701,31 +4337,23 @@ def run_core_analysis(input_text, spelform, antal_matcher, krav_odds, cb_structu
     if len(input_vec) != krav_odds: 
         return None, None, None, f"⚠️ Fel: {spelform} kräver exakt {krav_odds} värden. Hittade {len(input_vec)}."
 
-    global_db = load_database(fil_sökväg, antal_matcher)
+    try:
+        _db_mtime = os.path.getmtime(fil_sökväg)
+    except Exception:
+        _db_mtime = None
+    global_db = load_database(fil_sökväg, antal_matcher, _db_mtime)
 
-    # Viktigt: similarity_vec används bara för att hitta liknande historiska kuponger.
-    # input_vec behåller riktig matchordning och används i alla faktiska filterberäkningar.
-    similarity_vec = get_structural_vector(input_vec) if cb_structure else input_vec
-    weights_arr = np.array([w for i in range(0, krav_odds, 3) for w in [(max(similarity_vec[i:i+3])/100.0)**2]*3])
-
-    df_s = global_db.copy()
-
-    # Utdelningskravet ska ligga före top-N, annars kan top-N först plockas fram och därefter rasa bort.
-    if cb_payout:
-        df_s = df_s[(df_s['Payout'] >= pay_min) & (df_s['Payout'] <= pay_max)]
-    if len(df_s) == 0:
-        return df_s, input_vec, os.path.basename(fil_sökväg), None
-
-    df_s['Sim'] = [
-        weighted_euclidean(
-            similarity_vec,
-            get_structural_vector(r['Prob_Vector']) if cb_structure else r['Prob_Vector'],
-            weights_arr
-        ) if len(r['Prob_Vector']) == krav_odds else 9999
-        for _, r in df_s.iterrows()
-    ]
-    
-    v_m = df_s.sort_values('Sim').head(slider_top_n)
+    # Neutral historik är standard. Manuellt utdelningsmål är ett frivilligt
+    # strategiskt urval och ligger före top-N när det uttryckligen aktiveras.
+    v_m = _select_similar_history_df(
+        global_db,
+        input_vec,
+        antal_matcher,
+        int(slider_top_n),
+        use_structure=bool(cb_structure),
+        pay_min=(float(pay_min) if cb_payout else None),
+        pay_max=(float(pay_max) if cb_payout else None),
+    )
     return v_m, input_vec, os.path.basename(fil_sökväg), None
 
 
@@ -5135,14 +5763,19 @@ def _apply_last_result_from_spelfil(payload):
 
 
 def _history_records_for_spelfil(v_m):
-    """Sparar bara det som behövs för att återskapa filterstatistik utan ny databasläsning."""
+    """Sparar liknande historik inklusive prognosfält så spelfilen blir självbärande."""
     records = []
+    keep_fields = ['Datum', 'Payout', 'True_Rank', 'Winners_13', 'Turnover', 'Jackpot_Million', 'No_13_Winner', 'Payout_Zone', 'Sim']
     try:
         for _, row in v_m.iterrows():
-            records.append({
+            rec = {
                 'Correct_Row': normalize_single_row_text(row.get('Correct_Row', '')),
                 'Prob_Vector': _json_safe_value(row.get('Prob_Vector', [])),
-            })
+            }
+            for fld in keep_fields:
+                if fld in row.index:
+                    rec[fld] = _json_safe_value(row.get(fld))
+            records.append(rec)
     except Exception:
         pass
     return records
@@ -5158,7 +5791,11 @@ def _history_df_from_records(records):
         except Exception:
             pv = []
         if cr and pv:
-            rows.append({'Correct_Row': cr, 'Prob_Vector': pv})
+            rec = {'Correct_Row': cr, 'Prob_Vector': pv}
+            for fld in ['Datum', 'Payout', 'True_Rank', 'Winners_13', 'Turnover', 'Jackpot_Million', 'No_13_Winner', 'Payout_Zone', 'Sim']:
+                if fld in (r or {}):
+                    rec[fld] = (r or {}).get(fld)
+            rows.append(rec)
     return pd.DataFrame(rows)
 
 
@@ -5301,6 +5938,25 @@ def _build_spelfil_payload(specs, group_reqs, filter_hist_target_pct, top_fav_co
         'reducer_settings': _json_safe_value(reducer_settings or {}),
         'last_result': _last_result_for_spelfil(st.session_state.get('v12_last_result')),
         'last_result_stale': bool(st.session_state.get('v12_last_result_stale', False)),
+        'forecast_state': _json_safe_value({
+            'mode': st.session_state.get('v12_forecast_mode', 'Automatisk – påverkar paketmotorn'),
+            'forecast_auto_n': bool(st.session_state.get('v12_forecast_auto_n', True)),
+            'forecast_manual_n': int(st.session_state.get('v12_forecast_manual_n', 30) or 30),
+            'forecast_effective_n': int(st.session_state.get('v12_forecast_effective_n', 30) or 30),
+            'filter_history_n': int(st.session_state.get('v12_effective_top_n', top_n) or top_n),
+            # Äldre nycklar sparas också för bakåtkompatibilitet.
+            'history_auto_n': bool(st.session_state.get('v12_forecast_auto_n', True)),
+            'effective_top_n': int(st.session_state.get('v12_effective_top_n', top_n) or top_n),
+            'manual_payout_target': bool(st.session_state.get('v12_manual_payout_target', False)),
+            'pay_min': int(st.session_state.get('v12_pay_min', pay_min) or 0),
+            'pay_max': int(st.session_state.get('v12_pay_max', 10_000_000) or 10_000_000),
+            'today_turnover': float(st.session_state.get('v12_today_turnover', 0.0) or 0.0),
+            'today_jackpot_million': float(st.session_state.get('v12_today_jackpot_million', 0.0) or 0.0),
+            'forecast': st.session_state.get('v12_payout_forecast') or {},
+            'calibration': st.session_state.get('v12_forecast_calibration') or {},
+            'database_quality_records': (st.session_state.get('v12_database_quality_report').to_dict('records') if isinstance(st.session_state.get('v12_database_quality_report'), pd.DataFrame) else []),
+            'analysis_config_signature': st.session_state.get('v12_analysis_config_signature', ''),
+        }),
     })
     return payload
 
@@ -5326,6 +5982,7 @@ def _apply_spelfil_payload(payload):
         st.session_state.pop(_k, None)
     st.session_state['v12_last_result'] = None
     st.session_state['v12_last_result_stale'] = False
+    st.session_state.pop('v12_analysis_config_signature', None)
     # Grundinställningar: sätts tidigt i sidebar innan selectbox/text_area byggs.
     if payload.get('spelform'):
         st.session_state['v12_spelform'] = payload.get('spelform')
@@ -5335,6 +5992,26 @@ def _apply_spelfil_payload(payload):
         st.session_state['v12_top_n'] = int(payload.get('top_n') or 30)
     if payload.get('pay_min') is not None:
         st.session_state['v12_pay_min'] = int(payload.get('pay_min') or 0)
+    forecast_state = payload.get('forecast_state') or {}
+    if isinstance(forecast_state, dict):
+        st.session_state['v12_forecast_mode'] = forecast_state.get('mode', st.session_state.get('v12_forecast_mode', 'Automatisk – påverkar paketmotorn'))
+        st.session_state['v12_forecast_auto_n'] = bool(forecast_state.get('forecast_auto_n', forecast_state.get('history_auto_n', True)))
+        st.session_state['v12_forecast_manual_n'] = int(forecast_state.get('forecast_manual_n', forecast_state.get('forecast_effective_n', 30)) or 30)
+        st.session_state['v12_forecast_effective_n'] = int(forecast_state.get('forecast_effective_n', (forecast_state.get('forecast') or {}).get('n_similar', 30)) or 30)
+        st.session_state['v12_effective_top_n'] = int(forecast_state.get('filter_history_n', forecast_state.get('effective_top_n', payload.get('top_n', 30))) or 30)
+        # Gammal sessionsnyckel lämnas synkad så äldre spelfiler/UI-delar fungerar.
+        st.session_state['v12_history_auto_n'] = bool(st.session_state['v12_forecast_auto_n'])
+        st.session_state['v12_manual_payout_target'] = bool(forecast_state.get('manual_payout_target', False))
+        st.session_state['v12_pay_min'] = int(forecast_state.get('pay_min', payload.get('pay_min', 0)) or 0)
+        st.session_state['v12_pay_max'] = int(forecast_state.get('pay_max', 10_000_000) or 10_000_000)
+        st.session_state['v12_today_turnover'] = float(forecast_state.get('today_turnover', 0.0) or 0.0)
+        st.session_state['v12_today_jackpot_million'] = float(forecast_state.get('today_jackpot_million', 0.0) or 0.0)
+        st.session_state['v12_payout_forecast'] = forecast_state.get('forecast') or {}
+        st.session_state['v12_forecast_calibration'] = forecast_state.get('calibration') or {}
+        if forecast_state.get('analysis_config_signature'):
+            st.session_state['v12_analysis_config_signature'] = str(forecast_state.get('analysis_config_signature'))
+        quality_records = forecast_state.get('database_quality_records') or []
+        st.session_state['v12_database_quality_report'] = pd.DataFrame(quality_records) if quality_records else pd.DataFrame()
     if payload.get('filter_hist_target_pct') is not None:
         st.session_state['v12_filter_hist_target_pct'] = int(payload.get('filter_hist_target_pct') or 90)
     # top_fav_count är borttaget i v12.0ar. Toppfavoriter finns som fasta filter 3/4/5/6.
@@ -5374,7 +6051,7 @@ def _apply_spelfil_payload(payload):
         if _pkg_settings_loaded:
             # En sparad spelfil/filterpaket ska få behålla sina egna paketmotorvärden
             # och inte skrivas över av nya standardvärden längre ner i gränssnittet.
-            st.session_state['v12_pkg_defaults_version'] = 'v12.0bw'
+            st.session_state['v12_pkg_defaults_version'] = 'v12.0ca'
         req_loaded = [str(rk) for rk in (pkg_state.get('required_keys', []) or []) if rk]
         st.session_state['v12_required_pkg_keys'] = list(dict.fromkeys(req_loaded))
         # Bakåtkompatibilitet för äldre sessionsnycklar/formulär.
@@ -5420,6 +6097,7 @@ def _apply_spelfil_payload(payload):
             st.session_state['v12_v_m'] = hist_df
             st.session_state['v12_filter_vec'] = [float(x) for x in filter_vec]
             st.session_state['v12_db_name'] = 'spelfil'
+            st.session_state['v12_analysis_spelform'] = payload.get('spelform', st.session_state.get('v12_spelform'))
             st.session_state['v12_analysis_ready'] = True
         rs = payload.get('reducer_settings') or {}
         if isinstance(rs, dict):
@@ -5893,7 +6571,7 @@ def _render_favorite_shock_diagnostics(spec, interval, frame, filter_vec, antal_
 def _render_inline_filter_info(spec, interval, frame_rows, frame, antal_matcher):
     """Renderar statistik för ett filter.
 
-    Viktigt: historisk träff i rutan gäller alltid 30 liknande omgångar.
+    Historisk träff i rutan gäller den aktiva liknande historikbasen.
     Vi visar både rekommenderat intervall/träff och nuvarande slider/träff så att
     det blir tydligt om användaren ändrat intervallet.
     """
@@ -5920,7 +6598,7 @@ def _render_inline_filter_info(spec, interval, frame_rows, frame, antal_matcher)
                 pass
 
     st.markdown(f"**ℹ️ {spec['name']} — statistik**")
-    st.caption("Historisk träff räknas på de 30 mest liknande omgångarna efter valt utdelningskrav. Rek. träff gäller rekommenderat intervall; nuvarande träff gäller dina sliders.")
+    st.caption("Historisk träff räknas på den aktiva liknande historiken. Neutral historik är standard; ett manuellt utdelningsmål används bara om du uttryckligen aktiverat det. Rek. träff gäller rekommenderat intervall; nuvarande träff gäller dina sliders.")
     if spec.get('help'):
         st.caption(spec.get('help'))
 
@@ -5941,9 +6619,9 @@ def _render_inline_filter_info(spec, interval, frame_rows, frame, antal_matcher)
 
     _render_info_cards([
         ("Rek. intervall", rec_txt, "Rekommenderat från historiken"),
-        ("Rek. träff", f"{rhp}/{rht}", f"{rpct:.1f}% av 30 liknande"),
+        ("Rek. träff", f"{rhp}/{rht}", f"{rpct:.1f}% av {rht} liknande"),
         ("Nu valt", cur_txt, "Dina aktuella sliders"),
-        ("Nuvarande träff", f"{hp}/{ht}", f"{pct:.1f}% av 30 liknande"),
+        ("Nuvarande träff", f"{hp}/{ht}", f"{pct:.1f}% av {ht} liknande"),
         ("Grundram → filter", frame_txt, frame_sub),
     ])
 
@@ -5962,11 +6640,11 @@ def _render_inline_filter_info(spec, interval, frame_rows, frame, antal_matcher)
     freq_df = _make_freq_df(spec['hist_values'], spec['decimals'])
     left, right = st.columns([1.0, 1.0])
     with left:
-        st.markdown("**Frekvenstabell, 30 liknande omgångar**")
+        st.markdown(f"**Frekvenstabell, {ht} liknande omgångar**")
         if not freq_df.empty:
             table_df = freq_df.drop(columns=['_sort'], errors='ignore')
             st.dataframe(table_df, use_container_width=True, hide_index=True, height=230)
-            st.caption("Sorterad numeriskt från lägsta till högsta värde. Andel avser de 30 liknande omgångarna.")
+            st.caption("Sorterad numeriskt från lägsta till högsta värde. Andel avser den aktiva liknande historiken.")
         else:
             st.info("Ingen frekvensdata hittades för detta filter.")
     with right:
@@ -6380,6 +7058,8 @@ def _rebuild_forced_package_steps(chosen, htot, ftot, initial_hist_mask=None):
         new_count = int(cur_frame.sum())
         step_red_pct = 100.0 * (prev_count - new_count) / max(1, prev_count)
         test_level = f"{float(cand.get('coverage', 0.0)):.0f}%"
+        if cand.get('forecast_guided'):
+            test_level += f" · {cand.get('forecast_level', 'prognos')}"
         if cand.get('required_in_package'):
             test_level += " · måste ingå"
         steps.append({
@@ -6507,7 +7187,12 @@ def _pick_best_variant_per_filter_for_group(candidates, category_filter, target,
         # Gruppscore: historisk säkerhet först, sedan reducering. Det hindrar att
         # t.ex. AI-Rank 3/30 väljs bara för att den reducerar brutalt.
         score = (
-            min(int(c.get('hist_hit', 0)), int(target) + 3),
+            # När en kandidat redan når gruppens mål räcker den säkerhetsnivån;
+            # därefter får prognosens huvud-/säkerhetszon vara utslagsgivande.
+            # Gruppens slutliga samlade träff och teckenskydd testas fortfarande exakt.
+            min(int(c.get('hist_hit', 0)), int(target)),
+            1 if bool(c.get('forecast_guided')) else 0,
+            float(c.get('forecast_fit', 0.0)),
             float(c.get('hist_pct', 0.0)),
             float(c.get('red_pct', 0.0)),
             -int(c.get('frame_keep', 10**9)),
@@ -6517,7 +7202,12 @@ def _pick_best_variant_per_filter_for_group(candidates, category_filter, target,
     picked = [v[1] for v in by_key.values()]
     # Sortera för att få med de starkaste komponenterna först, men obligatoriska
     # filter ska aldrig råka kapas bort av max_items.
-    picked.sort(key=lambda c: (float(c.get('hist_pct',0.0))*0.60 + float(c.get('red_pct',0.0))*0.40, int(c.get('hist_hit',0))), reverse=True)
+    picked.sort(key=lambda c: (
+        min(int(c.get('hist_hit', 0)), int(target)),
+        1 if bool(c.get('forecast_guided')) else 0,
+        float(c.get('forecast_fit', 0.0)),
+        float(c.get('hist_pct',0.0))*0.60 + float(c.get('red_pct',0.0))*0.40,
+    ), reverse=True)
     req = [c for c in picked if c.get('key') in required_keys]
     opt = [c for c in picked if c.get('key') not in required_keys]
     out = req + opt[:max(0, int(max_items) - len(req))]
@@ -6811,8 +7501,7 @@ def _build_grouped_package_for_target(candidates, target, frame_rows, frame, ant
 def _best_filter_pair_lift(candidates, cur_hist, cur_frame, used_keys, target, htot, frame_rows, frame, antal_matcher, row_matrix=None, min_pair_reduction_pct=1.0, require_value_if_needed=False, max_keys=48, variants_per_key=2):
     """Hittar ett filterpar som ger tydligt lyft trots att filtren var för svaga var för sig.
 
-    Detta är ett exakt test mot aktuell radmassa och de 30 liknande historiska
-    omgångarna. Det används av paketmotorn efter den vanliga greedy-trappan.
+    Detta är ett exakt test mot aktuell radmassa och den aktiva liknande historiken. Det används av paketmotorn efter den vanliga greedy-trappan.
     Syftet är att fånga filter A+B där A och B var för små var för sig, men
     tillsammans ger ett rationellt extra steg utan att tappa målträffen.
     """
@@ -6923,14 +7612,14 @@ def _best_filter_pair_lift(candidates, cur_hist, cur_frame, used_keys, target, h
     except Exception:
         return None
 
-def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14, min_hit_count=15, frame_adapt=True, min_value_filters=3, required_keys=None, target_frame_after=None, progress_cb=None, manual_hist_mask=None):
+def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14, min_hit_count=15, frame_adapt=True, min_value_filters=3, required_keys=None, target_frame_after=None, progress_cb=None, manual_hist_mask=None, forecast_context=None):
     """Bygger Pareto-rekommenderade filterpaket.
 
     Viktigt från v12.0n:
     - Paketmotorn ignorerar den manuella slidern "Minsta historiska träff på filterintervall".
     - Varje filter finns fortfarande bara en gång i UI, men motorn testar flera intervallnivåer
       bakom kulisserna, t.ex. 100/95/90/85/.../50%.
-    - Historisk träff i paketmotorn räknas på filtervärdena från de 30 liknande
+    - Historisk träff i paketmotorn räknas på filtervärdena från den aktiva liknande
       omgångarna, inte genom att återräkna dem med veckans filter_vec.
     - Den visar bästa paket längs träffbild/reducering-skalan, ner till valt min-hit, t.ex. 15/30.
     """
@@ -6950,6 +7639,9 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
     pre_hist_hit = int(pre_hist_mask.sum())
     if pre_hist_hit <= 0:
         return [], pd.DataFrame()
+    forecast_context = forecast_context if isinstance(forecast_context, dict) else {}
+    forecast_active = str(forecast_context.get('forecast_mode', forecast_context.get('mode', ''))).startswith('Automatisk')
+    forecast_weights = _forecast_package_row_weights(v_m, forecast_context) if forecast_active else None
     required_keys = set(required_keys or [])
     try:
         target_frame_after = int(target_frame_after) if target_frame_after is not None else None
@@ -6995,7 +7687,19 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             frame_vals = None
         hist_vals = list(spec.get('hist_values', []))
         hist_arr = np.array([np.nan if pd.isna(v) else float(v) for v in hist_vals], dtype=float)
-        for iv in _candidate_intervals_for_spec(spec, coverage_grid):
+        interval_variants = list(_candidate_intervals_for_spec(spec, coverage_grid))
+        if forecast_active and str(spec.get('category', '')) in FORECAST_PACKAGE_CATEGORIES:
+            interval_variants.extend(_forecast_guided_intervals_for_spec(spec, forecast_weights))
+        _iv_by_key = {}
+        for _iv in interval_variants:
+            try:
+                _ikey = (float(_iv['interval'][0]), float(_iv['interval'][1]))
+            except Exception:
+                continue
+            if _ikey not in _iv_by_key or bool(_iv.get('forecast_guided')):
+                _iv_by_key[_ikey] = _iv
+        interval_variants = list(_iv_by_key.values())
+        for iv in interval_variants:
             interval = iv['interval']
             if frame_adapt:
                 block, reason = _frame_capacity_pressure(spec, interval, frame, frame_rows, antal_matcher)
@@ -7036,6 +7740,9 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 'hist_pct': 100.0 * hist_hit / max(1, htot),
                 'frame_keep': frame_keep,
                 'red_pct': red_pct,
+                'forecast_guided': bool(iv.get('forecast_guided', False)),
+                'forecast_level': iv.get('forecast_level', ''),
+                'forecast_fit': _forecast_candidate_fit(hist_mask, forecast_weights) if forecast_active and str(spec.get('category', '')) in FORECAST_PACKAGE_CATEGORIES else 0.0,
             })
         pruned = _prune_candidate_ladder(spec_cands, max_levels=18)
         candidates.extend(pruned)
@@ -7198,12 +7905,14 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                     # Värdekärnan ska byggas med starka filter först. Ett filter som
                     # reducerar brutalt men bara har låg individuell historikträff får
                     # inte vinna enbart på reducering om ett stabilare värdefilter finns.
-                    score = (value_bonus, hist_hit, -risk_cost, -heavy_low_hit, cand_safety, step_red_pct, -new_frame_count, cand['red_pct'])
+                    forecast_bonus = float(cand.get('forecast_fit', 0.0)) if forecast_active else 0.0
+                    score = (value_bonus, hist_hit, -risk_cost, forecast_bonus, -heavy_low_hit, cand_safety, step_red_pct, -new_frame_count, cand['red_pct'])
                 else:
                     # När vi fortfarande ligger över radgränsen får faktisk framdrift väga
                     # tungt, men riskkostnad ligger före ren stegreducering. Detta minskar
                     # risken att t.ex. Delta/Avvikelse väljs extremt hårt i onödan.
-                    score = (target_progress, hist_hit, hit_buffer, -risk_cost, -heavy_low_hit, cand_safety, step_red_pct, abs_gain, -new_frame_count)
+                    forecast_bonus = float(cand.get('forecast_fit', 0.0)) if forecast_active else 0.0
+                    score = (target_progress, hist_hit, hit_buffer, -risk_cost, forecast_bonus, -heavy_low_hit, cand_safety, step_red_pct, abs_gain, -new_frame_count)
                 if best is None or score > best_score:
                     best = (cand, new_hist, new_frame, hist_hit, new_frame_count, step_red_pct)
                     best_score = score
@@ -7217,7 +7926,7 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 'Kategori': cand['category'],
                 'Intervall': cand['interval_txt'],
                 'Intervallträff': f"{cand['hist_hit']}/{htot}",
-                'Testnivå': f"{cand['coverage']:.0f}%",
+                'Testnivå': f"{cand['coverage']:.0f}%" + (f" · {cand.get('forecast_level','prognos')}" if cand.get('forecast_guided') else ''),
                 'Stegreducering': f"{step_red_pct:.1f}%",
                 'Efter filter': int(new_frame_count),
                 'Samlad träff efter steg': f"{hist_hit}/{htot}",
@@ -7308,11 +8017,72 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
         if combo_notes:
             post_trim_notes = list(combo_notes) + list(post_trim_notes or [])
 
+        # Säker prognosankare: i automatiskt läge försöker motorn alltid få med
+        # minst ett prognosstyrt värde-/favorit-/FAT-intervall. Det läggs bara till
+        # om paketets valda historikmål och teckenskydd fortfarande hålls. I första
+        # hand väljs den balanserade "Prognos huvudzon"; säkerhetszon används bara
+        # om ingen huvudzon kan läggas till utan att bryta de hårda kraven.
+        forecast_anchor_added = False
+        if forecast_active and len(chosen) < int(max_filters):
+            has_forecast = any(bool(c.get('forecast_guided')) for c in chosen)
+            has_main_forecast = any(bool(c.get('forecast_guided')) and 'huvudzon' in str(c.get('forecast_level', '')).lower() for c in chosen)
+            used_now = {c.get('key') for c in chosen}
+            cur_frame_count = int(cur_frame.sum())
+            anchor_options = []
+            for cand in candidates:
+                if not cand.get('forecast_guided') or cand.get('key') in used_now:
+                    continue
+                level_txt = str(cand.get('forecast_level', '')).lower()
+                # Om paketet redan har prognosstyrning behöver vi bara komplettera
+                # när den balanserade huvudzonen saknas.
+                if has_forecast and has_main_forecast:
+                    continue
+                if has_forecast and 'huvudzon' not in level_txt:
+                    continue
+                try:
+                    new_hist = cur_hist & np.asarray(cand['hist_mask'], dtype=bool)
+                    hist_hit = int(new_hist.sum())
+                    if hist_hit < int(target):
+                        continue
+                    new_frame = cur_frame & np.asarray(cand['frame_mask'], dtype=bool)
+                    new_count = int(new_frame.sum())
+                    if new_count >= cur_frame_count:
+                        continue
+                    step_pct = 100.0 * (cur_frame_count - new_count) / max(1, cur_frame_count)
+                    if step_pct < 0.20:
+                        continue
+                    if row_matrix is not None:
+                        if not _mask_keeps_teckenskydd(row_matrix, new_frame, frame, antal_matcher):
+                            continue
+                    else:
+                        if selected_signs_missing(_rows_from_mask(frame_rows, new_frame), frame, antal_matcher):
+                            continue
+                    level_priority = 3 if 'huvudzon' in level_txt else (2 if 'säkerhetszon' in level_txt else 1)
+                    score = (level_priority, float(cand.get('forecast_fit', 0.0)), hist_hit, step_pct, -new_count)
+                    anchor_options.append((score, cand, new_hist, new_frame, hist_hit, new_count, step_pct))
+                except Exception:
+                    continue
+            if anchor_options:
+                _score, anchor, cur_hist, cur_frame, _ah, _ac, _asp = max(anchor_options, key=lambda x: x[0])
+                chosen.append(dict(anchor))
+                forecast_anchor_added = True
+                post_trim_notes = list(post_trim_notes or []) + [{
+                    'Typ': 'Prognosankare',
+                    'Filter': anchor.get('name', ''),
+                    'Intervall': anchor.get('interval_txt', '-'),
+                    'Prognosnivå': anchor.get('forecast_level', 'prognos'),
+                    'Stegreducering': f"{float(_asp):.1f}%",
+                    'Efter filter': int(_ac),
+                    'Samlad träff bevarad': f"{int(_ah)}/{int(htot)}",
+                }]
+                steps, _, _, _, _ = _rebuild_forced_package_steps(chosen, htot, ftot, initial_hist_mask=pre_hist_mask)
+
         final_hit = int(cur_hist.sum())
         final_keep = int(cur_frame.sum())
         value_filters = sum(1 for c in chosen if str(c.get('category', '')) == 'Värde & svårighet')
         fat_filters = sum(1 for c in chosen if str(c.get('category', '')) in {'FAT', 'FAT-sekvenser'})
         structure_filters = sum(1 for c in chosen if str(c.get('category', '')) == 'Struktur')
+        forecast_filters = sum(1 for c in chosen if bool(c.get('forecast_guided')))
         # Hård spärr: om användaren kräver t.ex. minst 3 värde-/poängfilter
         # ska paketet inte visas om det bara råkar få en bonus från ett värdefilter.
         # Tidigare var detta mer en prioritering, vilket kunde ge topppaket med bara
@@ -7338,6 +8108,10 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             'value_filters': int(value_filters),
             'fat_filters': int(fat_filters),
             'structure_filters': int(structure_filters),
+            'forecast_filters': int(forecast_filters),
+            'forecast_anchor_added': bool(forecast_anchor_added),
+            'forecast_active': bool(forecast_active),
+            'forecast_main_zone': forecast_context.get('main_zone', '') if forecast_active else '',
             'post_trim_notes': post_trim_notes,
         })
         _progress(f"Steg 2/4: bygger tvingade paket · träffnivå {target_idx}/{len(hit_levels)} · bästa hittills {final_hit}/{htot}, {final_keep:,} rader".replace(',', ' '), best={'hit': final_hit, 'total': htot, 'rows': final_keep})
@@ -7357,6 +8131,9 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 initial_hist_mask=pre_hist_mask,
             )
             if gp is not None:
+                gp['forecast_filters'] = int(sum(1 for c in (gp.get('filters', []) or []) if bool(c.get('forecast_guided'))))
+                gp['forecast_active'] = bool(forecast_active)
+                gp['forecast_main_zone'] = forecast_context.get('main_zone', '') if forecast_active else ''
                 group_packages.append(gp)
                 _progress(f"Steg 3/4: bygger hårda grupper · träffnivå {group_idx}/{len(hit_levels)} · bästa grupp {gp.get('hist_hit',0)}/{htot}, {int(gp.get('frame_after',0)):,} rader".replace(',', ' '), best={'hit': gp.get('hist_hit',0), 'total': htot, 'rows': gp.get('frame_after',0)})
             else:
@@ -7415,6 +8192,8 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 'Mest reducerande intervall': '-',
                 'Mest reducerande träff': '-',
                 'Mest reducerar': '-',
+                'Prognosnivåer': 0,
+                'Bästa prognosfit': '0.0%',
                 'Valt i paket': 'Nej',
                 'Valt intervall': '-',
                 'Kommentar': comment,
@@ -7448,6 +8227,8 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             'Mest reducerande intervall': best_red.get('interval_txt', '-'),
             'Mest reducerande träff': f"{int(best_red.get('hist_hit', 0))}/{htot}",
             'Mest reducerar': f"{float(best_red.get('red_pct', 0.0)):.1f}%",
+            'Prognosnivåer': int(sum(1 for c in cand_list if c.get('forecast_guided'))),
+            'Bästa prognosfit': f"{100.0 * max([float(c.get('forecast_fit', 0.0)) for c in cand_list] or [0.0]):.1f}%",
             'Valt i paket': ', '.join(selected) if selected else 'Nej',
             'Valt intervall': ' | '.join(selected_details) if selected_details else '-',
             'Kommentar': comment,
@@ -7871,6 +8652,7 @@ def _recommended_packages_summary_df(packages, package_index_map=None):
             'Eftertrim': int(len(p.get('post_trim_notes', []) or [])),
             'Gruppkrav': group_txt or '—',
             'Värde-/poängfilter': int(p.get('value_filters', 0)),
+            'Prognosstyrda': int(p.get('forecast_filters', 0)),
             'FAT/sekvens': int(p.get('fat_filters', 0)),
             'Struktur': int(p.get('structure_filters', 0)),
             'Spelvärde': f"{_package_value_score(p):.0f}",
@@ -8130,16 +8912,79 @@ else:
 
 # Step 1 – kupongdata / historik
 st.markdown("<div class='v12-card'>", unsafe_allow_html=True)
-st.markdown("<div class='v12-step'>Steg 1</div><div class='v12-title'>Kupongdata och historik</div>", unsafe_allow_html=True)
-col_a, col_b, col_c = st.columns([1.2, 1, 1])
+st.markdown("<div class='v12-step'>Steg 1</div><div class='v12-title'>Kupongdata, databas och utdelningsprognos</div>", unsafe_allow_html=True)
+
+st.session_state.setdefault('v12_forecast_mode', 'Automatisk – påverkar paketmotorn')
+st.session_state.setdefault('v12_forecast_auto_n', bool(st.session_state.get('v12_history_auto_n', True)))
+st.session_state.setdefault('v12_forecast_manual_n', 30)
+st.session_state.setdefault('v12_forecast_effective_n', 30)
+st.session_state.setdefault('v12_history_auto_n', bool(st.session_state.get('v12_forecast_auto_n', True)))  # bakåtkompatibilitet
+st.session_state.setdefault('v12_top_n', 30)  # filtercentralens/paketmotorns historikbas
+st.session_state.setdefault('v12_manual_payout_target', False)
+st.session_state.setdefault('v12_pay_min', 0)
+st.session_state.setdefault('v12_pay_max', 10_000_000)
+st.session_state.setdefault('v12_today_turnover', 0.0)
+st.session_state.setdefault('v12_today_jackpot_million', 0.0)
+
+col_a, col_b = st.columns([1.0, 1.6])
 with col_a:
     spelform = st.selectbox("Spelform", ["Stryktips", "Europatips", "Topptips ST", "Topptips EU", "Topptips Övrigt", "Powerplay"], key="v12_spelform")
+with col_b:
+    forecast_mode = st.selectbox(
+        "Utdelningsprognos",
+        ["Automatisk – påverkar paketmotorn", "Endast information", "Av"],
+        key="v12_forecast_mode",
+        help="Automatisk prioriterar prognosanpassade värde-/favorit-/FAT-filter men ändrar aldrig kravet på samlad historikträff eller teckenskydd.",
+    )
 antal_matcher = 13 if spelform in ["Stryktips", "Europatips"] else 8
 krav_odds = antal_matcher * 3
-with col_b:
-    top_n = st.number_input("Historikbas – liknande omgångar", min_value=20, max_value=100, value=30, step=5, key="v12_top_n", help="Rekommenderat: 30. 20 kan testas, men 30 ger stabilare filterstatistik.")
-with col_c:
-    pay_min = st.number_input("Min utdelning i historik", min_value=0, max_value=10000000, value=100000, step=50000, key="v12_pay_min")
+
+with st.expander("Avancerat – historikbas, omsättning och manuellt utdelningsmål", expanded=False):
+    ac1, ac2 = st.columns(2)
+    with ac1:
+        filter_top_n = st.number_input(
+            "Liknande omgångar för filtercentral/paket",
+            min_value=15,
+            max_value=100,
+            value=int(st.session_state.get('v12_top_n', 30)),
+            step=5,
+            key="v12_top_n",
+            help="Behåll normalt 30. Detta är den historikbas som ger paketträffar som 30/30, 29/30 och 28/30.",
+        )
+        forecast_auto_n = st.checkbox(
+            "Välj prognosens historikantal automatiskt",
+            value=bool(st.session_state.get('v12_forecast_auto_n', True)),
+            key='v12_forecast_auto_n',
+            help="Prognosen jämför 15/20/25/30/40/50 kronologiskt. Detta ändrar inte filtercentralens historikantal ovan.",
+        )
+        forecast_manual_n = st.number_input(
+            "Manuellt antal liknande för prognosen",
+            min_value=15,
+            max_value=100,
+            value=int(st.session_state.get('v12_forecast_manual_n', 30)),
+            step=5,
+            key="v12_forecast_manual_n",
+            disabled=bool(forecast_auto_n),
+        )
+        st.session_state['v12_history_auto_n'] = bool(forecast_auto_n)  # bakåtkompatibilitet
+    with ac2:
+        manual_payout_target = st.checkbox(
+            "Aktivera manuellt utdelningsmål",
+            value=bool(st.session_state.get('v12_manual_payout_target', False)),
+            key='v12_manual_payout_target',
+            help="Avancerat strategiskt urval. Prognosen förblir neutral, men filterhistoriken väljs bara bland omgångar inom angivet faktiskt utdelningsintervall.",
+        )
+        pc1, pc2 = st.columns(2)
+        with pc1:
+            pay_min = st.number_input("Min utdelning", min_value=0, max_value=50_000_000, value=int(st.session_state.get('v12_pay_min', 0)), step=50_000, key="v12_pay_min", disabled=not bool(manual_payout_target))
+        with pc2:
+            pay_max = st.number_input("Max utdelning", min_value=0, max_value=100_000_000, value=int(st.session_state.get('v12_pay_max', 10_000_000)), step=100_000, key="v12_pay_max", disabled=not bool(manual_payout_target))
+    pc3, pc4 = st.columns(2)
+    with pc3:
+        today_turnover = st.number_input("Dagens uppskattade omsättning (kr, frivilligt)", min_value=0.0, max_value=500_000_000.0, value=float(st.session_state.get('v12_today_turnover', 0.0)), step=1_000_000.0, key='v12_today_turnover', format='%.0f')
+    with pc4:
+        today_jackpot_million = st.number_input("Dagens jackpot (miljoner, frivilligt)", min_value=0.0, max_value=500.0, value=float(st.session_state.get('v12_today_jackpot_million', 0.0)), step=1.0, key='v12_today_jackpot_million', format='%.1f')
+    st.caption("Neutral historik är standard. Manuellt utdelningsmål påverkar filterunderlaget men får aldrig skapa prognosen, eftersom det annars blir en cirkelprognos.")
 
 input_text = st.text_area(
     f"Klistra in {krav_odds} procent/odds-värden",
@@ -8147,6 +8992,18 @@ input_text = st.text_area(
     key="v12_input_text",
     placeholder="Exempel: 62 23 15 48 29 23 ..."
 )
+_current_analysis_config_sig = _analysis_config_signature(
+    input_text, spelform, filter_top_n, forecast_auto_n, forecast_manual_n,
+    manual_payout_target, pay_min, pay_max, today_turnover, today_jackpot_million,
+)
+_saved_analysis_config_sig = st.session_state.get('v12_analysis_config_signature')
+_analysis_inputs_stale = bool(
+    st.session_state.get('v12_analysis_ready')
+    and _saved_analysis_config_sig
+    and _saved_analysis_config_sig != _current_analysis_config_sig
+)
+if _analysis_inputs_stale:
+    st.warning('Kupong-, historik- eller prognosinställningar har ändrats sedan senaste inläsningen. Tryck på Läs in kupong innan du beräknar nya paket.')
 col_run, col_status = st.columns([1, 3])
 with col_run:
     run_analysis = st.button("📥 Läs in kupong", use_container_width=True)
@@ -8156,26 +9013,39 @@ with col_status:
         _db_name = st.session_state.get('v12_db_name', 'databas')
         _db_total = st.session_state.get('v12_db_total_rows')
         _db_after = st.session_state.get('v12_db_after_payout_rows')
+        _forecast_n = int(st.session_state.get('v12_forecast_effective_n', 0) or 0)
+        _forecast_auto_txt = 'auto' if bool(st.session_state.get('v12_forecast_auto_n', True)) else 'manuellt'
         if _db_total is not None:
-            if _db_after is not None and int(_db_after) != int(_db_total):
-                st.success(f"Historik klar: {_hist_n} liknande omgångar från {_db_name}. Läste igenom {int(_db_total):,} giltiga omgångar · {int(_db_after):,} kvar efter utdelningskrav.".replace(',', ' '))
+            if bool(st.session_state.get('v12_manual_payout_target', False)) and _db_after is not None and int(_db_after) != int(_db_total):
+                st.success(f"Filterhistorik: {_hist_n} liknande från {_db_name}. Prognos: {_forecast_n} liknande ({_forecast_auto_txt}). Läste {int(_db_total):,} giltiga · {int(_db_after):,} kvar efter manuellt utdelningsmål för filtren.".replace(',', ' '))
             else:
-                st.success(f"Historik klar: {_hist_n} liknande omgångar från {_db_name}. Läste igenom {int(_db_total):,} giltiga omgångar i statistikfilen.".replace(',', ' '))
+                st.success(f"Filterhistorik: {_hist_n} neutralt valda från {_db_name}. Prognos: {_forecast_n} liknande ({_forecast_auto_txt}). Databas {int(_db_total):,} giltiga omgångar.".replace(',', ' '))
         else:
-            st.success(f"Historik klar: {_hist_n} liknande omgångar från {_db_name}.")
+            st.success(f"Filterhistorik klar: {_hist_n} liknande omgångar från {_db_name}.")
 
 if run_analysis:
-    with st.spinner("Läser databas och hittar liknande omgångar..."):
+    with st.spinner("Läser databas, kalibrerar historikantal och bygger prognos..."):
+        db_path_now = find_local_database(spelform)
+        calibration = {}
+        if db_path_now:
+            try:
+                calibration = calibrate_payout_forecast(db_path_now, os.path.getmtime(db_path_now), antal_matcher)
+            except Exception as e:
+                calibration = {'error': str(e), 'recommended_n': 30, 'rows': []}
+        effective_filter_top_n = int(max(15, min(100, int(filter_top_n))))
+        effective_forecast_n = int(calibration.get('recommended_n', 30)) if bool(forecast_auto_n) else int(forecast_manual_n)
+        effective_forecast_n = int(max(15, min(100, effective_forecast_n)))
         v_m, filter_vec, db_name, err = run_core_analysis(
             input_text,
             spelform,
             antal_matcher,
             krav_odds,
             True,
-            int(top_n),
-            True,
+            int(effective_filter_top_n),
+            bool(manual_payout_target),
             int(pay_min),
-            10000000,
+            int(pay_max),
+            f"{db_path_now}:{os.path.getmtime(db_path_now) if db_path_now else 0}",
         )
     if err:
         st.error(err)
@@ -8183,28 +9053,67 @@ if run_analysis:
         st.error("Hittade inga historiska omgångar med valda krav.")
     else:
         st.session_state['v12_analysis_ready'] = True
+        st.session_state['v12_analysis_config_signature'] = _current_analysis_config_sig
+        _analysis_inputs_stale = False
+        # Ny kupong/prognos gör gamla paket och reduceringsresultat stale.
+        for _k in ['v12_recommended_packages', 'v12_recommended_candidate_audit', 'v12_recommended_meta', 'v12_applied_package_meta', 'v12_applied_package_snapshot']:
+            st.session_state.pop(_k, None)
+        st.session_state['v12_last_result'] = None
+        st.session_state['v12_last_result_stale'] = False
         st.session_state['v12_v_m'] = v_m
         st.session_state['v12_filter_vec'] = filter_vec
         st.session_state['v12_db_name'] = db_name
-        # Visa hur stor historikbas appen faktiskt läste igenom innan top-N valdes.
+        st.session_state['v12_analysis_spelform'] = spelform
+        st.session_state['v12_effective_top_n'] = int(effective_filter_top_n)
+        st.session_state['v12_forecast_effective_n'] = int(effective_forecast_n)
+        st.session_state['v12_forecast_calibration'] = calibration
+        st.session_state['v12_history_manual_payout'] = bool(manual_payout_target)
         try:
-            _db_path_now = find_local_database(spelform)
-            _db_all_now = load_database(_db_path_now, antal_matcher) if _db_path_now else pd.DataFrame()
+            _db_all_now = load_database(db_path_now, antal_matcher) if db_path_now else pd.DataFrame()
             _db_total_now = int(len(_db_all_now))
             _db_after_now = _db_total_now
-            if isinstance(_db_all_now, pd.DataFrame) and not _db_all_now.empty and 'Payout' in _db_all_now.columns:
-                _db_after_now = int(len(_db_all_now[(_db_all_now['Payout'] >= int(pay_min)) & (_db_all_now['Payout'] <= 10000000)]))
+            if bool(manual_payout_target) and not _db_all_now.empty:
+                payout_series = pd.to_numeric(_db_all_now.get('Payout', 0), errors='coerce').fillna(0)
+                _db_after_now = int(((payout_series >= int(pay_min)) & (payout_series <= int(pay_max))).sum())
             st.session_state['v12_db_total_rows'] = _db_total_now
             st.session_state['v12_db_after_payout_rows'] = _db_after_now
-        except Exception:
+            db_report = build_database_quality_report(_db_all_now, antal_matcher) if not _db_all_now.empty else pd.DataFrame()
+            st.session_state['v12_database_quality_report'] = db_report
+
+            # Prognosen är alltid neutral även om användaren aktiverar manuellt utdelningsmål.
+            neutral_v_m = _select_similar_history_df(_db_all_now, filter_vec, antal_matcher, int(effective_forecast_n), use_structure=True)
+            if forecast_mode != 'Av' and not neutral_v_m.empty:
+                forecast = _forecast_from_similar_df(neutral_v_m, float(today_turnover), float(today_jackpot_million))
+                forecast['forecast_mode'] = forecast_mode
+                forecast['effective_top_n'] = int(effective_forecast_n)
+                forecast['filter_history_n'] = int(effective_filter_top_n)
+                forecast['database_name'] = db_name
+                st.session_state['v12_payout_forecast'] = forecast
+            else:
+                st.session_state['v12_payout_forecast'] = {}
+        except Exception as e:
             st.session_state['v12_db_total_rows'] = None
             st.session_state['v12_db_after_payout_rows'] = None
+            st.session_state['v12_database_quality_report'] = pd.DataFrame()
+            st.session_state['v12_payout_forecast'] = {}
+            st.warning(f"Kupongen lästes in men prognosen kunde inte byggas: {e}")
         st.session_state['v12_filter_saved'] = False
-        _db_total_msg = st.session_state.get('v12_db_total_rows')
-        if _db_total_msg is not None:
-            st.success(f"Klart: {len(v_m)} liknande omgångar hittades. Läste igenom {int(_db_total_msg):,} giltiga omgångar i statistikfilen.".replace(',', ' '))
-        else:
-            st.success(f"Klart: {len(v_m)} liknande omgångar hittades.")
+        st.success(f"Klart: filtercentral/paket använder {len(v_m)} liknande omgångar. Prognosen använder {int(effective_forecast_n)} ({'automatiskt valt' if forecast_auto_n else 'manuellt valt'}).")
+
+if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_analysis_spelform', spelform) == spelform and forecast_mode != 'Av':
+    _current_forecast = st.session_state.get('v12_payout_forecast') or {}
+    if _current_forecast:
+        _render_payout_forecast_panel(
+            _current_forecast,
+            calibration=st.session_state.get('v12_forecast_calibration') or {},
+            forecast_mode=forecast_mode,
+            database_report=st.session_state.get('v12_database_quality_report'),
+        )
+    else:
+        st.info('Kupongen är laddad utan utdelningsprognos. Tryck på Läs in kupong igen för att bygga prognosen från databasen.')
+
+# Den faktiska historikbasen som sparas och används längre ner.
+top_n = int(st.session_state.get('v12_effective_top_n', st.session_state.get('v12_top_n', 30)))
 st.markdown("</div>", unsafe_allow_html=True)
 
 # Streckrekommendationer används nu som vanliga intervallfilter under Favorit & skräll.
@@ -8296,7 +9205,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             value=filter_hist_target_pct,
             step=1,
             key="v12_filter_hist_target_pct",
-            help="Styr rekommenderat intervall och startvärde för varje filter. 90% = ungefär 27/30 vid 30 historiska omgångar. 100% = intervallet täcker alla 30.",
+            help=f"Styr rekommenderat intervall och startvärde för varje filter. 90% motsvarar ungefär {int(round(len(v_m)*0.90))}/{len(v_m)}. 100% täcker alla {len(v_m)} när det är möjligt.",
         )
     filter_hist_target_pct = int(max(50, min(100, filter_hist_target_pct)))
 
@@ -8375,10 +9284,13 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 st.session_state[f"filter_mode_{_spec.get('key')}"] = 'Av'
             st.success("Alla filter är satta till Av.")
             st.rerun()
-    st.caption("När du ändrar minsta historiska träff får varje filter nya slider-nycklar och startar på sitt rekommenderade intervall. 100% ska därför ge startintervall med 30/30 där det är möjligt.")
+    st.caption(f"När du ändrar minsta historiska träff får varje filter nya slider-nycklar och startar på sitt rekommenderade intervall. 100% ska ge {len(v_m)}/{len(v_m)} där det är möjligt.")
 
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
         st.caption("Testar Pareto-bästa paket på radmassan efter dina manuella teckengrupper. De manuella teckengrupperna visas separat och drar inte ner paketens historiska filterträff. Paketmotorn bygger nivåtrappa per filter, testar även kombinationslyft av småfilter, visar progressklocka/ETA, eftertrimmar valt paket och visar hårda grupppaket som egen pakettyp.")
+        _pkg_forecast = st.session_state.get('v12_payout_forecast') or {}
+        if str(st.session_state.get('v12_forecast_mode', '')).startswith('Automatisk') and _pkg_forecast:
+            st.info(f"Prognosstyrning aktiv: {_pkg_forecast.get('main_zone','—')} prioriteras, {_pkg_forecast.get('alt_zone','—')} används som skydd. Prognosen får aldrig sänka valt krav på samlad historikträff eller bryta teckenskyddet.")
 
         with st.expander("Välj filter som måste ingå i rekommenderade paket", expanded=False):
             st.caption("Kryssa i filter du vill att paketmotorn ska använda. Ändringar ligger i ett formulär och sparas först när du trycker på knappen, så sidan laddar inte om för varje kryss.")
@@ -8413,25 +9325,26 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
 
         # Standard för paketmotorn. Dessa värden gäller bara när inget redan är sparat
         # i session/spelfil. För att uppdatera gamla öppna sessioner byts det gamla
-        # standardvärdet 22/30 till nya 28/30 en gång, men egna val lämnas i fred.
+        # standardvärdet motsvarar cirka 28/30 (93 %) även när auto-historiken väljer annat N.
         default_rec_min_step = 1.0
         default_rec_max_filters = 30
-        default_rec_min_hit = min(28, int(len(v_m)))
+        default_rec_min_hit = max(1, min(int(len(v_m)), int(round(float(len(v_m)) * 28.0 / 30.0))))
         default_rec_display_max_rows = int(st.session_state.get("v12_matrix_limit", 5000))
         default_rec_frame_adapt = True
         default_rec_min_value_filters = 3
-        if st.session_state.get("v12_pkg_defaults_version") != "v12.0bw":
-            if "v12_rec_min_hit" not in st.session_state or int(st.session_state.get("v12_rec_min_hit", 22)) <= 22:
+        if st.session_state.get("v12_pkg_defaults_version") != "v12.0ca":
+            _old_min_hit = int(st.session_state.get("v12_rec_min_hit", default_rec_min_hit) or default_rec_min_hit)
+            if "v12_rec_min_hit" not in st.session_state or _old_min_hit <= 22 or _old_min_hit > int(len(v_m)):
                 st.session_state["v12_rec_min_hit"] = default_rec_min_hit
             st.session_state.setdefault("v12_rec_min_step", default_rec_min_step)
             st.session_state.setdefault("v12_rec_max_filters", default_rec_max_filters)
             st.session_state.setdefault("v12_rec_display_max_rows", default_rec_display_max_rows)
             st.session_state.setdefault("v12_rec_frame_adapt", default_rec_frame_adapt)
             st.session_state.setdefault("v12_rec_min_value_filters", default_rec_min_value_filters)
-            st.session_state["v12_pkg_defaults_version"] = "v12.0bw"
+            st.session_state["v12_pkg_defaults_version"] = "v12.0ca"
 
         with st.form("v12_recommended_package_engine_form"):
-            st.caption("Paketmotorns standard är nu: sök ner till 28/30, max 30 filter, minsta extra reducering 1,00, anpassa mot grundram och minst 3 värde-/poängfilter. Ändra flera saker och tryck Beräkna paket en gång.")
+            st.caption(f"Paketmotorns standard motsvarar cirka 28/30 = 93% träff, vilket här blir {default_rec_min_hit}/{len(v_m)}. Max 30 filter, minsta extra reducering 1,00, grundramsanpassning och minst 3 värde-/poängfilter.")
             rp_c1, rp_c2, rp_c3, rp_c4, rp_c5, rp_c6 = st.columns([1, 1, 1, 1, 1, 1])
             with rp_c1:
                 rec_min_step = st.number_input(
@@ -8447,7 +9360,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             with rp_c2:
                 rec_max_filters = st.number_input("Max filter i paket", min_value=1, max_value=40, value=int(st.session_state.get("v12_rec_max_filters", default_rec_max_filters)), step=1, key="v12_rec_max_filters")
             with rp_c3:
-                rec_min_hit = st.number_input("Sök ner till träff", min_value=1, max_value=int(len(v_m)), value=min(int(st.session_state.get("v12_rec_min_hit", default_rec_min_hit)), int(len(v_m))), step=1, key="v12_rec_min_hit", help="Standard 28/30. Höj till 29–30 för tryggare paket, sänk bara om du behöver pressa radantalet hårdare.")
+                rec_min_hit = st.number_input("Sök ner till träff", min_value=1, max_value=int(len(v_m)), value=min(int(st.session_state.get("v12_rec_min_hit", default_rec_min_hit)), int(len(v_m))), step=1, key="v12_rec_min_hit", help=f"Standard motsvarar cirka 28/30 = 93% historikträff, vilket här blir {default_rec_min_hit}/{len(v_m)}. Höj för tryggare paket, sänk bara om du behöver pressa radantalet hårdare.")
             with rp_c4:
                 rec_display_max_rows = st.number_input("Visa paket under", min_value=100, max_value=75000, value=int(st.session_state.get("v12_rec_display_max_rows", default_rec_display_max_rows)), step=100, key="v12_rec_display_max_rows", help="Sätt detta till din riktiga radbudget före TipsetMatrix. Standard följer TipsetMatrix-spärren om den finns, annars 5 000.")
             with rp_c5:
@@ -8468,6 +9381,9 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     help="Hård spärr: ett rekommenderat paket måste innehålla minst detta antal filter från Värde & svårighet. Annars visas paketet inte i listan.",
                 )
             build_recs = st.form_submit_button("Beräkna paket", use_container_width=True)
+        if build_recs and _analysis_inputs_stale:
+            st.error('Läs in kupongen igen först. Paketmotorn får inte använda en gammal historik/prognos mot nya inställningar.')
+            build_recs = False
         if build_recs:
             start_clock = time.time()
             progress_bar = st.progress(0, text="Startar paketmotor...")
@@ -8502,6 +9418,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 target_frame_after=int(rec_display_max_rows),
                 progress_cb=_ui_package_progress,
                 manual_hist_mask=None,
+                forecast_context=(st.session_state.get('v12_payout_forecast') or {}) if (str(st.session_state.get('v12_forecast_mode', '')).startswith('Automatisk') and not _analysis_inputs_stale) else None,
             )
             if isinstance(rec_result, tuple):
                 packages, candidate_audit = rec_result
@@ -8527,11 +9444,25 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 'frame_adapt': bool(rec_frame_adapt),
                 'min_value_filters': int(rec_min_value_filters),
                 'required_keys': list(required_keys_now),
+                'forecast_mode': st.session_state.get('v12_forecast_mode', 'Av'),
+                'forecast_main_zone': (st.session_state.get('v12_payout_forecast') or {}).get('main_zone', ''),
+                'forecast_true_rank_main': [
+                    (st.session_state.get('v12_payout_forecast') or {}).get('true_rank_main_low'),
+                    (st.session_state.get('v12_payout_forecast') or {}).get('true_rank_main_high'),
+                ],
+                'forecast_signature': _forecast_signature(st.session_state.get('v12_payout_forecast') or {}, st.session_state.get('v12_forecast_mode', 'Av')),
             }
         packages = st.session_state.get('v12_recommended_packages') or []
         _pkg_meta = st.session_state.get('v12_recommended_meta') or {}
+        if packages and _analysis_inputs_stale:
+            st.warning('Paketlistan hör till tidigare kupong-/historik-/prognosinställningar. Läs in kupongen och beräkna paket igen.')
+            packages = []
         if packages and _pkg_meta.get('manual_sign_groups_sig') != manual_sign_groups_sig:
             st.warning('Manuella teckengrupper har ändrats sedan paketen beräknades. Beräkna rekommenderade paket igen innan du använder ett paket.')
+            packages = []
+        _current_forecast_sig = _forecast_signature(st.session_state.get('v12_payout_forecast') or {}, st.session_state.get('v12_forecast_mode', 'Av'))
+        if packages and _pkg_meta.get('forecast_signature') not in {None, _current_forecast_sig}:
+            st.warning('Utdelningsprognosen eller prognosläget har ändrats sedan paketen beräknades. Beräkna rekommenderade paket igen.')
             packages = []
         rec_display_max_rows = int(st.session_state.get('v12_rec_display_max_rows', 5000))
         visible_packages = [p for p in packages if int(p.get('frame_after', 10**12)) <= rec_display_max_rows]
@@ -8598,7 +9529,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 st.warning('Backtest kör paketmotorn flera gånger och kan ta tid. Börja med 3–5 omgångar. Det används ingen sampling i själva paketbeslutet.')
                 bt_c1, bt_c2, bt_c3 = st.columns([1, 1, 1])
                 with bt_c1:
-                    bt_cases = st.number_input('Antal omgångar att testa', min_value=3, max_value=50, value=int(st.session_state.get('v12_bt_cases', 5)), step=1, key='v12_bt_cases', help='Backtestar de senaste giltiga historiska omgångarna efter utdelningskravet. Högre antal kan bli mycket långsamt.')
+                    bt_cases = st.number_input('Antal omgångar att testa', min_value=3, max_value=50, value=int(st.session_state.get('v12_bt_cases', 5)), step=1, key='v12_bt_cases', help='Backtestar de senaste giltiga historiska omgångarna i aktiv historikbas. Högre antal kan bli mycket långsamt.')
                 with bt_c2:
                     bt_mode = st.selectbox('Historikläge', ['Leave-one-out', 'Kronologiskt'], index=0 if st.session_state.get('v12_bt_mode', 'Leave-one-out') == 'Leave-one-out' else 1, key='v12_bt_mode', help='Leave-one-out använder alla historiska omgångar utom testomgången. Kronologiskt använder bara omgångar före testdatumet, vilket är striktare men kan ge färre testfall.')
                 with bt_c3:
