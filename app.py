@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0cc – Utdelningsrisk och min/max"
+APP_VERSION = "v12.0cd – Enkel riskprofil UI"
 
 
 st.markdown("""
@@ -9172,7 +9172,7 @@ with st.sidebar:
             st.session_state.pop(_k, None)
         st.success("Cache tömd.")
 
-    # v12.0cc: riskprofilen ska synas även när man har scrollat förbi Steg 1.
+    # v12.0cd: riskprofilen ska synas även när man har scrollat förbi Steg 1.
     _sb_forecast = st.session_state.get('v12_payout_forecast') or {}
     if isinstance(_sb_forecast, dict) and _sb_forecast:
         st.markdown('---')
@@ -9250,29 +9250,17 @@ forecast_mode = st.selectbox(
     help="Visar riskprofil, framför allt 500k+ risk. Den påverkar inte paketmotorn automatiskt.",
 )
 
-with st.expander("Avancerat – riskprofil och pottjustering", expanded=False):
-    ac1, ac2 = st.columns(2)
-    with ac1:
-        forecast_auto_n = st.checkbox(
-            "Välj riskprofilens historikantal automatiskt",
-            value=bool(st.session_state.get('v12_forecast_auto_n', True)),
-            key='v12_forecast_auto_n',
-            help="Riskprofilen jämför 15/20/25/30/40/50 kronologiskt. Detta ändrar inte filtercentralens historikantal ovan.",
-        )
-        forecast_manual_n = st.number_input(
-            "Manuellt antal liknande för riskprofilen",
-            min_value=15,
-            max_value=100,
-            value=int(st.session_state.get('v12_forecast_manual_n', 30)),
-            step=5,
-            key="v12_forecast_manual_n",
-            disabled=bool(forecast_auto_n),
-        )
-        st.session_state['v12_history_auto_n'] = bool(forecast_auto_n)  # bakåtkompatibilitet
-    with ac2:
-        today_turnover = st.number_input("Dagens uppskattade omsättning (kr, frivilligt)", min_value=0.0, max_value=500_000_000.0, value=float(st.session_state.get('v12_today_turnover', 0.0)), step=1_000_000.0, key='v12_today_turnover', format='%.0f')
-        today_jackpot_million = st.number_input("Dagens jackpot (miljoner, frivilligt)", min_value=0.0, max_value=500.0, value=float(st.session_state.get('v12_today_jackpot_million', 0.0)), step=1.0, key='v12_today_jackpot_million', format='%.1f')
-    st.caption("Min/max utdelning styr historikunderlaget för filter och rekommenderade paket. Riskprofilen är bara beslutsstöd och påverkar inte paketmotorn automatiskt.")
+# v12.0cd: riskprofilen ska vara enkel i huvudflödet.
+# Avancerad pottjustering och manuellt riskprofilantal är borttaget ur UI tills backtest visar tydlig nytta.
+forecast_auto_n = True
+forecast_manual_n = int(st.session_state.get('v12_forecast_manual_n', 30))
+st.session_state['v12_forecast_auto_n'] = True
+st.session_state['v12_history_auto_n'] = True  # bakåtkompatibilitet
+today_turnover = 0.0
+today_jackpot_million = 0.0
+st.session_state['v12_today_turnover'] = 0.0
+st.session_state['v12_today_jackpot_million'] = 0.0
+st.caption("Min/max utdelning styr historikunderlaget för filter och rekommenderade paket. Riskprofilen är bara beslutsstöd och påverkar inte paketmotorn automatiskt.")
 
 input_text = st.text_area(
     f"Klistra in {krav_odds} procent/odds-värden",
@@ -9372,7 +9360,7 @@ if run_analysis:
             neutral_v_m = _select_similar_history_df(_db_all_now, filter_vec, antal_matcher, int(effective_forecast_n), use_structure=True)
             if forecast_mode != 'Av' and not neutral_v_m.empty:
                 forecast = _forecast_from_similar_df(neutral_v_m, float(today_turnover), float(today_jackpot_million))
-                # v12.0cc: huvudsignalen är 500k+ risk via simulerad radprofil när datan räcker.
+                # v12.0cd: huvudsignalen är 500k+ risk via simulerad radprofil när datan räcker.
                 try:
                     sim_risk = _simulated_row_risk_profile(_db_all_now, filter_vec, antal_matcher, n_samples=8000)
                     if sim_risk:
@@ -9397,7 +9385,7 @@ if run_analysis:
         st.success(f"Klart: filtercentral/paket använder {len(v_m)} liknande omgångar. Riskprofilen använder {int(effective_forecast_n)} ({'automatiskt valt' if forecast_auto_n else 'manuellt valt'}).")
         _loaded_forecast = st.session_state.get('v12_payout_forecast') or {}
         if _loaded_forecast:
-            st.success(f"📈 Utdelningsrisk vald: {_forecast_main_summary(_loaded_forecast)}")
+            st.success(f"📈 Utdelningsriskprofil: {_forecast_main_summary(_loaded_forecast)}")
 
 if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_analysis_spelform', spelform) == spelform and forecast_mode != 'Av':
     _current_forecast = st.session_state.get('v12_payout_forecast') or {}
