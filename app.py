@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0bz – Backtest paketfilter"
+APP_VERSION = "v12.0ce – Utdelningsintervall min/max"
 
 
 st.markdown("""
@@ -5288,13 +5288,14 @@ def _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fa
     }
 
 
-def _build_spelfil_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher, input_text, top_n, pay_min, frame, v_m, filter_vec, reducer_settings=None, settings_override=None, package_state=None, manual_sign_groups=None):
+def _build_spelfil_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher, input_text, top_n, pay_min, pay_max, frame, v_m, filter_vec, reducer_settings=None, settings_override=None, package_state=None, manual_sign_groups=None):
     payload = _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher, settings_override=settings_override, package_state=package_state, manual_sign_groups=manual_sign_groups)
     payload.update({
         'file_type': 'tipset_spelfil',
         'input_text': input_text or '',
         'top_n': int(top_n),
         'pay_min': int(pay_min),
+        'pay_max': int(pay_max),
         'frame': _json_safe_value(frame),
         'filter_vec': _json_safe_value(filter_vec or []),
         'history_records': _history_records_for_spelfil(v_m),
@@ -5335,6 +5336,10 @@ def _apply_spelfil_payload(payload):
         st.session_state['v12_top_n'] = int(payload.get('top_n') or 30)
     if payload.get('pay_min') is not None:
         st.session_state['v12_pay_min'] = int(payload.get('pay_min') or 0)
+    if payload.get('pay_max') is not None:
+        st.session_state['v12_pay_max'] = int(payload.get('pay_max') or 2500000)
+    elif payload.get('file_type') == 'tipset_spelfil':
+        st.session_state['v12_pay_max'] = 2500000
     if payload.get('filter_hist_target_pct') is not None:
         st.session_state['v12_filter_hist_target_pct'] = int(payload.get('filter_hist_target_pct') or 90)
     # top_fav_count är borttaget i v12.0ar. Toppfavoriter finns som fasta filter 3/4/5/6.
@@ -7620,7 +7625,7 @@ def _ranked_frame_like_widths(base_frame, prob_vector, antal_matcher):
     return out
 
 
-def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_matcher, top_n, pay_min, filter_hist_target_pct, rec_settings, required_keys=None, max_tests=10, mode='leave-one-out', progress_cb=None, test_scope='package_only', frame_mode='ranked_widths'):
+def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_matcher, top_n, pay_min, pay_max, filter_hist_target_pct, rec_settings, required_keys=None, max_tests=10, mode='leave-one-out', progress_cb=None, test_scope='package_only', frame_mode='ranked_widths'):
     """Kör backtest av paketmotorn på historiska omgångar.
 
     Varje testomgång låtsas vara dagens kupong: dess procentvektor blir input,
@@ -7639,7 +7644,7 @@ def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_mat
     try:
         db = global_db.copy()
         if 'Payout' in db.columns:
-            db = db[pd.to_numeric(db['Payout'], errors='coerce').fillna(0) >= int(pay_min)]
+            db = db[(pd.to_numeric(db['Payout'], errors='coerce').fillna(0) >= int(pay_min)) & (pd.to_numeric(db['Payout'], errors='coerce').fillna(0) <= int(pay_max))]
         db['_bt_row_ok'] = db['Correct_Row'].apply(lambda r: len(normalize_single_row_text(r)) == int(antal_matcher))
         db['_bt_vec_ok'] = db['Prob_Vector'].apply(lambda v: isinstance(v, list) and len(v) == int(antal_matcher) * 3)
         db = db[db['_bt_row_ok'] & db['_bt_vec_ok']].copy()
@@ -7678,7 +7683,7 @@ def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_mat
             antal_matcher,
             top_n=int(top_n),
             pay_min=int(pay_min),
-            pay_max=10000000,
+            pay_max=int(pay_max),
             exclude_index=idx,
             mode=mode,
             test_date=test_date,
@@ -7825,6 +7830,7 @@ def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_mat
         'mode': str(mode),
         'top_n': int(top_n),
         'pay_min': int(pay_min),
+        'pay_max': int(pay_max),
         'test_scope': 'package_only' if package_only else 'current_full_flow',
     }
     return out, meta
@@ -8131,7 +8137,7 @@ else:
 # Step 1 – kupongdata / historik
 st.markdown("<div class='v12-card'>", unsafe_allow_html=True)
 st.markdown("<div class='v12-step'>Steg 1</div><div class='v12-title'>Kupongdata och historik</div>", unsafe_allow_html=True)
-col_a, col_b, col_c = st.columns([1.2, 1, 1])
+col_a, col_b, col_c, col_d = st.columns([1.2, 1, 1, 1])
 with col_a:
     spelform = st.selectbox("Spelform", ["Stryktips", "Europatips", "Topptips ST", "Topptips EU", "Topptips Övrigt", "Powerplay"], key="v12_spelform")
 antal_matcher = 13 if spelform in ["Stryktips", "Europatips"] else 8
@@ -8140,6 +8146,11 @@ with col_b:
     top_n = st.number_input("Historikbas – liknande omgångar", min_value=20, max_value=100, value=30, step=5, key="v12_top_n", help="Rekommenderat: 30. 20 kan testas, men 30 ger stabilare filterstatistik.")
 with col_c:
     pay_min = st.number_input("Min utdelning i historik", min_value=0, max_value=10000000, value=100000, step=50000, key="v12_pay_min")
+with col_d:
+    pay_max = st.number_input("Max utdelning i historik", min_value=0, max_value=50000000, value=2500000, step=50000, key="v12_pay_max")
+if int(pay_max) < int(pay_min):
+    st.warning("Max utdelning är lägre än min utdelning. Appen använder min som max tills du ändrar.")
+    pay_max = int(pay_min)
 
 input_text = st.text_area(
     f"Klistra in {krav_odds} procent/odds-värden",
@@ -8158,7 +8169,7 @@ with col_status:
         _db_after = st.session_state.get('v12_db_after_payout_rows')
         if _db_total is not None:
             if _db_after is not None and int(_db_after) != int(_db_total):
-                st.success(f"Historik klar: {_hist_n} liknande omgångar från {_db_name}. Läste igenom {int(_db_total):,} giltiga omgångar · {int(_db_after):,} kvar efter utdelningskrav.".replace(',', ' '))
+                st.success(f"Historik klar: {_hist_n} liknande omgångar från {_db_name}. Läste igenom {int(_db_total):,} giltiga omgångar · {int(_db_after):,} kvar efter utdelningsintervall.".replace(',', ' '))
             else:
                 st.success(f"Historik klar: {_hist_n} liknande omgångar från {_db_name}. Läste igenom {int(_db_total):,} giltiga omgångar i statistikfilen.".replace(',', ' '))
         else:
@@ -8175,7 +8186,7 @@ if run_analysis:
             int(top_n),
             True,
             int(pay_min),
-            10000000,
+            int(pay_max),
         )
     if err:
         st.error(err)
@@ -8193,7 +8204,7 @@ if run_analysis:
             _db_total_now = int(len(_db_all_now))
             _db_after_now = _db_total_now
             if isinstance(_db_all_now, pd.DataFrame) and not _db_all_now.empty and 'Payout' in _db_all_now.columns:
-                _db_after_now = int(len(_db_all_now[(_db_all_now['Payout'] >= int(pay_min)) & (_db_all_now['Payout'] <= 10000000)]))
+                _db_after_now = int(len(_db_all_now[(_db_all_now['Payout'] >= int(pay_min)) & (_db_all_now['Payout'] <= int(pay_max))]))
             st.session_state['v12_db_total_rows'] = _db_total_now
             st.session_state['v12_db_after_payout_rows'] = _db_after_now
         except Exception:
@@ -8645,6 +8656,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                             int(antal_matcher),
                             int(top_n),
                             int(pay_min),
+                            int(pay_max),
                             int(filter_hist_target_pct),
                             bt_settings,
                             required_keys=required_keys_now,
@@ -9029,7 +9041,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     )
     game_payload = _build_spelfil_payload(
         specs, group_reqs, filter_hist_target_pct, top_fav_count, spelform, antal_matcher,
-        input_text, top_n, pay_min, frame, v_m, filter_vec, reducer_settings=reducer_save_settings,
+        input_text, top_n, pay_min, pay_max, frame, v_m, filter_vec, reducer_settings=reducer_save_settings,
         settings_override=settings, package_state=package_save_state, manual_sign_groups=manual_sign_groups,
     )
     with sidebar_save_slot.container():
