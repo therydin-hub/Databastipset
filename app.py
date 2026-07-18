@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0cj – Spelprofil först standard"
+APP_VERSION = "v12.0ck – Spelprofil först 5 synlig fix"
 
 
 st.markdown("""
@@ -8450,7 +8450,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         default_rec_frame_adapt = True
         default_rec_min_value_filters = 3
         default_rec_package_strategy = 'profile_first'
-        if st.session_state.get("v12_pkg_defaults_version") != "v12.0cj":
+        if st.session_state.get("v12_pkg_defaults_version") != "v12.0ck":
             if "v12_rec_min_hit" not in st.session_state or int(st.session_state.get("v12_rec_min_hit", 22)) <= 22:
                 st.session_state["v12_rec_min_hit"] = default_rec_min_hit
             try:
@@ -8466,10 +8466,10 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             st.session_state.setdefault("v12_rec_package_strategy", default_rec_package_strategy)
             if st.session_state.get("v12_rec_package_strategy") not in {'profile_first', 'balanced'}:
                 st.session_state["v12_rec_package_strategy"] = default_rec_package_strategy
-            st.session_state["v12_pkg_defaults_version"] = "v12.0cj"
+            st.session_state["v12_pkg_defaults_version"] = "v12.0ck"
 
         with st.form("v12_recommended_package_engine_form"):
-            st.caption("Paketmotorns standard är nu: Spelprofil först, minsta extra reducering per paketsteg 5,00, sök ner till 28/30, max 30 filter, anpassa mot grundram och minst 3 värde-/poängfilter. Ändra flera saker och tryck Beräkna paket en gång.")
+            st.caption("Paketmotorns standard är nu: Spelprofil först + minsta extra reducering per paketsteg 5,00. Om du ser 1,00 här kör du en äldre fil. Sök ner till 28/30, max 30 filter, anpassa mot grundram och minst 3 värde-/poängfilter.")
             rp_c1, rp_c2, rp_c3, rp_c4, rp_c5, rp_c6 = st.columns([1, 1, 1, 1, 1, 1])
             with rp_c1:
                 rec_min_step = st.number_input(
@@ -8568,7 +8568,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             st.session_state['v12_recommended_packages'] = packages
             st.session_state['v12_recommended_candidate_audit'] = candidate_audit
             st.session_state['v12_recommended_meta'] = {
-                'package_engine': 'pareto_multilevel_profile_first_standard_v12_0cj',
+                'package_engine': 'pareto_multilevel_profile_first_standard_v12_0ck',
                 'manual_hist_target_pct': int(filter_hist_target_pct),
                 'top_fav_filters': 'Topp 3/4/5/6',
                 'frame_rows': int(len(manual_frame_rows)),
