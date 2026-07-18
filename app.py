@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0ce – Utdelningsintervall min/max"
+APP_VERSION = "v12.0cj – Spelprofil först standard"
 
 
 st.markdown("""
@@ -5220,6 +5220,7 @@ def _collect_recommended_package_state_for_save(specs=None, settings=None, group
         'rec_display_max_rows': _json_safe_value(st.session_state.get('v12_rec_display_max_rows')),
         'rec_frame_adapt': _json_safe_value(st.session_state.get('v12_rec_frame_adapt')),
         'rec_min_value_filters': _json_safe_value(st.session_state.get('v12_rec_min_value_filters')),
+        'rec_package_strategy': _json_safe_value(st.session_state.get('v12_rec_package_strategy')),
         'required_keys': _json_safe_value(required_keys),
         'recommended_meta': _json_safe_value(st.session_state.get('v12_recommended_meta', {})),
         'recommended_packages': _packages_for_spelfil(st.session_state.get('v12_recommended_packages', []) or []),
@@ -5370,6 +5371,7 @@ def _apply_spelfil_payload(payload):
             'rec_display_max_rows': 'v12_rec_display_max_rows',
             'rec_frame_adapt': 'v12_rec_frame_adapt',
             'rec_min_value_filters': 'v12_rec_min_value_filters',
+            'rec_package_strategy': 'v12_rec_package_strategy',
         }
         _pkg_settings_loaded = False
         for src, dst in _map.items():
@@ -5379,7 +5381,7 @@ def _apply_spelfil_payload(payload):
         if _pkg_settings_loaded:
             # En sparad spelfil/filterpaket ska få behålla sina egna paketmotorvärden
             # och inte skrivas över av nya standardvärden längre ner i gränssnittet.
-            st.session_state['v12_pkg_defaults_version'] = 'v12.0bw'
+            st.session_state['v12_pkg_defaults_version'] = 'v12.0cj'
         req_loaded = [str(rk) for rk in (pkg_state.get('required_keys', []) or []) if rk]
         st.session_state['v12_required_pkg_keys'] = list(dict.fromkeys(req_loaded))
         # Bakåtkompatibilitet för äldre sessionsnycklar/formulär.
@@ -6928,7 +6930,7 @@ def _best_filter_pair_lift(candidates, cur_hist, cur_frame, used_keys, target, h
     except Exception:
         return None
 
-def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14, min_hit_count=15, frame_adapt=True, min_value_filters=3, required_keys=None, target_frame_after=None, progress_cb=None, manual_hist_mask=None):
+def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14, min_hit_count=15, frame_adapt=True, min_value_filters=3, required_keys=None, target_frame_after=None, progress_cb=None, manual_hist_mask=None, package_strategy='profile_first'):
     """Bygger Pareto-rekommenderade filterpaket.
 
     Viktigt från v12.0n:
@@ -6956,6 +6958,10 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
     if pre_hist_hit <= 0:
         return [], pd.DataFrame()
     required_keys = set(required_keys or [])
+    package_strategy = str(package_strategy or 'profile_first').strip().lower()
+    if package_strategy not in {'profile_first', 'balanced'}:
+        package_strategy = 'profile_first'
+    profile_categories = {'Värde & svårighet', 'FAT', 'FAT-sekvenser', 'Favorit & skräll'}
     try:
         target_frame_after = int(target_frame_after) if target_frame_after is not None else None
     except Exception:
@@ -6993,6 +6999,15 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
     coverage_grid = [100, 99, 98, 97, 96, 95, 94, 93, 92, 91, 90, 88, 86, 84, 82, 80, 78, 76, 74, 72, 70, 68, 66, 64, 62, 60, 58, 56, 54, 52, 50]
     for si, spec in enumerate(specs, 1):
         spec_cands = []
+        # Spelprofil först: bygg rekommenderade paket av spelprofilfilter, inte strukturform.
+        # Strukturfilter kan fortfarande användas manuellt och som obligatoriskt filter.
+        spec_category = str(spec.get('category', ''))
+        if package_strategy == 'profile_first' and spec_category not in profile_categories and spec.get('key') not in required_keys:
+            if si == 1 or si == len(specs) or si % 3 == 0:
+                _progress(f"Steg 1/4: hoppar struktur/övrigt i spelprofilläge · filter {si}/{len(specs)} · kandidater {len(candidates)}")
+            else:
+                progress_done = min(progress_total, progress_done + 1)
+            continue
         try:
             getter = spec.get('getter')
             frame_vals = np.array([float(getter(r)) for r in frame_rows], dtype=float)
@@ -7344,6 +7359,7 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             'fat_filters': int(fat_filters),
             'structure_filters': int(structure_filters),
             'post_trim_notes': post_trim_notes,
+            'package_strategy': package_strategy,
         })
         _progress(f"Steg 2/4: bygger tvingade paket · träffnivå {target_idx}/{len(hit_levels)} · bästa hittills {final_hit}/{htot}, {final_keep:,} rader".replace(',', ' '), best={'hit': final_hit, 'total': htot, 'rows': final_keep})
 
@@ -7362,6 +7378,7 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 initial_hist_mask=pre_hist_mask,
             )
             if gp is not None:
+                gp['package_strategy'] = package_strategy
                 group_packages.append(gp)
                 _progress(f"Steg 3/4: bygger hårda grupper · träffnivå {group_idx}/{len(hit_levels)} · bästa grupp {gp.get('hist_hit',0)}/{htot}, {int(gp.get('frame_after',0)):,} rader".replace(',', ' '), best={'hit': gp.get('hist_hit',0), 'total': htot, 'rows': gp.get('frame_after',0)})
             else:
@@ -7754,7 +7771,7 @@ def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_mat
                 engine_rows_after_manual,
                 engine_frame,
                 int(antal_matcher),
-                min_step_reduction_pct=float(rec_settings.get('min_step', 1.0)),
+                min_step_reduction_pct=float(rec_settings.get('min_step', 5.0)),
                 max_filters=int(rec_settings.get('max_filters', 30)),
                 min_hit_count=min(int(rec_settings.get('min_hit', 28)), int(len(sim_df))),
                 frame_adapt=bool(rec_settings.get('frame_adapt', True)),
@@ -7763,6 +7780,7 @@ def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_mat
                 target_frame_after=int(rec_settings.get('display_max_rows', 5000)),
                 progress_cb=None,
                 manual_hist_mask=None,
+                package_strategy=str(rec_settings.get('package_strategy', 'profile_first')),
             )
             packages_bt = rec_result[0] if isinstance(rec_result, tuple) else rec_result
             pkg, pkg_note = _choose_backtest_package(packages_bt, int(rec_settings.get('display_max_rows', 5000)))
@@ -8425,35 +8443,44 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         # Standard för paketmotorn. Dessa värden gäller bara när inget redan är sparat
         # i session/spelfil. För att uppdatera gamla öppna sessioner byts det gamla
         # standardvärdet 22/30 till nya 28/30 en gång, men egna val lämnas i fred.
-        default_rec_min_step = 1.0
+        default_rec_min_step = 5.0
         default_rec_max_filters = 30
         default_rec_min_hit = min(28, int(len(v_m)))
         default_rec_display_max_rows = int(st.session_state.get("v12_matrix_limit", 5000))
         default_rec_frame_adapt = True
         default_rec_min_value_filters = 3
-        if st.session_state.get("v12_pkg_defaults_version") != "v12.0bw":
+        default_rec_package_strategy = 'profile_first'
+        if st.session_state.get("v12_pkg_defaults_version") != "v12.0cj":
             if "v12_rec_min_hit" not in st.session_state or int(st.session_state.get("v12_rec_min_hit", 22)) <= 22:
                 st.session_state["v12_rec_min_hit"] = default_rec_min_hit
-            st.session_state.setdefault("v12_rec_min_step", default_rec_min_step)
+            try:
+                _old_step = float(st.session_state.get("v12_rec_min_step", default_rec_min_step))
+            except Exception:
+                _old_step = default_rec_min_step
+            if "v12_rec_min_step" not in st.session_state or abs(_old_step - 1.0) < 0.001:
+                st.session_state["v12_rec_min_step"] = default_rec_min_step
             st.session_state.setdefault("v12_rec_max_filters", default_rec_max_filters)
             st.session_state.setdefault("v12_rec_display_max_rows", default_rec_display_max_rows)
             st.session_state.setdefault("v12_rec_frame_adapt", default_rec_frame_adapt)
             st.session_state.setdefault("v12_rec_min_value_filters", default_rec_min_value_filters)
-            st.session_state["v12_pkg_defaults_version"] = "v12.0bw"
+            st.session_state.setdefault("v12_rec_package_strategy", default_rec_package_strategy)
+            if st.session_state.get("v12_rec_package_strategy") not in {'profile_first', 'balanced'}:
+                st.session_state["v12_rec_package_strategy"] = default_rec_package_strategy
+            st.session_state["v12_pkg_defaults_version"] = "v12.0cj"
 
         with st.form("v12_recommended_package_engine_form"):
-            st.caption("Paketmotorns standard är nu: sök ner till 28/30, max 30 filter, minsta extra reducering 1,00, anpassa mot grundram och minst 3 värde-/poängfilter. Ändra flera saker och tryck Beräkna paket en gång.")
+            st.caption("Paketmotorns standard är nu: Spelprofil först, minsta extra reducering per paketsteg 5,00, sök ner till 28/30, max 30 filter, anpassa mot grundram och minst 3 värde-/poängfilter. Ändra flera saker och tryck Beräkna paket en gång.")
             rp_c1, rp_c2, rp_c3, rp_c4, rp_c5, rp_c6 = st.columns([1, 1, 1, 1, 1, 1])
             with rp_c1:
                 rec_min_step = st.number_input(
-                    "Minsta extra reducering",
+                    "Minsta extra reducering per paketsteg",
                     min_value=0.5,
                     max_value=20.0,
                     value=float(st.session_state.get("v12_rec_min_step", default_rec_min_step)),
                     step=0.25,
                     format="%.2f",
                     key="v12_rec_min_step",
-                    help="Gäller främst efter att värdekärnan är byggd. Värde-/poängfilter som behövs för kvoten får läggas till med lägre marginalkrav om de håller samlad träff.",
+                    help="Minsta extra reducering för nästa paketsteg. Ett paketsteg kan vara ett enskilt filter eller ett kombinationslyft med två filter. Standard 5,00 enligt extern backtest med Spelprofil först.",
                 )
             with rp_c2:
                 rec_max_filters = st.number_input("Max filter i paket", min_value=1, max_value=40, value=int(st.session_state.get("v12_rec_max_filters", default_rec_max_filters)), step=1, key="v12_rec_max_filters")
@@ -8478,6 +8505,22 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     key="v12_rec_min_value_filters",
                     help="Hård spärr: ett rekommenderat paket måste innehålla minst detta antal filter från Värde & svårighet. Annars visas paketet inte i listan.",
                 )
+            _strategy_labels = {
+                'profile_first': 'Spelprofil först (FAT, värde/poäng och favorit/skräll)',
+                'balanced': 'Balanserad / äldre modell',
+            }
+            _strategy_options = list(_strategy_labels.keys())
+            _cur_strategy = st.session_state.get('v12_rec_package_strategy', default_rec_package_strategy)
+            if _cur_strategy not in _strategy_options:
+                _cur_strategy = default_rec_package_strategy
+            rec_package_strategy = st.selectbox(
+                "Paketstrategi",
+                options=_strategy_options,
+                index=_strategy_options.index(_cur_strategy),
+                format_func=lambda x: _strategy_labels.get(x, x),
+                key="v12_rec_package_strategy",
+                help="Spelprofil först använder Värde & svårighet, FAT/FAT-sekvenser och Favorit & skräll före struktur. Strukturfilter används fortfarande manuellt och kan tvingas via 'måste ingå'.",
+            )
             build_recs = st.form_submit_button("Beräkna paket", use_container_width=True)
         if build_recs:
             start_clock = time.time()
@@ -8513,6 +8556,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 target_frame_after=int(rec_display_max_rows),
                 progress_cb=_ui_package_progress,
                 manual_hist_mask=None,
+                package_strategy=str(rec_package_strategy),
             )
             if isinstance(rec_result, tuple):
                 packages, candidate_audit = rec_result
@@ -8524,7 +8568,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             st.session_state['v12_recommended_packages'] = packages
             st.session_state['v12_recommended_candidate_audit'] = candidate_audit
             st.session_state['v12_recommended_meta'] = {
-                'package_engine': 'pareto_multilevel_progress_posttrim_group_visible_diagnostics_filter_hist_independent_of_manual_groups',
+                'package_engine': 'pareto_multilevel_profile_first_standard_v12_0cj',
                 'manual_hist_target_pct': int(filter_hist_target_pct),
                 'top_fav_filters': 'Topp 3/4/5/6',
                 'frame_rows': int(len(manual_frame_rows)),
@@ -8537,6 +8581,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 'display_max_rows': int(rec_display_max_rows),
                 'frame_adapt': bool(rec_frame_adapt),
                 'min_value_filters': int(rec_min_value_filters),
+                'package_strategy': str(rec_package_strategy),
                 'required_keys': list(required_keys_now),
             }
         packages = st.session_state.get('v12_recommended_packages') or []
@@ -8648,6 +8693,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                             'display_max_rows': int(bt_display_rows),
                             'frame_adapt': bool(st.session_state.get('v12_rec_frame_adapt', rec_frame_adapt)),
                             'min_value_filters': int(st.session_state.get('v12_rec_min_value_filters', rec_min_value_filters)),
+                            'package_strategy': str(st.session_state.get('v12_rec_package_strategy', 'profile_first')),
                         }
                         bt_df, bt_meta = _run_package_engine_backtest(
                             db_bt,
