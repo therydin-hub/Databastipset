@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0cf – Minsta steg-backtest"
+APP_VERSION = "v12.0ce – Utdelningsintervall min/max"
 
 
 st.markdown("""
@@ -5220,7 +5220,6 @@ def _collect_recommended_package_state_for_save(specs=None, settings=None, group
         'rec_display_max_rows': _json_safe_value(st.session_state.get('v12_rec_display_max_rows')),
         'rec_frame_adapt': _json_safe_value(st.session_state.get('v12_rec_frame_adapt')),
         'rec_min_value_filters': _json_safe_value(st.session_state.get('v12_rec_min_value_filters')),
-        'rec_package_strategy': _json_safe_value(st.session_state.get('v12_rec_package_strategy')),
         'required_keys': _json_safe_value(required_keys),
         'recommended_meta': _json_safe_value(st.session_state.get('v12_recommended_meta', {})),
         'recommended_packages': _packages_for_spelfil(st.session_state.get('v12_recommended_packages', []) or []),
@@ -5371,7 +5370,6 @@ def _apply_spelfil_payload(payload):
             'rec_display_max_rows': 'v12_rec_display_max_rows',
             'rec_frame_adapt': 'v12_rec_frame_adapt',
             'rec_min_value_filters': 'v12_rec_min_value_filters',
-            'rec_package_strategy': 'v12_rec_package_strategy',
         }
         _pkg_settings_loaded = False
         for src, dst in _map.items():
@@ -5381,7 +5379,7 @@ def _apply_spelfil_payload(payload):
         if _pkg_settings_loaded:
             # En sparad spelfil/filterpaket ska få behålla sina egna paketmotorvärden
             # och inte skrivas över av nya standardvärden längre ner i gränssnittet.
-            st.session_state['v12_pkg_defaults_version'] = 'v12.0cg'
+            st.session_state['v12_pkg_defaults_version'] = 'v12.0bw'
         req_loaded = [str(rk) for rk in (pkg_state.get('required_keys', []) or []) if rk]
         st.session_state['v12_required_pkg_keys'] = list(dict.fromkeys(req_loaded))
         # Bakåtkompatibilitet för äldre sessionsnycklar/formulär.
@@ -6915,14 +6913,8 @@ def _best_filter_pair_lift(candidates, cur_hist, cur_frame, used_keys, target, h
                         # visar att kombinationen gör något som filtren inte gör ensamma.
                         synergy = float(pair_step) - max(float(a['step_pct']), float(b['step_pct']))
                         min_individual_hit = min(int(a['hist_hit']), int(b['hist_hit']))
-                        pair_strategy_priority = _package_candidate_strategy_priority(a['cand'], package_strategy) + _package_candidate_strategy_priority(b['cand'], package_strategy)
-                        # Undvik struktur+struktur som tidigt kombinationslyft i spelprofilstrategier om
-                        # inte paret tydligt dominerar. Blandade par kan fortfarande vinna på reduktion.
-                        structure_pair_penalty = 1 if (_is_structure_candidate(a['cand']) and _is_structure_candidate(b['cand']) and _package_strategy_key(package_strategy) != 'balanced') else 0
                         score = (
                             value_add if require_value_if_needed else min(value_add, 1),
-                            int(pair_strategy_priority),
-                            -int(structure_pair_penalty),
                             int(pair_hit),
                             float(pair_step),
                             float(synergy),
@@ -6936,71 +6928,7 @@ def _best_filter_pair_lift(candidates, cur_hist, cur_frame, used_keys, target, h
     except Exception:
         return None
 
-
-
-def _package_strategy_options():
-    return {
-        'balanced': 'Balanserad (nuvarande)',
-        'profile_first': 'Spelprofil först',
-        'profile_then_structure': 'Spelprofil först + strukturtrim sist',
-    }
-
-
-def _package_strategy_key(value):
-    """Normaliserar paketstrategi från UI/spelfil till intern nyckel."""
-    raw = str(value or '').strip()
-    opts = _package_strategy_options()
-    if raw in opts:
-        return raw
-    rev = {v: k for k, v in opts.items()}
-    if raw in rev:
-        return rev[raw]
-    low = raw.lower()
-    if 'trim' in low or 'strukturtrim' in low:
-        return 'profile_then_structure'
-    if 'spelprofil' in low or 'fat' in low or 'värde' in low or 'varde' in low:
-        return 'profile_first'
-    return 'balanced'
-
-
-def _package_strategy_label(value):
-    key = _package_strategy_key(value)
-    return _package_strategy_options().get(key, _package_strategy_options()['balanced'])
-
-
-def _package_candidate_strategy_priority(cand, strategy='balanced'):
-    """Kategori-prioritet för rekommenderade paket.
-
-    Balanserad strategi ger neutral prioritet och beter sig som tidigare.
-    Spelprofil-strategier ger högre intern poäng till filter som beskriver
-    kupongens spelprofil: värde/svårighet, FAT, FAT-sekvenser och favorit/skräll.
-    Strukturfilter är fortfarande tillåtna, men får lägre prioritet.
-    """
-    key = _package_strategy_key(strategy)
-    if key == 'balanced':
-        return 0
-    cat = str((cand or {}).get('category', ''))
-    if cat == 'Värde & svårighet':
-        return 5
-    if cat in {'FAT', 'FAT-sekvenser'}:
-        return 4
-    if cat == 'Favorit & skräll':
-        return 3
-    if cat == 'Super-Makro':
-        return 2
-    if cat == 'Struktur':
-        return 0
-    return 1
-
-
-def _is_profile_candidate(cand):
-    return str((cand or {}).get('category', '')) in {'Värde & svårighet', 'FAT', 'FAT-sekvenser', 'Favorit & skräll'}
-
-
-def _is_structure_candidate(cand):
-    return str((cand or {}).get('category', '')) == 'Struktur'
-
-def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14, min_hit_count=15, frame_adapt=True, min_value_filters=3, required_keys=None, target_frame_after=None, progress_cb=None, manual_hist_mask=None, package_strategy="balanced"):
+def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14, min_hit_count=15, frame_adapt=True, min_value_filters=3, required_keys=None, target_frame_after=None, progress_cb=None, manual_hist_mask=None):
     """Bygger Pareto-rekommenderade filterpaket.
 
     Viktigt från v12.0n:
@@ -7034,7 +6962,6 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
         target_frame_after = None
     min_hit_count = int(max(0, min(pre_hist_hit, min_hit_count)))
     min_value_filters = int(max(0, min(12, min_value_filters)))
-    package_strategy_key = _package_strategy_key(package_strategy)
     if hit_levels is None:
         # Gå hela vägen ner till vald lägstanivå. Manuella teckengrupper påverkar
         # inte denna träffskala; de visas separat och påverkar bara aktuell radmassa.
@@ -7254,13 +7181,6 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             # Så länge det finns värde-/poängfilter som klarar kraven prioriteras de tills kvoten är fylld.
             if need_value and eligible_value_exists:
                 eligible_items = [x for x in eligible_items if x[-1]]
-            elif package_strategy_key == 'profile_then_structure':
-                # I detta läge bygger motorn först paketets spelprofil. Strukturfilter
-                # får komma in som trim när radgränsen redan är nådd, eller när inga
-                # spelprofilfilter längre ger godkänd extra reducering.
-                profile_items = [x for x in eligible_items if _is_profile_candidate(x[0])]
-                if profile_items and (target_frame_after is None or cur_frame_count > int(target_frame_after)):
-                    eligible_items = profile_items
 
             for cand, new_hist, new_frame, hist_hit, new_frame_count, step_red_pct, is_value in eligible_items:
                 # Score: välj ett balanserat mellanläge. Målet är inte bara maxslakt
@@ -7279,20 +7199,16 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 safe_floor = max(int(target), min(int(htot), max(int(round(float(htot) * 0.87)), int(target) + 2)))
                 risk_cost = max(0, int(safe_floor) - int(cand_safety))
                 heavy_low_hit = 1 if (float(cand.get('red_pct', 0.0)) >= 45.0 and risk_cost > 0) else 0
-                strategy_priority = _package_candidate_strategy_priority(cand, package_strategy_key)
-                structure_late_bonus = 0
-                if package_strategy_key == 'profile_then_structure' and _is_structure_candidate(cand) and target_frame_after is not None and cur_frame_count <= int(target_frame_after):
-                    structure_late_bonus = 1
                 if need_value and is_value:
                     # Värdekärnan ska byggas med starka filter först. Ett filter som
                     # reducerar brutalt men bara har låg individuell historikträff får
                     # inte vinna enbart på reducering om ett stabilare värdefilter finns.
-                    score = (value_bonus, strategy_priority, hist_hit, -risk_cost, -heavy_low_hit, cand_safety, step_red_pct, -new_frame_count, cand['red_pct'])
+                    score = (value_bonus, hist_hit, -risk_cost, -heavy_low_hit, cand_safety, step_red_pct, -new_frame_count, cand['red_pct'])
                 else:
                     # När vi fortfarande ligger över radgränsen får faktisk framdrift väga
                     # tungt, men riskkostnad ligger före ren stegreducering. Detta minskar
                     # risken att t.ex. Delta/Avvikelse väljs extremt hårt i onödan.
-                    score = (target_progress, strategy_priority, structure_late_bonus, hist_hit, hit_buffer, -risk_cost, -heavy_low_hit, cand_safety, step_red_pct, abs_gain, -new_frame_count)
+                    score = (target_progress, hist_hit, hit_buffer, -risk_cost, -heavy_low_hit, cand_safety, step_red_pct, abs_gain, -new_frame_count)
                 if best is None or score > best_score:
                     best = (cand, new_hist, new_frame, hist_hit, new_frame_count, step_red_pct)
                     best_score = score
@@ -7341,7 +7257,6 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 require_value_if_needed=need_value_pair,
                 max_keys=42,
                 variants_per_key=2,
-                package_strategy=package_strategy_key,
             )
             if pair is None:
                 break
@@ -7424,8 +7339,6 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             'min_step_reduction_pct': min_step_reduction_pct,
             'min_hit_count': min_hit_count,
             'frame_adapt': bool(frame_adapt),
-            'package_strategy': package_strategy_key,
-            'package_strategy_label': _package_strategy_label(package_strategy_key),
             'min_value_filters': int(min_value_filters),
             'value_filters': int(value_filters),
             'fat_filters': int(fat_filters),
@@ -7850,7 +7763,6 @@ def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_mat
                 target_frame_after=int(rec_settings.get('display_max_rows', 5000)),
                 progress_cb=None,
                 manual_hist_mask=None,
-                package_strategy=rec_settings.get('package_strategy', 'balanced') if isinstance(rec_settings, dict) else 'balanced',
             )
             packages_bt = rec_result[0] if isinstance(rec_result, tuple) else rec_result
             pkg, pkg_note = _choose_backtest_package(packages_bt, int(rec_settings.get('display_max_rows', 5000)))
@@ -7923,638 +7835,6 @@ def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_mat
     }
     return out, meta
 
-
-def _parse_min_step_levels(text, default_levels=None):
-    """Läser nivåer för minsta extra reducering från textfält.
-
-    Tillåter både svensk decimal-komma och semikolon/blanksteg/radbyte.
-    Returnerar sorterad unik lista inom samma praktiska gränser som paketmotorns reglage.
-    """
-    if default_levels is None:
-        default_levels = [1.0, 3.0, 5.0, 7.5, 10.0, 12.5, 15.0]
-    raw = str(text or '').replace(',', '.')
-    nums = []
-    for tok in re.findall(r'\d+(?:\.\d+)?', raw):
-        try:
-            v = round(float(tok), 2)
-            if 0.5 <= v <= 20.0:
-                nums.append(v)
-        except Exception:
-            continue
-    if not nums:
-        nums = list(default_levels)
-    out = []
-    seen = set()
-    for v in sorted(nums):
-        key = round(float(v), 2)
-        if key not in seen:
-            seen.add(key)
-            out.append(float(key))
-    return out[:12]
-
-
-def _format_min_step_level(v):
-    try:
-        x = float(v)
-        if abs(x - round(x)) < 1e-9:
-            return f"{x:.0f}"
-        return f"{x:.2f}".rstrip('0').rstrip('.')
-    except Exception:
-        return str(v)
-
-
-def _package_combo_lift_count(pkg):
-    """Antal kombinationslyft i valt paket."""
-    if not isinstance(pkg, dict):
-        return 0
-    notes = pkg.get('post_trim_notes', []) or []
-    try:
-        return int(sum(1 for n in notes if str(n.get('Typ', '')).lower().startswith('kombinationslyft')))
-    except Exception:
-        return 0
-
-
-def _run_min_step_sweep_backtest(global_db, frame, manual_sign_groups, antal_matcher, top_n, pay_min, pay_max, filter_hist_target_pct, rec_settings, levels, required_keys=None, max_tests=5, mode='leave-one-out', progress_cb=None, test_scope='package_only'):
-    """Backtestar flera nivåer för 'Minsta extra reducering per paketsteg'.
-
-    Detta är effektivare än att manuellt köra hela paketbacktestet en gång per nivå:
-    varje historisk testkupong, dess liknande historik, backtestram och filterdefinitioner
-    byggs en gång. Därefter körs bara själva paketmotorn per testad nivå.
-    """
-    levels = _parse_min_step_levels(' '.join(map(str, levels))) if not isinstance(levels, str) else _parse_min_step_levels(levels)
-    if not isinstance(global_db, pd.DataFrame) or global_db.empty:
-        return pd.DataFrame(), pd.DataFrame(), {'error': 'Ingen historikdatabas laddad.'}
-    try:
-        db = global_db.copy()
-        if 'Payout' in db.columns:
-            db = db[(pd.to_numeric(db['Payout'], errors='coerce').fillna(0) >= int(pay_min)) & (pd.to_numeric(db['Payout'], errors='coerce').fillna(0) <= int(pay_max))]
-        db['_bt_row_ok'] = db['Correct_Row'].apply(lambda r: len(normalize_single_row_text(r)) == int(antal_matcher))
-        db['_bt_vec_ok'] = db['Prob_Vector'].apply(lambda v: isinstance(v, list) and len(v) == int(antal_matcher) * 3)
-        db = db[db['_bt_row_ok'] & db['_bt_vec_ok']].copy()
-    except Exception as e:
-        return pd.DataFrame(), pd.DataFrame(), {'error': f'Kunde inte förbereda historik: {e}'}
-    if db.empty:
-        return pd.DataFrame(), pd.DataFrame(), {'error': 'Inga giltiga historiska omgångar att testa.'}
-
-    if 'Datum' in db.columns:
-        try:
-            db['_bt_date'] = pd.to_datetime(db['Datum'], errors='coerce')
-            db = db.sort_values('_bt_date', ascending=False, na_position='last')
-        except Exception:
-            pass
-    else:
-        db = db.sort_index(ascending=False)
-
-    package_only = str(test_scope or 'package_only') == 'package_only'
-    active_manual_groups_current = _normalize_manual_sign_groups(manual_sign_groups or [], antal_matcher)
-    test_rows = list(db.iterrows())[:int(max_tests)]
-    detail_rows = []
-    skipped = 0
-    total_steps = max(1, len(test_rows) * max(1, len(levels)))
-    done_steps = 0
-
-    def _progress(label):
-        nonlocal done_steps
-        done_steps = min(total_steps, done_steps + 1)
-        if progress_cb is not None:
-            try:
-                progress_cb(done_steps, total_steps, label)
-            except Exception:
-                pass
-
-    for ti, (idx, test_row) in enumerate(test_rows, 1):
-        correct = normalize_single_row_text(test_row.get('Correct_Row', ''))
-        input_vec = test_row.get('Prob_Vector', [])
-        test_date = test_row.get('Datum', None)
-        sim_df = _similar_history_for_backtest(
-            global_db,
-            input_vec,
-            antal_matcher,
-            top_n=int(top_n),
-            pay_min=int(pay_min),
-            pay_max=int(pay_max),
-            exclude_index=idx,
-            mode=mode,
-            test_date=test_date,
-        )
-        if len(sim_df) < max(10, min(int(top_n), 20)):
-            skipped += 1
-            for level in levels:
-                detail_rows.append({
-                    'Nivå': float(level),
-                    'Nivå text': _format_min_step_level(level),
-                    'Datum': str(test_date)[:10] if test_date is not None else str(idx),
-                    'Facit': correct,
-                    'Status': 'Hoppad över',
-                    'Orsak': f'För få liknande/priorhistoriska omgångar ({len(sim_df)})',
-                })
-                _progress(f"Backtest {ti}/{len(test_rows)} · nivå {_format_min_step_level(level)} · hoppad över")
-            continue
-
-        try:
-            if package_only:
-                engine_frame = _ranked_frame_like_widths(frame, input_vec, antal_matcher)
-                active_manual_groups = []
-                frame_label = 'Auto-rankad breddram'
-            else:
-                engine_frame = frame
-                active_manual_groups = active_manual_groups_current
-                frame_label = 'Aktuell grundram'
-
-            engine_frame_rows, _, ok, msg = generate_rows_from_frame(engine_frame, max_rows=None)
-            if not ok:
-                skipped += 1
-                for level in levels:
-                    detail_rows.append({
-                        'Nivå': float(level),
-                        'Nivå text': _format_min_step_level(level),
-                        'Datum': str(test_date)[:10] if test_date is not None else str(idx),
-                        'Facit': correct,
-                        'Status': 'Hoppad över',
-                        'Orsak': f'Kunde inte skapa backtestram: {msg}',
-                    })
-                    _progress(f"Backtest {ti}/{len(test_rows)} · nivå {_format_min_step_level(level)} · hoppad över")
-                continue
-
-            engine_rows_after_manual = _apply_manual_sign_groups_to_rows(engine_frame_rows, active_manual_groups, antal_matcher)
-            if not engine_rows_after_manual:
-                skipped += 1
-                for level in levels:
-                    detail_rows.append({
-                        'Nivå': float(level),
-                        'Nivå text': _format_min_step_level(level),
-                        'Datum': str(test_date)[:10] if test_date is not None else str(idx),
-                        'Facit': correct,
-                        'Status': 'Hoppad över',
-                        'Orsak': 'Backtestram/manuella teckengrupper lämnar 0 rader',
-                    })
-                    _progress(f"Backtest {ti}/{len(test_rows)} · nivå {_format_min_step_level(level)} · hoppad över")
-                continue
-
-            specs_bt = build_clean_filter_specs(
-                sim_df,
-                input_vec,
-                int(antal_matcher),
-                slider_u_count=3,
-                target_hist_pct=int(filter_hist_target_pct),
-                u_rows=None,
-                hist_df=global_db,
-                max_shock_pct=22,
-                candidate_rows=engine_rows_after_manual,
-                include_supermakro=True,
-            )
-
-            in_backtest_frame = result_in_frame(correct, engine_frame)
-            after_manual = bool(_manual_sign_groups_pass(correct, active_manual_groups)) if (in_backtest_frame and active_manual_groups) else (True if not active_manual_groups else False)
-
-            for level in levels:
-                level_settings = dict(rec_settings or {})
-                level_settings['min_step'] = float(level)
-                try:
-                    rec_result = _build_recommended_filter_packages(
-                        sim_df,
-                        specs_bt,
-                        engine_rows_after_manual,
-                        engine_frame,
-                        int(antal_matcher),
-                        min_step_reduction_pct=float(level_settings.get('min_step', 1.0)),
-                        max_filters=int(level_settings.get('max_filters', 30)),
-                        min_hit_count=min(int(level_settings.get('min_hit', 28)), int(len(sim_df))),
-                        frame_adapt=bool(level_settings.get('frame_adapt', True)),
-                        min_value_filters=int(level_settings.get('min_value_filters', 3)),
-                        required_keys=required_keys or [],
-                        target_frame_after=int(level_settings.get('display_max_rows', 5000)),
-                        progress_cb=None,
-                        manual_hist_mask=None,
-                        package_strategy=level_settings.get('package_strategy', 'balanced'),
-                    )
-                    packages_bt = rec_result[0] if isinstance(rec_result, tuple) else rec_result
-                    pkg, pkg_note = _choose_backtest_package(packages_bt, int(level_settings.get('display_max_rows', 5000)))
-                    if pkg is None:
-                        pkg_pass = False
-                        fail_reason = 'Inget paket hittades'
-                        pkg_hit = pkg_total = pkg_rows = pkg_filters = pkg_value_filters = pkg_combo = None
-                        pkg_type = '-'
-                    else:
-                        pkg_pass, fail_reason = _package_passes_row(correct, specs_bt, pkg)
-                        pkg_hit = int(pkg.get('hist_hit', 0))
-                        pkg_total = int(pkg.get('hist_total', len(sim_df)))
-                        pkg_rows = int(pkg.get('frame_after', 0))
-                        pkg_filters = int(pkg.get('num_filters', 0))
-                        pkg_value_filters = int(pkg.get('value_filters', 0))
-                        pkg_combo = int(_package_combo_lift_count(pkg))
-                        pkg_type = str(pkg.get('package_type', 'Tvingade filter'))
-                    survives = bool(pkg_pass) if package_only else bool(in_backtest_frame and after_manual and pkg_pass)
-                    detail_rows.append({
-                        'Nivå': float(level),
-                        'Nivå text': _format_min_step_level(level),
-                        'Datum': str(test_date)[:10] if test_date is not None else str(idx),
-                        'Facit': correct,
-                        'Status': 'OK',
-                        'Liknande': int(len(sim_df)),
-                        'Backtestram': frame_label,
-                        'Facit i backtestram': 'Ja' if in_backtest_frame else 'Nej',
-                        'Efter manuell': 'Ej använd' if package_only else ('Ja' if after_manual else 'Nej'),
-                        'Paket klarar facit': 'Ja' if pkg_pass else 'Nej',
-                        'Huvudresultat': 'Ja' if survives else 'Nej',
-                        'Paketträff': f"{pkg_hit}/{pkg_total}" if pkg is not None else '-',
-                        'Paketträff tal': pkg_hit if pkg_hit is not None else np.nan,
-                        'Paketrader': pkg_rows if pkg_rows is not None else np.nan,
-                        'Paketfilter': pkg_filters if pkg_filters is not None else np.nan,
-                        'Värde-/poängfilter': pkg_value_filters if pkg_value_filters is not None else np.nan,
-                        'Kombinationslyft': pkg_combo if pkg_combo is not None else 0,
-                        'Pakettyp': pkg_type,
-                        'Valprincip': pkg_note,
-                        'Orsak': 'OK' if survives else fail_reason,
-                    })
-                except Exception as e:
-                    detail_rows.append({
-                        'Nivå': float(level),
-                        'Nivå text': _format_min_step_level(level),
-                        'Datum': str(test_date)[:10] if test_date is not None else str(idx),
-                        'Facit': correct,
-                        'Status': 'Fel',
-                        'Orsak': str(e)[:220],
-                    })
-                _progress(f"Backtest {ti}/{len(test_rows)} · nivå {_format_min_step_level(level)}")
-        except Exception as e:
-            skipped += 1
-            for level in levels:
-                detail_rows.append({
-                    'Nivå': float(level),
-                    'Nivå text': _format_min_step_level(level),
-                    'Datum': str(test_date)[:10] if test_date is not None else str(idx),
-                    'Facit': correct,
-                    'Status': 'Fel',
-                    'Orsak': str(e)[:220],
-                })
-                _progress(f"Backtest {ti}/{len(test_rows)} · nivå {_format_min_step_level(level)} · fel")
-
-    detail_df = pd.DataFrame(detail_rows)
-    summary_rows = []
-    if not detail_df.empty:
-        ok_df = detail_df[detail_df.get('Status', '') == 'OK'].copy()
-        for level in levels:
-            g = ok_df[np.isclose(pd.to_numeric(ok_df.get('Nivå'), errors='coerce'), float(level), equal_nan=False)] if not ok_df.empty else pd.DataFrame()
-            tested = int(len(g))
-            hits = int((g.get('Paket klarar facit', pd.Series(dtype=str)) == 'Ja').sum()) if tested else 0
-            main_hits = int((g.get('Huvudresultat', pd.Series(dtype=str)) == 'Ja').sum()) if tested else 0
-            no_pkg = int((g.get('Orsak', pd.Series(dtype=str)) == 'Inget paket hittades').sum()) if tested else 0
-            rows_numeric = pd.to_numeric(g.get('Paketrader', pd.Series(dtype=float)), errors='coerce') if tested else pd.Series(dtype=float)
-            filters_numeric = pd.to_numeric(g.get('Paketfilter', pd.Series(dtype=float)), errors='coerce') if tested else pd.Series(dtype=float)
-            value_numeric = pd.to_numeric(g.get('Värde-/poängfilter', pd.Series(dtype=float)), errors='coerce') if tested else pd.Series(dtype=float)
-            combo_numeric = pd.to_numeric(g.get('Kombinationslyft', pd.Series(dtype=float)), errors='coerce') if tested else pd.Series(dtype=float)
-            hit_numeric = pd.to_numeric(g.get('Paketträff tal', pd.Series(dtype=float)), errors='coerce') if tested else pd.Series(dtype=float)
-            hit_dist = '-'
-            try:
-                vc = g.get('Paketträff', pd.Series(dtype=str)).value_counts(dropna=True)
-                if not vc.empty:
-                    hit_dist = ' · '.join([f"{idx}: {int(val)}" for idx, val in vc.head(4).items()])
-            except Exception:
-                pass
-            hit_pct = 100.0 * hits / max(1, tested)
-            main_pct = 100.0 * main_hits / max(1, tested)
-            med_rows = float(rows_numeric.median()) if tested and rows_numeric.notna().any() else np.nan
-            med_filters = float(filters_numeric.median()) if tested and filters_numeric.notna().any() else np.nan
-            med_value_filters = float(value_numeric.median()) if tested and value_numeric.notna().any() else np.nan
-            combo_cases = int((combo_numeric.fillna(0) > 0).sum()) if tested else 0
-            combo_case_pct = 100.0 * combo_cases / max(1, tested)
-            med_hit = float(hit_numeric.median()) if tested and hit_numeric.notna().any() else np.nan
-            summary_rows.append({
-                'Nivå': _format_min_step_level(level),
-                'Testade': tested,
-                'Facit klarar paket': f"{hits}/{tested}" if tested else '0/0',
-                'Facit %': round(hit_pct, 1) if tested else 0.0,
-                'Huvudresultat %': round(main_pct, 1) if tested else 0.0,
-                'Median paketrader': int(round(med_rows)) if np.isfinite(med_rows) else '-',
-                'Median filter': round(med_filters, 1) if np.isfinite(med_filters) else '-',
-                'Median värdefilter': round(med_value_filters, 1) if np.isfinite(med_value_filters) else '-',
-                'Median paketträff': round(med_hit, 1) if np.isfinite(med_hit) else '-',
-                'Kombinationsfall': f"{combo_cases}/{tested} ({combo_case_pct:.1f}%)" if tested else '0/0',
-                'Inget paket': no_pkg,
-                'Paketträff-fördelning': hit_dist,
-            })
-    summary_df = pd.DataFrame(summary_rows)
-    if not summary_df.empty:
-        try:
-            # Bäst nivå = högst facitträff, sedan lägst medianrader, sedan färre filter.
-            sortable = summary_df.copy()
-            sortable['_rows_sort'] = pd.to_numeric(sortable['Median paketrader'], errors='coerce').fillna(10**12)
-            sortable['_filters_sort'] = pd.to_numeric(sortable['Median filter'], errors='coerce').fillna(10**12)
-            sortable['_tested_sort'] = pd.to_numeric(sortable['Testade'], errors='coerce').fillna(0)
-            sortable = sortable.sort_values(['Facit %', '_tested_sort', '_rows_sort', '_filters_sort'], ascending=[False, False, True, True])
-            best_level = str(sortable.iloc[0]['Nivå']) if len(sortable) else ''
-        except Exception:
-            best_level = ''
-    else:
-        best_level = ''
-    meta = {
-        'requested': int(len(test_rows)),
-        'skipped': int(skipped),
-        'levels': [_format_min_step_level(x) for x in levels],
-        'mode': str(mode),
-        'top_n': int(top_n),
-        'pay_min': int(pay_min),
-        'pay_max': int(pay_max),
-        'test_scope': 'package_only' if package_only else 'current_full_flow',
-        'best_level': best_level,
-    }
-    return detail_df, summary_df, meta
-
-
-
-def _run_package_strategy_compare_backtest(global_db, frame, manual_sign_groups, antal_matcher, top_n, pay_min, pay_max, filter_hist_target_pct, rec_settings, strategies=None, required_keys=None, max_tests=5, mode='leave-one-out', progress_cb=None, test_scope='package_only'):
-    """Jämför flera paketstrategier på exakt samma historiska testfall.
-
-    Varje testomgång, liknande historik, backtestram och filterdefinition byggs en gång.
-    Sedan körs paketmotorn för respektive strategi. Det gör A/B-testet rättvist:
-    samma input, samma budget, samma träffmål, olika prioriteringsordning.
-    """
-    if strategies is None:
-        strategies = ['balanced', 'profile_first', 'profile_then_structure']
-    strategies = [_package_strategy_key(x) for x in strategies]
-    strategies = list(dict.fromkeys(strategies))
-    if not isinstance(global_db, pd.DataFrame) or global_db.empty:
-        return pd.DataFrame(), pd.DataFrame(), {'error': 'Ingen historikdatabas laddad.'}
-    try:
-        db = global_db.copy()
-        if 'Payout' in db.columns:
-            db = db[(pd.to_numeric(db['Payout'], errors='coerce').fillna(0) >= int(pay_min)) & (pd.to_numeric(db['Payout'], errors='coerce').fillna(0) <= int(pay_max))]
-        db['_bt_row_ok'] = db['Correct_Row'].apply(lambda r: len(normalize_single_row_text(r)) == int(antal_matcher))
-        db['_bt_vec_ok'] = db['Prob_Vector'].apply(lambda v: isinstance(v, list) and len(v) == int(antal_matcher) * 3)
-        db = db[db['_bt_row_ok'] & db['_bt_vec_ok']].copy()
-    except Exception as e:
-        return pd.DataFrame(), pd.DataFrame(), {'error': f'Kunde inte förbereda historik: {e}'}
-    if db.empty:
-        return pd.DataFrame(), pd.DataFrame(), {'error': 'Inga giltiga historiska omgångar att testa.'}
-
-    if 'Datum' in db.columns:
-        try:
-            db['_bt_date'] = pd.to_datetime(db['Datum'], errors='coerce')
-            db = db.sort_values('_bt_date', ascending=False, na_position='last')
-        except Exception:
-            pass
-    else:
-        db = db.sort_index(ascending=False)
-
-    package_only = str(test_scope or 'package_only') == 'package_only'
-    active_manual_groups_current = _normalize_manual_sign_groups(manual_sign_groups or [], antal_matcher)
-    test_rows = list(db.iterrows())[:int(max_tests)]
-    detail_rows = []
-    skipped = 0
-    total_steps = max(1, len(test_rows) * max(1, len(strategies)))
-    done_steps = 0
-
-    def _progress(label):
-        nonlocal done_steps
-        done_steps = min(total_steps, done_steps + 1)
-        if progress_cb is not None:
-            try:
-                progress_cb(done_steps, total_steps, label)
-            except Exception:
-                pass
-
-    for ti, (idx, test_row) in enumerate(test_rows, 1):
-        correct = normalize_single_row_text(test_row.get('Correct_Row', ''))
-        input_vec = test_row.get('Prob_Vector', [])
-        test_date = test_row.get('Datum', None)
-        sim_df = _similar_history_for_backtest(
-            global_db,
-            input_vec,
-            antal_matcher,
-            top_n=int(top_n),
-            pay_min=int(pay_min),
-            pay_max=int(pay_max),
-            exclude_index=idx,
-            mode=mode,
-            test_date=test_date,
-        )
-        if len(sim_df) < max(10, min(int(top_n), 20)):
-            skipped += 1
-            for strategy in strategies:
-                detail_rows.append({
-                    'Strategi': _package_strategy_label(strategy),
-                    'Strateginyckel': strategy,
-                    'Datum': str(test_date)[:10] if test_date is not None else str(idx),
-                    'Facit': correct,
-                    'Status': 'Hoppad över',
-                    'Orsak': f'För få liknande/priorhistoriska omgångar ({len(sim_df)})',
-                })
-                _progress(f"Strategijämförelse {ti}/{len(test_rows)} · {_package_strategy_label(strategy)} · hoppad över")
-            continue
-
-        try:
-            if package_only:
-                engine_frame = _ranked_frame_like_widths(frame, input_vec, antal_matcher)
-                active_manual_groups = []
-                frame_label = 'Auto-rankad breddram'
-            else:
-                engine_frame = frame
-                active_manual_groups = active_manual_groups_current
-                frame_label = 'Aktuell grundram'
-
-            engine_frame_rows, _, ok, msg = generate_rows_from_frame(engine_frame, max_rows=None)
-            if not ok:
-                skipped += 1
-                for strategy in strategies:
-                    detail_rows.append({
-                        'Strategi': _package_strategy_label(strategy),
-                        'Strateginyckel': strategy,
-                        'Datum': str(test_date)[:10] if test_date is not None else str(idx),
-                        'Facit': correct,
-                        'Status': 'Hoppad över',
-                        'Orsak': f'Kunde inte skapa backtestram: {msg}',
-                    })
-                    _progress(f"Strategijämförelse {ti}/{len(test_rows)} · {_package_strategy_label(strategy)} · hoppad över")
-                continue
-
-            engine_rows_after_manual = _apply_manual_sign_groups_to_rows(engine_frame_rows, active_manual_groups, antal_matcher)
-            if not engine_rows_after_manual:
-                skipped += 1
-                for strategy in strategies:
-                    detail_rows.append({
-                        'Strategi': _package_strategy_label(strategy),
-                        'Strateginyckel': strategy,
-                        'Datum': str(test_date)[:10] if test_date is not None else str(idx),
-                        'Facit': correct,
-                        'Status': 'Hoppad över',
-                        'Orsak': 'Backtestram/manuella teckengrupper lämnar 0 rader',
-                    })
-                    _progress(f"Strategijämförelse {ti}/{len(test_rows)} · {_package_strategy_label(strategy)} · hoppad över")
-                continue
-
-            specs_bt = build_clean_filter_specs(
-                sim_df,
-                input_vec,
-                int(antal_matcher),
-                slider_u_count=3,
-                target_hist_pct=int(filter_hist_target_pct),
-                u_rows=None,
-                hist_df=global_db,
-                max_shock_pct=22,
-                candidate_rows=engine_rows_after_manual,
-                include_supermakro=True,
-            )
-
-            in_backtest_frame = result_in_frame(correct, engine_frame)
-            after_manual = bool(_manual_sign_groups_pass(correct, active_manual_groups)) if (in_backtest_frame and active_manual_groups) else (True if not active_manual_groups else False)
-
-            for strategy in strategies:
-                try:
-                    strategy_settings = dict(rec_settings or {})
-                    strategy_settings['package_strategy'] = strategy
-                    rec_result = _build_recommended_filter_packages(
-                        sim_df,
-                        specs_bt,
-                        engine_rows_after_manual,
-                        engine_frame,
-                        int(antal_matcher),
-                        min_step_reduction_pct=float(strategy_settings.get('min_step', 1.0)),
-                        max_filters=int(strategy_settings.get('max_filters', 30)),
-                        min_hit_count=min(int(strategy_settings.get('min_hit', 28)), int(len(sim_df))),
-                        frame_adapt=bool(strategy_settings.get('frame_adapt', True)),
-                        min_value_filters=int(strategy_settings.get('min_value_filters', 3)),
-                        required_keys=required_keys or [],
-                        target_frame_after=int(strategy_settings.get('display_max_rows', 5000)),
-                        progress_cb=None,
-                        manual_hist_mask=None,
-                        package_strategy=strategy,
-                    )
-                    packages_bt = rec_result[0] if isinstance(rec_result, tuple) else rec_result
-                    pkg, pkg_note = _choose_backtest_package(packages_bt, int(strategy_settings.get('display_max_rows', 5000)))
-                    if pkg is None:
-                        pkg_pass = False
-                        fail_reason = 'Inget paket hittades'
-                        pkg_hit = pkg_total = pkg_rows = pkg_filters = pkg_value_filters = pkg_fat_filters = pkg_structure_filters = pkg_combo = None
-                        pkg_type = '-'
-                    else:
-                        pkg_pass, fail_reason = _package_passes_row(correct, specs_bt, pkg)
-                        pkg_hit = int(pkg.get('hist_hit', 0))
-                        pkg_total = int(pkg.get('hist_total', len(sim_df)))
-                        pkg_rows = int(pkg.get('frame_after', 0))
-                        pkg_filters = int(pkg.get('num_filters', 0))
-                        pkg_value_filters = int(pkg.get('value_filters', 0))
-                        pkg_fat_filters = int(pkg.get('fat_filters', 0))
-                        pkg_structure_filters = int(pkg.get('structure_filters', 0))
-                        pkg_combo = int(_package_combo_lift_count(pkg))
-                        pkg_type = str(pkg.get('package_type', 'Tvingade filter'))
-                    survives = bool(pkg_pass) if package_only else bool(in_backtest_frame and after_manual and pkg_pass)
-                    detail_rows.append({
-                        'Strategi': _package_strategy_label(strategy),
-                        'Strateginyckel': strategy,
-                        'Datum': str(test_date)[:10] if test_date is not None else str(idx),
-                        'Facit': correct,
-                        'Status': 'OK',
-                        'Liknande': int(len(sim_df)),
-                        'Backtestram': frame_label,
-                        'Facit i backtestram': 'Ja' if in_backtest_frame else 'Nej',
-                        'Efter manuell': 'Ej använd' if package_only else ('Ja' if after_manual else 'Nej'),
-                        'Paket klarar facit': 'Ja' if pkg_pass else 'Nej',
-                        'Huvudresultat': 'Ja' if survives else 'Nej',
-                        'Paketträff': f"{pkg_hit}/{pkg_total}" if pkg is not None else '-',
-                        'Paketträff tal': pkg_hit if pkg_hit is not None else np.nan,
-                        'Paketrader': pkg_rows if pkg_rows is not None else np.nan,
-                        'Paketfilter': pkg_filters if pkg_filters is not None else np.nan,
-                        'Värde-/poängfilter': pkg_value_filters if pkg_value_filters is not None else np.nan,
-                        'FAT-filter': pkg_fat_filters if pkg_fat_filters is not None else np.nan,
-                        'Strukturfilter': pkg_structure_filters if pkg_structure_filters is not None else np.nan,
-                        'Kombinationslyft': pkg_combo if pkg_combo is not None else 0,
-                        'Pakettyp': pkg_type,
-                        'Valprincip': pkg_note,
-                        'Orsak': 'OK' if survives else fail_reason,
-                    })
-                except Exception as e:
-                    detail_rows.append({
-                        'Strategi': _package_strategy_label(strategy),
-                        'Strateginyckel': strategy,
-                        'Datum': str(test_date)[:10] if test_date is not None else str(idx),
-                        'Facit': correct,
-                        'Status': 'Fel',
-                        'Orsak': str(e)[:220],
-                    })
-                _progress(f"Strategijämförelse {ti}/{len(test_rows)} · {_package_strategy_label(strategy)}")
-        except Exception as e:
-            skipped += 1
-            for strategy in strategies:
-                detail_rows.append({
-                    'Strategi': _package_strategy_label(strategy),
-                    'Strateginyckel': strategy,
-                    'Datum': str(test_date)[:10] if test_date is not None else str(idx),
-                    'Facit': correct,
-                    'Status': 'Fel',
-                    'Orsak': str(e)[:220],
-                })
-                _progress(f"Strategijämförelse {ti}/{len(test_rows)} · {_package_strategy_label(strategy)} · fel")
-
-    detail_df = pd.DataFrame(detail_rows)
-    summary_rows = []
-    if not detail_df.empty:
-        ok_df = detail_df[detail_df.get('Status', '') == 'OK'].copy()
-        for strategy in strategies:
-            label = _package_strategy_label(strategy)
-            g = ok_df[ok_df.get('Strateginyckel', '') == strategy] if not ok_df.empty else pd.DataFrame()
-            tested = int(len(g))
-            hits = int((g.get('Paket klarar facit', pd.Series(dtype=str)) == 'Ja').sum()) if tested else 0
-            main_hits = int((g.get('Huvudresultat', pd.Series(dtype=str)) == 'Ja').sum()) if tested else 0
-            no_pkg = int((g.get('Orsak', pd.Series(dtype=str)) == 'Inget paket hittades').sum()) if tested else 0
-            rows_numeric = pd.to_numeric(g.get('Paketrader', pd.Series(dtype=float)), errors='coerce') if tested else pd.Series(dtype=float)
-            filters_numeric = pd.to_numeric(g.get('Paketfilter', pd.Series(dtype=float)), errors='coerce') if tested else pd.Series(dtype=float)
-            value_numeric = pd.to_numeric(g.get('Värde-/poängfilter', pd.Series(dtype=float)), errors='coerce') if tested else pd.Series(dtype=float)
-            fat_numeric = pd.to_numeric(g.get('FAT-filter', pd.Series(dtype=float)), errors='coerce') if tested else pd.Series(dtype=float)
-            structure_numeric = pd.to_numeric(g.get('Strukturfilter', pd.Series(dtype=float)), errors='coerce') if tested else pd.Series(dtype=float)
-            combo_numeric = pd.to_numeric(g.get('Kombinationslyft', pd.Series(dtype=float)), errors='coerce') if tested else pd.Series(dtype=float)
-            hit_numeric = pd.to_numeric(g.get('Paketträff tal', pd.Series(dtype=float)), errors='coerce') if tested else pd.Series(dtype=float)
-            hit_pct = 100.0 * hits / max(1, tested)
-            main_pct = 100.0 * main_hits / max(1, tested)
-            med_rows = float(rows_numeric.median()) if tested and rows_numeric.notna().any() else np.nan
-            med_filters = float(filters_numeric.median()) if tested and filters_numeric.notna().any() else np.nan
-            med_value = float(value_numeric.median()) if tested and value_numeric.notna().any() else np.nan
-            med_fat = float(fat_numeric.median()) if tested and fat_numeric.notna().any() else np.nan
-            med_structure = float(structure_numeric.median()) if tested and structure_numeric.notna().any() else np.nan
-            med_hit = float(hit_numeric.median()) if tested and hit_numeric.notna().any() else np.nan
-            combo_cases = int((combo_numeric.fillna(0) > 0).sum()) if tested else 0
-            summary_rows.append({
-                'Strategi': label,
-                'Testade': tested,
-                'Facit klarar paket': f"{hits}/{tested}" if tested else '0/0',
-                'Facit %': round(hit_pct, 1) if tested else 0.0,
-                'Huvudresultat %': round(main_pct, 1) if tested else 0.0,
-                'Median paketrader': int(round(med_rows)) if np.isfinite(med_rows) else '-',
-                'Median filter': round(med_filters, 1) if np.isfinite(med_filters) else '-',
-                'Median värde': round(med_value, 1) if np.isfinite(med_value) else '-',
-                'Median FAT': round(med_fat, 1) if np.isfinite(med_fat) else '-',
-                'Median struktur': round(med_structure, 1) if np.isfinite(med_structure) else '-',
-                'Median paketträff': round(med_hit, 1) if np.isfinite(med_hit) else '-',
-                'Kombinationsfall': f"{combo_cases}/{tested}" if tested else '0/0',
-                'Inget paket': no_pkg,
-            })
-    summary_df = pd.DataFrame(summary_rows)
-    best_strategy = ''
-    if not summary_df.empty:
-        try:
-            sortable = summary_df.copy()
-            sortable['_rows_sort'] = pd.to_numeric(sortable['Median paketrader'], errors='coerce').fillna(10**12)
-            sortable['_filters_sort'] = pd.to_numeric(sortable['Median filter'], errors='coerce').fillna(10**12)
-            sortable['_profile_sort'] = pd.to_numeric(sortable['Median värde'], errors='coerce').fillna(0) + pd.to_numeric(sortable['Median FAT'], errors='coerce').fillna(0)
-            sortable['_structure_sort'] = pd.to_numeric(sortable['Median struktur'], errors='coerce').fillna(10**12)
-            sortable = sortable.sort_values(['Facit %', '_rows_sort', '_profile_sort', '_structure_sort', '_filters_sort'], ascending=[False, True, False, True, True])
-            best_strategy = str(sortable.iloc[0]['Strategi']) if len(sortable) else ''
-        except Exception:
-            best_strategy = ''
-    meta = {
-        'requested': int(len(test_rows)),
-        'skipped': int(skipped),
-        'strategies': [_package_strategy_label(x) for x in strategies],
-        'mode': str(mode),
-        'top_n': int(top_n),
-        'pay_min': int(pay_min),
-        'pay_max': int(pay_max),
-        'test_scope': 'package_only' if package_only else 'current_full_flow',
-        'best_strategy': best_strategy,
-    }
-    return detail_df, summary_df, meta
-
-
 def _package_value_score(p):
     """Spelvärdespoäng för rekommenderade paket.
 
@@ -8600,7 +7880,6 @@ def _recommended_packages_summary_df(packages, package_index_map=None):
             'FAT/sekvens': int(p.get('fat_filters', 0)),
             'Struktur': int(p.get('structure_filters', 0)),
             'Spelvärde': f"{_package_value_score(p):.0f}",
-            'Strategi': p.get('package_strategy_label', _package_strategy_label(p.get('package_strategy', 'balanced'))),
             'Sökmål': p.get('target_label', ''),
         })
     return pd.DataFrame(rows)
@@ -9152,8 +8431,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         default_rec_display_max_rows = int(st.session_state.get("v12_matrix_limit", 5000))
         default_rec_frame_adapt = True
         default_rec_min_value_filters = 3
-        default_rec_package_strategy = 'Spelprofil först'
-        if st.session_state.get("v12_pkg_defaults_version") != "v12.0cg":
+        if st.session_state.get("v12_pkg_defaults_version") != "v12.0bw":
             if "v12_rec_min_hit" not in st.session_state or int(st.session_state.get("v12_rec_min_hit", 22)) <= 22:
                 st.session_state["v12_rec_min_hit"] = default_rec_min_hit
             st.session_state.setdefault("v12_rec_min_step", default_rec_min_step)
@@ -9161,32 +8439,21 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             st.session_state.setdefault("v12_rec_display_max_rows", default_rec_display_max_rows)
             st.session_state.setdefault("v12_rec_frame_adapt", default_rec_frame_adapt)
             st.session_state.setdefault("v12_rec_min_value_filters", default_rec_min_value_filters)
-            st.session_state.setdefault("v12_rec_package_strategy", default_rec_package_strategy)
-            st.session_state["v12_pkg_defaults_version"] = "v12.0cg"
+            st.session_state["v12_pkg_defaults_version"] = "v12.0bw"
 
         with st.form("v12_recommended_package_engine_form"):
-            st.caption("Paketmotorns standard är nu: strategi Spelprofil först, sök ner till 28/30, max 30 filter, minsta extra reducering per paketsteg 1,00, anpassa mot grundram och minst 3 värde-/poängfilter. Ändra flera saker och tryck Beräkna paket en gång.")
-            strategy_options = list(_package_strategy_options().values())
-            current_strategy_label = _package_strategy_label(st.session_state.get("v12_rec_package_strategy", default_rec_package_strategy))
-            rec_package_strategy_label = st.selectbox(
-                "Paketstrategi",
-                strategy_options,
-                index=strategy_options.index(current_strategy_label) if current_strategy_label in strategy_options else strategy_options.index('Spelprofil först'),
-                key="v12_rec_package_strategy",
-                help="Balanserad = nuvarande motor. Spelprofil först prioriterar Värde & svårighet, FAT, FAT-sekvenser och Favorit & skräll före struktur. Strukturtrim sist bygger först spelprofil och använder struktur mer som eftertrim.",
-            )
-            rec_package_strategy_key = _package_strategy_key(rec_package_strategy_label)
+            st.caption("Paketmotorns standard är nu: sök ner till 28/30, max 30 filter, minsta extra reducering 1,00, anpassa mot grundram och minst 3 värde-/poängfilter. Ändra flera saker och tryck Beräkna paket en gång.")
             rp_c1, rp_c2, rp_c3, rp_c4, rp_c5, rp_c6 = st.columns([1, 1, 1, 1, 1, 1])
             with rp_c1:
                 rec_min_step = st.number_input(
-                    "Minsta extra reducering per paketsteg",
+                    "Minsta extra reducering",
                     min_value=0.5,
                     max_value=20.0,
                     value=float(st.session_state.get("v12_rec_min_step", default_rec_min_step)),
                     step=0.25,
                     format="%.2f",
                     key="v12_rec_min_step",
-                    help="Minsta extra reducering i procent som ett nytt paketsteg måste ge. Ett paketsteg kan vara ett enskilt filter eller ett kombinationslyft med två filter. Därför kan två filter under gränsen ändå väljas om paret tillsammans passerar gränsen.",
+                    help="Gäller främst efter att värdekärnan är byggd. Värde-/poängfilter som behövs för kvoten får läggas till med lägre marginalkrav om de håller samlad träff.",
                 )
             with rp_c2:
                 rec_max_filters = st.number_input("Max filter i paket", min_value=1, max_value=40, value=int(st.session_state.get("v12_rec_max_filters", default_rec_max_filters)), step=1, key="v12_rec_max_filters")
@@ -9246,7 +8513,6 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 target_frame_after=int(rec_display_max_rows),
                 progress_cb=_ui_package_progress,
                 manual_hist_mask=None,
-                package_strategy=rec_package_strategy_key,
             )
             if isinstance(rec_result, tuple):
                 packages, candidate_audit = rec_result
@@ -9271,8 +8537,6 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 'display_max_rows': int(rec_display_max_rows),
                 'frame_adapt': bool(rec_frame_adapt),
                 'min_value_filters': int(rec_min_value_filters),
-                'package_strategy': rec_package_strategy_key,
-                'package_strategy_label': _package_strategy_label(rec_package_strategy_key),
                 'required_keys': list(required_keys_now),
             }
         packages = st.session_state.get('v12_recommended_packages') or []
@@ -9384,7 +8648,6 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                             'display_max_rows': int(bt_display_rows),
                             'frame_adapt': bool(st.session_state.get('v12_rec_frame_adapt', rec_frame_adapt)),
                             'min_value_filters': int(st.session_state.get('v12_rec_min_value_filters', rec_min_value_filters)),
-                            'package_strategy': _package_strategy_key(st.session_state.get('v12_rec_package_strategy', rec_package_strategy_label)),
                         }
                         bt_df, bt_meta = _run_package_engine_backtest(
                             db_bt,
@@ -9427,181 +8690,6 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                             st.info(f"Backtestresultat: {main_hits}/{tested} ({main_pct:.1f}%) historiska facit överlevde aktuell grundram + manuell teckengrupp + valt rekommenderat paket. Detta läge är bara diagnostiskt för dagens kupong.")
                     st.dataframe(bt_df_show, use_container_width=True, hide_index=True)
                     st.caption('Standardläget testar paketfiltren. Backtestramen är auto-rankad efter testkupongens streck och samma breddmönster som din grundram, så gamla facit testas inte mot dagens specifika matchtecken.')
-
-                st.divider()
-                st.markdown('**Inställningsbacktest: minsta extra reducering per paketsteg**')
-                st.caption('Testar flera nivåer mot samma historiska fall. Ett paketsteg kan vara ett enskilt filter eller ett kombinationslyft med två filter. Därför kan nivå 10 ändå välja två filter som var för sig ligger under 10 %, om paret tillsammans reducerar över gränsen.')
-                sw_c1, sw_c2 = st.columns([1.5, 1])
-                with sw_c1:
-                    sweep_levels_txt = st.text_input(
-                        'Nivåer att testa',
-                        value=str(st.session_state.get('v12_min_step_sweep_levels', '1, 3, 5, 7.5, 10, 12.5, 15')),
-                        key='v12_min_step_sweep_levels',
-                        help='Skriv nivåer i procent, separerade med komma eller mellanslag. Exempel: 1, 3, 5, 7.5, 10, 12.5, 15.',
-                    )
-                with sw_c2:
-                    sweep_cases = st.number_input(
-                        'Antal omgångar per nivå',
-                        min_value=3,
-                        max_value=30,
-                        value=int(st.session_state.get('v12_min_step_sweep_cases', min(5, int(bt_cases)))),
-                        step=1,
-                        key='v12_min_step_sweep_cases',
-                        help='Varje extra nivå multiplicerar tiden. Börja med 3–5 och kör fler när du jämför finalnivåer.',
-                    )
-                run_sweep_bt = st.button('Testa nivåer för minsta extra reducering', use_container_width=True, key='v12_run_min_step_sweep_backtest')
-                if run_sweep_bt:
-                    db_path_bt = find_local_database(spelform)
-                    if not db_path_bt:
-                        st.error('Hittade ingen historikfil för inställningsbacktest.')
-                    else:
-                        sweep_levels = _parse_min_step_levels(sweep_levels_txt)
-                        db_bt = load_database(db_path_bt, antal_matcher)
-                        sweep_progress = st.progress(0, text='Startar inställningsbacktest...')
-                        sweep_status = st.empty()
-                        sweep_start = time.time()
-                        def _sweep_progress(done, total, label):
-                            try:
-                                pct = int(max(0, min(100, round(100 * int(done) / max(1, int(total))))))
-                                sweep_progress.progress(pct, text=f'{label} · {pct}%')
-                                elapsed = time.time() - sweep_start
-                                sweep_status.caption(f'Förfluten tid: {_fmt_elapsed(elapsed)} · nivåer: {", ".join(_format_min_step_level(x) for x in sweep_levels)}')
-                            except Exception:
-                                pass
-                        bt_display_rows = int(rec_display_max_rows) if bool(bt_require_budget) else 10**12
-                        sweep_settings = {
-                            'min_step': float(st.session_state.get('v12_rec_min_step', rec_min_step)),
-                            'max_filters': int(st.session_state.get('v12_rec_max_filters', rec_max_filters)),
-                            'min_hit': int(st.session_state.get('v12_rec_min_hit', rec_min_hit)),
-                            'display_max_rows': int(bt_display_rows),
-                            'frame_adapt': bool(st.session_state.get('v12_rec_frame_adapt', rec_frame_adapt)),
-                            'min_value_filters': int(st.session_state.get('v12_rec_min_value_filters', rec_min_value_filters)),
-                            'package_strategy': _package_strategy_key(st.session_state.get('v12_rec_package_strategy', rec_package_strategy_label)),
-                        }
-                        sweep_detail, sweep_summary, sweep_meta = _run_min_step_sweep_backtest(
-                            db_bt,
-                            frame,
-                            manual_sign_groups,
-                            int(antal_matcher),
-                            int(top_n),
-                            int(pay_min),
-                            int(pay_max),
-                            int(filter_hist_target_pct),
-                            sweep_settings,
-                            sweep_levels,
-                            required_keys=required_keys_now,
-                            max_tests=int(sweep_cases),
-                            mode='kronologiskt' if str(bt_mode).lower().startswith('krono') else 'leave-one-out',
-                            progress_cb=_sweep_progress,
-                            test_scope='current_full_flow' if str(bt_scope).startswith('Fullt') else 'package_only',
-                        )
-                        sweep_progress.progress(100, text=f'Inställningsbacktest klart på {_fmt_elapsed(time.time() - sweep_start)}')
-                        st.session_state['v12_min_step_sweep_detail'] = sweep_detail
-                        st.session_state['v12_min_step_sweep_summary'] = sweep_summary
-                        st.session_state['v12_min_step_sweep_meta'] = sweep_meta
-                sweep_summary_show = st.session_state.get('v12_min_step_sweep_summary')
-                sweep_detail_show = st.session_state.get('v12_min_step_sweep_detail')
-                sweep_meta_show = st.session_state.get('v12_min_step_sweep_meta') or {}
-                if isinstance(sweep_summary_show, pd.DataFrame) and not sweep_summary_show.empty:
-                    if sweep_meta_show.get('error'):
-                        st.error(sweep_meta_show.get('error'))
-                    best_level = str(sweep_meta_show.get('best_level', '') or '')
-                    if best_level:
-                        st.success(f"Preliminärt bäst nivå i detta test: {best_level}. Sortering: högst facitträff, därefter lägst medianrader och färre filter.")
-                    st.dataframe(sweep_summary_show, use_container_width=True, hide_index=True)
-                    st.caption('Använd detta som jämförelsetest, inte absolut sanning. Kör gärna 10–20 omgångar när du jämför två–tre slutkandidater, eftersom få testfall kan ge brus.')
-                    if isinstance(sweep_detail_show, pd.DataFrame) and not sweep_detail_show.empty:
-                        with st.expander('Visa detaljer per nivå och historisk omgång', expanded=False):
-                            st.dataframe(sweep_detail_show, use_container_width=True, hide_index=True)
-
-                st.divider()
-                st.markdown('**Strategijämförelse: nuvarande mot spelprofil först**')
-                st.caption('A/B-testar paketstrategier på exakt samma historiska omgångar. Samma streck, samma liknande historik, samma utdelningsintervall, samma radbudget och samma träffmål. Det här är rätt sätt att se om spelprofil först faktiskt slår nuvarande motor.')
-                sc_c1, sc_c2 = st.columns([1, 2])
-                with sc_c1:
-                    strategy_cases = st.number_input(
-                        'Antal omgångar i strategitest',
-                        min_value=3,
-                        max_value=30,
-                        value=int(st.session_state.get('v12_strategy_compare_cases', min(5, int(bt_cases)))),
-                        step=1,
-                        key='v12_strategy_compare_cases',
-                        help='Börja med 3–5 eftersom varje omgång kör flera paketmotorer. Kör fler när du jämför finalstrategi.',
-                    )
-                with sc_c2:
-                    strategy_labels_selected = st.multiselect(
-                        'Strategier att jämföra',
-                        list(_package_strategy_options().values()),
-                        default=st.session_state.get('v12_strategy_compare_labels', ['Balanserad (nuvarande)', 'Spelprofil först', 'Spelprofil först + strukturtrim sist']),
-                        key='v12_strategy_compare_labels',
-                        help='Minst två strategier rekommenderas. Balanserad är gamla/nuvarande prioriteringen.',
-                    )
-                run_strategy_bt = st.button('Jämför paketstrategier', use_container_width=True, key='v12_run_strategy_compare_backtest')
-                if run_strategy_bt:
-                    db_path_bt = find_local_database(spelform)
-                    if not db_path_bt:
-                        st.error('Hittade ingen historikfil för strategijämförelse.')
-                    else:
-                        strategy_keys = [_package_strategy_key(x) for x in (strategy_labels_selected or [])]
-                        if len(set(strategy_keys)) < 2:
-                            st.error('Välj minst två strategier att jämföra.')
-                        else:
-                            db_bt = load_database(db_path_bt, antal_matcher)
-                            strategy_progress = st.progress(0, text='Startar strategijämförelse...')
-                            strategy_status = st.empty()
-                            strategy_start = time.time()
-                            def _strategy_progress(done, total, label):
-                                try:
-                                    pct = int(max(0, min(100, round(100 * int(done) / max(1, int(total))))))
-                                    strategy_progress.progress(pct, text=f'{label} · {pct}%')
-                                    elapsed = time.time() - strategy_start
-                                    strategy_status.caption(f'Förfluten tid: {_fmt_elapsed(elapsed)} · strategier: {", ".join(_package_strategy_label(x) for x in strategy_keys)}')
-                                except Exception:
-                                    pass
-                            bt_display_rows = int(rec_display_max_rows) if bool(bt_require_budget) else 10**12
-                            strategy_settings = {
-                                'min_step': float(st.session_state.get('v12_rec_min_step', rec_min_step)),
-                                'max_filters': int(st.session_state.get('v12_rec_max_filters', rec_max_filters)),
-                                'min_hit': int(st.session_state.get('v12_rec_min_hit', rec_min_hit)),
-                                'display_max_rows': int(bt_display_rows),
-                                'frame_adapt': bool(st.session_state.get('v12_rec_frame_adapt', rec_frame_adapt)),
-                                'min_value_filters': int(st.session_state.get('v12_rec_min_value_filters', rec_min_value_filters)),
-                            }
-                            strat_detail, strat_summary, strat_meta = _run_package_strategy_compare_backtest(
-                                db_bt,
-                                frame,
-                                manual_sign_groups,
-                                int(antal_matcher),
-                                int(top_n),
-                                int(pay_min),
-                                int(pay_max),
-                                int(filter_hist_target_pct),
-                                strategy_settings,
-                                strategy_keys,
-                                required_keys=required_keys_now,
-                                max_tests=int(strategy_cases),
-                                mode='kronologiskt' if str(bt_mode).lower().startswith('krono') else 'leave-one-out',
-                                progress_cb=_strategy_progress,
-                                test_scope='current_full_flow' if str(bt_scope).startswith('Fullt') else 'package_only',
-                            )
-                            strategy_progress.progress(100, text=f'Strategijämförelse klar på {_fmt_elapsed(time.time() - strategy_start)}')
-                            st.session_state['v12_strategy_compare_detail'] = strat_detail
-                            st.session_state['v12_strategy_compare_summary'] = strat_summary
-                            st.session_state['v12_strategy_compare_meta'] = strat_meta
-                strat_summary_show = st.session_state.get('v12_strategy_compare_summary')
-                strat_detail_show = st.session_state.get('v12_strategy_compare_detail')
-                strat_meta_show = st.session_state.get('v12_strategy_compare_meta') or {}
-                if isinstance(strat_summary_show, pd.DataFrame) and not strat_summary_show.empty:
-                    if strat_meta_show.get('error'):
-                        st.error(strat_meta_show.get('error'))
-                    best_strategy = str(strat_meta_show.get('best_strategy', '') or '')
-                    if best_strategy:
-                        st.success(f'Preliminärt bäst strategi i detta test: {best_strategy}. Sortering: högst facitträff, därefter lägst medianrader, fler spelprofilfilter och färre strukturfilter.')
-                    st.dataframe(strat_summary_show, use_container_width=True, hide_index=True)
-                    st.caption('Facit % är huvudmåttet. Om två strategier är lika där: välj den med lägre medianrader, fler värde/FAT-filter och färre strukturfilter.')
-                    if isinstance(strat_detail_show, pd.DataFrame) and not strat_detail_show.empty:
-                        with st.expander('Visa detaljer per strategi och historisk omgång', expanded=False):
-                            st.dataframe(strat_detail_show, use_container_width=True, hide_index=True)
 
             if visible_packages:
                 # v12.0bu: alla spelbara paket under radgränsen ska kunna väljas,
