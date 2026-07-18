@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0ck – Spelprofil först 5 synlig fix"
+APP_VERSION = "v12.0cl – Strukturtrim och måste-ingå-fix"
 
 
 st.markdown("""
@@ -6959,7 +6959,7 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
         return [], pd.DataFrame()
     required_keys = set(required_keys or [])
     package_strategy = str(package_strategy or 'profile_first').strip().lower()
-    if package_strategy not in {'profile_first', 'balanced'}:
+    if package_strategy not in {'profile_first', 'profile_then_structure', 'balanced'}:
         package_strategy = 'profile_first'
     profile_categories = {'Värde & svårighet', 'FAT', 'FAT-sekvenser', 'Favorit & skräll'}
     try:
@@ -7162,6 +7162,19 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                     continue
                 step_red_pct = 100.0 * (cur_frame_count - new_frame_count) / max(1, cur_frame_count)
                 is_value = str(cand.get('category', '')) == 'Värde & svårighet'
+                cand_category = str(cand.get('category', ''))
+                is_profile_category = cand_category in profile_categories
+
+                # Strategi: spelprofil först + strukturtrim sist.
+                # I detta läge får struktur/övrigt inte dominera paketbygget från start.
+                # De släpps in först när värdekärnan är uppfylld och paketet fortfarande
+                # ligger över användarens radbudget, eller om filtret uttryckligen är
+                # markerat som måste ingå.
+                if package_strategy == 'profile_then_structure' and (not is_profile_category) and cand.get('key') not in required_keys:
+                    if value_count_now < int(min_value_filters):
+                        continue
+                    if target_frame_after is None or cur_frame_count <= int(target_frame_after):
+                        continue
 
                 # Värde-/poängfilter ska kunna bilda en värdekärna.
                 # Om användaren kräver minst t.ex. 3 värdefilter men varje filter måste ge 5%
@@ -7257,8 +7270,14 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             pair_min_step = max(1.0, float(min_step_reduction_pct) * 1.10)
             if required_keys and target_frame_after is not None and cur_frame_count > int(target_frame_after):
                 pair_min_step = min(pair_min_step, 0.75)
+            pair_candidates = candidates
+            if package_strategy == 'profile_then_structure':
+                # Parlyft får använda struktur först när vi faktiskt behöver trimma mot radbudget.
+                # Annars hålls parlyften till spelprofilkategorier + eventuella måste-ingå-filter.
+                if target_frame_after is None or cur_frame_count <= int(target_frame_after) or value_count_now < int(min_value_filters):
+                    pair_candidates = [c for c in candidates if str(c.get('category', '')) in profile_categories or c.get('key') in required_keys]
             pair = _best_filter_pair_lift(
-                candidates,
+                pair_candidates,
                 cur_hist,
                 cur_frame,
                 used_keys,
@@ -7396,6 +7415,12 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
     # v12.0ad: Grupppaket ska inte bara vara fallback. De visas som egen
     # risk-/reduceringsväg även om rena tvingade paket dominerar i radantal.
     final_packages = _append_group_representatives(pareto_packages, packages, max_group_packages=6)
+    # Hård slutkontroll: om användaren har markerat "måste ingå" får inga paket
+    # överleva final/Pareto-listan utan dessa filter. Detta gör funktionen deterministisk
+    # även efter dedupe/representantval.
+    if required_keys:
+        _req = set(required_keys)
+        final_packages = [p for p in final_packages if _req.issubset({c.get('key') for c in (p.get('filters', []) or [])})]
 
     # Kandidatanalys: visa att alla filter faktiskt testades, även om de inte hamnade
     # i ett Pareto-paket. Särskilt viktigt för värde-/poängfilter som ofta överlappar
@@ -8410,7 +8435,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         st.caption("Testar Pareto-bästa paket på radmassan efter dina manuella teckengrupper. De manuella teckengrupperna visas separat och drar inte ner paketens historiska filterträff. Paketmotorn bygger nivåtrappa per filter, testar även kombinationslyft av småfilter, visar progressklocka/ETA, eftertrimmar valt paket och visar hårda grupppaket som egen pakettyp.")
 
         with st.expander("Välj filter som måste ingå i rekommenderade paket", expanded=False):
-            st.caption("Kryssa i filter du vill att paketmotorn ska använda. Ändringar ligger i ett formulär och sparas först när du trycker på knappen, så sidan laddar inte om för varje kryss.")
+            st.caption("Kryssa i filter du vill att paketmotorn ska använda. Viktigt: tryck först på '1) Spara obligatoriska filter' och därefter '2) Beräkna paket'. Då hårdspärras paketen så att bara paket som innehåller dessa filter visas.")
             saved_required_keys = set(st.session_state.get('v12_required_pkg_keys', []))
             required_keys_draft = []
             with st.form("v12_required_pkg_form"):
@@ -8424,7 +8449,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                             _key = _spec.get('key')
                             if st.checkbox(_spec.get('name',''), value=(_key in saved_required_keys), key=f"v12_reqpkg_form_{_key}"):
                                 required_keys_draft.append(_key)
-                req_save = st.form_submit_button("Spara obligatoriska filter", use_container_width=True)
+                req_save = st.form_submit_button("1) Spara obligatoriska filter", use_container_width=True)
             if req_save:
                 st.session_state['v12_required_pkg_keys'] = list(dict.fromkeys(required_keys_draft))
                 # Paket som redan är beräknade bygger på gamla obligatoriska val.
@@ -8432,10 +8457,15 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 # nya "måste ingå"-filtren saknas.
                 for _k in ['v12_recommended_packages', 'v12_recommended_candidate_audit', 'v12_recommended_meta', 'v12_applied_package_meta', 'v12_applied_package_snapshot']:
                     st.session_state.pop(_k, None)
-                st.success(f"{len(required_keys_draft)} obligatoriska filter sparade. Beräkna paket igen.")
+                st.success(f"{len(required_keys_draft)} obligatoriska filter sparade. 2) Beräkna paket igen.")
             required_keys_saved = st.session_state.get('v12_required_pkg_keys', [])
             if required_keys_saved:
-                st.success(f"{len(required_keys_saved)} filter är markerade som måste ingå i paketmotorn.")
+                _req_names = []
+                _spec_by_key_req = {s.get('key'): s for s in specs}
+                for _rk in required_keys_saved:
+                    _sp = _spec_by_key_req.get(_rk)
+                    _req_names.append((_sp.get('name') if _sp else str(_rk)))
+                st.success(f"{len(required_keys_saved)} filter är markerade som måste ingå i paketmotorn: " + ", ".join(_req_names[:8]) + (" …" if len(_req_names) > 8 else ""))
             else:
                 st.info("Inga obligatoriska filter valda. Paketmotorn söker fritt.")
         required_keys_now = list(st.session_state.get('v12_required_pkg_keys', []))
@@ -8450,7 +8480,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         default_rec_frame_adapt = True
         default_rec_min_value_filters = 3
         default_rec_package_strategy = 'profile_first'
-        if st.session_state.get("v12_pkg_defaults_version") != "v12.0ck":
+        if st.session_state.get("v12_pkg_defaults_version") != "v12.0cl":
             if "v12_rec_min_hit" not in st.session_state or int(st.session_state.get("v12_rec_min_hit", 22)) <= 22:
                 st.session_state["v12_rec_min_hit"] = default_rec_min_hit
             try:
@@ -8464,12 +8494,12 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             st.session_state.setdefault("v12_rec_frame_adapt", default_rec_frame_adapt)
             st.session_state.setdefault("v12_rec_min_value_filters", default_rec_min_value_filters)
             st.session_state.setdefault("v12_rec_package_strategy", default_rec_package_strategy)
-            if st.session_state.get("v12_rec_package_strategy") not in {'profile_first', 'balanced'}:
+            if st.session_state.get("v12_rec_package_strategy") not in {'profile_first', 'profile_then_structure', 'balanced'}:
                 st.session_state["v12_rec_package_strategy"] = default_rec_package_strategy
-            st.session_state["v12_pkg_defaults_version"] = "v12.0ck"
+            st.session_state["v12_pkg_defaults_version"] = "v12.0cl"
 
         with st.form("v12_recommended_package_engine_form"):
-            st.caption("Paketmotorns standard är nu: Spelprofil först + minsta extra reducering per paketsteg 5,00. Om du ser 1,00 här kör du en äldre fil. Sök ner till 28/30, max 30 filter, anpassa mot grundram och minst 3 värde-/poängfilter.")
+            st.caption("Paketmotorns standard är nu: Spelprofil först + minsta extra reducering per paketsteg 5,00. Nytt i denna version: valda 'måste ingå'-filter hårdspärras och strategin Spelprofil först + strukturtrim sist kan väljas om radmålet kräver mer kapning.")
             rp_c1, rp_c2, rp_c3, rp_c4, rp_c5, rp_c6 = st.columns([1, 1, 1, 1, 1, 1])
             with rp_c1:
                 rec_min_step = st.number_input(
@@ -8506,7 +8536,8 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     help="Hård spärr: ett rekommenderat paket måste innehålla minst detta antal filter från Värde & svårighet. Annars visas paketet inte i listan.",
                 )
             _strategy_labels = {
-                'profile_first': 'Spelprofil först (FAT, värde/poäng och favorit/skräll)',
+                'profile_first': 'Spelprofil först (ingen struktur i automatpaket)',
+                'profile_then_structure': 'Spelprofil först + strukturtrim sist',
                 'balanced': 'Balanserad / äldre modell',
             }
             _strategy_options = list(_strategy_labels.keys())
@@ -8519,9 +8550,9 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 index=_strategy_options.index(_cur_strategy),
                 format_func=lambda x: _strategy_labels.get(x, x),
                 key="v12_rec_package_strategy",
-                help="Spelprofil först använder Värde & svårighet, FAT/FAT-sekvenser och Favorit & skräll före struktur. Strukturfilter används fortfarande manuellt och kan tvingas via 'måste ingå'.",
+                help="Spelprofil först utan struktur använder bara Värde & svårighet, FAT/FAT-sekvenser och Favorit & skräll. Strukturtrim-läget bygger först spelprofil och släpper sedan in struktur/övrigt om paketet fortfarande är över radbudgeten. Balanserad är äldre modell.",
             )
-            build_recs = st.form_submit_button("Beräkna paket", use_container_width=True)
+            build_recs = st.form_submit_button("2) Beräkna paket", use_container_width=True)
         if build_recs:
             start_clock = time.time()
             progress_bar = st.progress(0, text="Startar paketmotor...")
@@ -8568,7 +8599,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             st.session_state['v12_recommended_packages'] = packages
             st.session_state['v12_recommended_candidate_audit'] = candidate_audit
             st.session_state['v12_recommended_meta'] = {
-                'package_engine': 'pareto_multilevel_profile_first_standard_v12_0ck',
+                'package_engine': 'pareto_multilevel_profile_first_structure_trim_required_fix_v12_0cl',
                 'manual_hist_target_pct': int(filter_hist_target_pct),
                 'top_fav_filters': 'Topp 3/4/5/6',
                 'frame_rows': int(len(manual_frame_rows)),
@@ -8589,6 +8620,12 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         if packages and _pkg_meta.get('manual_sign_groups_sig') != manual_sign_groups_sig:
             st.warning('Manuella teckengrupper har ändrats sedan paketen beräknades. Beräkna rekommenderade paket igen innan du använder ett paket.')
             packages = []
+        if required_keys_now and packages:
+            _req_set_show = set(required_keys_now)
+            _bad_req = [p for p in packages if not _req_set_show.issubset({c.get('key') for c in (p.get('filters', []) or [])})]
+            if _bad_req:
+                st.error('Varning: några paket saknade filter som markerats som måste ingå. De döljs automatiskt. Beräkna paket igen om listan ser gammal ut.')
+                packages = [p for p in packages if _req_set_show.issubset({c.get('key') for c in (p.get('filters', []) or [])})]
         rec_display_max_rows = int(st.session_state.get('v12_rec_display_max_rows', 5000))
         visible_packages = [p for p in packages if int(p.get('frame_after', 10**12)) <= rec_display_max_rows]
         hidden_packages = [p for p in packages if int(p.get('frame_after', 10**12)) > rec_display_max_rows]
