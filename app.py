@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0cn – Kategorivisa filterträffmål"
+APP_VERSION = "v12.0co – Filtercentral persistensfix"
 
 
 st.markdown("""
@@ -5062,6 +5062,91 @@ def _sync_frame_widget_state_from_frame(frame, antal_matcher):
 
 
 
+# v12.0co: Filtercentralen renderar bara en kategori åt gången. Streamlit kan då
+# städa bort widget-state för filterrader som inte längre renderas. Därför
+# speglar vi alla filterval till en separat, persistent store som inte är
+# widget-bunden. Utan detta kan Struktur-filter försvinna när användaren öppnar
+# FAT-fliken, vilket var den buggen Niklas hittade.
+def _filtercentral_persist_store():
+    store = st.session_state.get('v12_filtercentral_persisted_settings')
+    if not isinstance(store, dict):
+        store = {}
+        st.session_state['v12_filtercentral_persisted_settings'] = store
+    return store
+
+
+def _filtercentral_range_key_for_spec(spec, filter_hist_target_pct=95, top_fav_count=3):
+    try:
+        _fhp_spec = _hist_target_for_spec(spec, filter_hist_target_pct)
+    except Exception:
+        _fhp_spec = filter_hist_target_pct
+    return f"filter_range_{spec.get('key')}_h{int(_fhp_spec)}_tf{int(top_fav_count)}"
+
+
+def _filtercentral_store_set(k, mode=None, interval=None, spec=None, target_hist_pct=None):
+    if not k:
+        return
+    store = _filtercentral_persist_store()
+    item = store.get(k)
+    if not isinstance(item, dict):
+        item = {}
+    if spec is not None:
+        item['name'] = spec.get('name', k)
+        item['category'] = spec.get('category', '')
+        try:
+            item['target_hist_pct'] = int(_hist_target_for_spec(spec, target_hist_pct or 95))
+        except Exception:
+            pass
+    if mode is not None:
+        item['mode'] = str(mode)
+    if interval is not None:
+        try:
+            item['interval'] = (interval[0], interval[1])
+        except Exception:
+            item['interval'] = interval
+    store[k] = item
+    st.session_state['v12_filtercentral_persisted_settings'] = store
+
+
+def _sync_rendered_filter_widgets_to_store(specs, filter_hist_target_pct=95, top_fav_count=3):
+    """Kopiera renderade widgetvärden till persistent store.
+
+    Körs innan kategoribyte hinner städa bort gamla widgetnycklar, och efter
+    formulärsubmit så nya värden sparas. Läser bara widgetnycklar som faktiskt
+    finns i session_state.
+    """
+    for spec in specs or []:
+        k = spec.get('key')
+        if not k:
+            continue
+        mode_key = f'filter_mode_{k}'
+        range_key = _filtercentral_range_key_for_spec(spec, filter_hist_target_pct, top_fav_count)
+        mode = st.session_state.get(mode_key) if mode_key in st.session_state else None
+        interval = st.session_state.get(range_key) if range_key in st.session_state else None
+        if mode is not None or interval is not None:
+            _filtercentral_store_set(k, mode=mode, interval=interval, spec=spec, target_hist_pct=filter_hist_target_pct)
+
+
+def _filtercentral_get_persisted_mode(k, default='Av'):
+    item = _filtercentral_persist_store().get(k, {})
+    if isinstance(item, dict):
+        return item.get('mode', default)
+    return default
+
+
+def _filtercentral_get_persisted_interval(spec, default_interval=None):
+    k = spec.get('key') if isinstance(spec, dict) else None
+    item = _filtercentral_persist_store().get(k, {}) if k else {}
+    if isinstance(item, dict) and isinstance(item.get('interval'), (list, tuple)) and len(item.get('interval')) >= 2:
+        return (item.get('interval')[0], item.get('interval')[1])
+    return default_interval if default_interval is not None else (spec.get('default_interval') if isinstance(spec, dict) else None)
+
+
+def _filtercentral_clear_persistent_store():
+    st.session_state['v12_filtercentral_persisted_settings'] = {}
+
+
+
 def _clear_filtercentral_widget_state_for_load():
     """Rensar gamla filterwidgets innan spelfil/filterpaket läses in.
 
@@ -5073,6 +5158,7 @@ def _clear_filtercentral_widget_state_for_load():
         _ks = str(_k)
         if _ks.startswith('filter_mode_') or _ks.startswith('filter_range_'):
             st.session_state.pop(_k, None)
+    _filtercentral_clear_persistent_store()
 
 
 def _apply_saved_applied_package_snapshot(package, saved_filter_keys=None, filter_hist_target_pct=90, top_fav_count=3):
@@ -5096,6 +5182,7 @@ def _apply_saved_applied_package_snapshot(package, saved_filter_keys=None, filte
     for _k in set(saved_filter_keys or []):
         if _k:
             st.session_state[f'filter_mode_{_k}'] = 'Av'
+            _filtercentral_store_set(_k, mode='Av')
 
     for c in filters:
         if not isinstance(c, dict):
@@ -5103,11 +5190,16 @@ def _apply_saved_applied_package_snapshot(package, saved_filter_keys=None, filte
         k = c.get('key')
         if not k:
             continue
-        st.session_state[f'filter_mode_{k}'] = c.get('package_mode', 'Tvingat')
+        _mode = c.get('package_mode', 'Tvingat')
+        st.session_state[f'filter_mode_{k}'] = _mode
         interval = c.get('interval')
         if isinstance(interval, (list, tuple)) and len(interval) >= 2:
             _fhp_filter = _clamp_filter_hist_target(c.get('target_hist_pct', fhp), fhp)
-            st.session_state[f'filter_range_{k}_h{_fhp_filter}_tf{tfc}'] = (interval[0], interval[1])
+            _interval = (interval[0], interval[1])
+            st.session_state[f'filter_range_{k}_h{_fhp_filter}_tf{tfc}'] = _interval
+            _filtercentral_store_set(k, mode=_mode, interval=_interval, target_hist_pct=_fhp_filter)
+        else:
+            _filtercentral_store_set(k, mode=_mode, target_hist_pct=fhp)
 
     # Gruppkrav från paketet ska ersätta gamla sidomenykrav.
     for i in range(1, 7):
@@ -5253,10 +5345,10 @@ def _collect_filter_settings_for_save(specs, filter_hist_target_pct, top_fav_cou
             mode = settings_override[k].get('mode', 'Av')
             interval = settings_override[k].get('interval', spec.get('default_interval'))
         else:
-            mode = st.session_state.get(f'filter_mode_{k}', 'Av')
+            mode = _filtercentral_get_persisted_mode(k, st.session_state.get(f'filter_mode_{k}', 'Av'))
             _fhp_spec = _hist_target_for_spec(spec, filter_hist_target_pct)
             range_key = f'filter_range_{k}_h{int(_fhp_spec)}_tf{int(top_fav_count)}'
-            interval = st.session_state.get(range_key, spec.get('default_interval'))
+            interval = st.session_state.get(range_key, _filtercentral_get_persisted_interval(spec, spec.get('default_interval')))
         out[k] = {
             'name': spec.get('name', k),
             'category': spec.get('category', ''),
@@ -5321,7 +5413,9 @@ def _apply_filter_settings_to_session(saved_settings, filter_hist_target_pct, to
     for k, v in (saved_settings or {}).items():
         if not isinstance(v, dict):
             continue
-        st.session_state[f'filter_mode_{k}'] = v.get('mode', 'Av')
+        _mode = v.get('mode', 'Av')
+        st.session_state[f'filter_mode_{k}'] = _mode
+        _filtercentral_store_set(k, mode=_mode)
         interval = v.get('interval')
         if isinstance(interval, (list, tuple)) and len(interval) >= 2:
             _cat = v.get('category', '')
@@ -5330,7 +5424,9 @@ def _apply_filter_settings_to_session(saved_settings, filter_hist_target_pct, to
             range_key = f'filter_range_{k}_h{int(_fhp_filter)}_tf{int(top_fav_count)}'
             # Behåll int/float-typen från filen. Streamlits int-sliders kan annars
             # bli griniga om de får float-värden i session_state.
-            st.session_state[range_key] = (interval[0], interval[1])
+            _interval = (interval[0], interval[1])
+            st.session_state[range_key] = _interval
+            _filtercentral_store_set(k, mode=_mode, interval=_interval, target_hist_pct=_fhp_filter)
 
 
 def _apply_group_reqs_to_session(group_reqs):
@@ -8119,12 +8215,17 @@ def _apply_recommended_package_to_session(package, specs, filter_hist_target_pct
         range_key = f'filter_range_{k}_h{int(_fhp_spec)}_tf{int(top_fav_count)}'
         if k in chosen_by_key:
             chosen = chosen_by_key[k]
-            st.session_state[f'filter_mode_{k}'] = chosen.get('package_mode', 'Tvingat')
-            st.session_state[range_key] = chosen['interval']
+            _mode = chosen.get('package_mode', 'Tvingat')
+            _interval = chosen['interval']
+            st.session_state[f'filter_mode_{k}'] = _mode
+            st.session_state[range_key] = _interval
+            _filtercentral_store_set(k, mode=_mode, interval=_interval, spec=spec, target_hist_pct=_fhp_spec)
         else:
+            _interval = spec.get('default_interval')
             st.session_state[f'filter_mode_{k}'] = 'Av'
             # Låt avstängda filter ligga på rekommenderat intervall för tydlighet.
-            st.session_state[range_key] = spec.get('default_interval')
+            st.session_state[range_key] = _interval
+            _filtercentral_store_set(k, mode='Av', interval=_interval, spec=spec, target_hist_pct=_fhp_spec)
     for i in range(1, 7):
         st.session_state[f'group_req_{i}'] = 0
         st.session_state[f'group_req_min_{i}'] = 0
@@ -8463,6 +8564,9 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         st.session_state['v12_specs_cache'] = specs
         specs_from_cache = False
     st.session_state['v12_specs'] = specs
+    # v12.0co: spegla befintliga renderade filterwidgetar till persistent store
+    # innan Streamlit hinner städa bort filter i kategorier som inte visas.
+    _sync_rendered_filter_widgets_to_store(specs, filter_hist_target_pct, top_fav_count)
     _t_perf = _perf_mark('Bygga/läsa filterdefinitioner', _t_specs)
     cache_txt = 'cache' if specs_from_cache else 'ny beräkning'
     st.caption(f"Exakt läge: rekommenderade filters historikträff räknas mot alla liknande omgångar. Radreducering och paketens kvarvarande rader räknas på aktuell radmassa efter manuella teckengrupper ({len(manual_frame_rows):,} av {len(frame_rows):,} rader, {cache_txt}). Snabburval används endast i vissa informationsrutor/diagnoser, aldrig för slutlig filtrering eller reducering.".replace(',', ' '))
@@ -8473,6 +8577,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     st.session_state[_k] = 'Av'
             for _spec in specs:
                 st.session_state[f"filter_mode_{_spec.get('key')}"] = 'Av'
+                _filtercentral_store_set(_spec.get('key'), mode='Av', spec=_spec, target_hist_pct=filter_hist_target_pct)
             st.success("Alla filter är satta till Av.")
             st.rerun()
     st.caption("När du ändrar träffmål i en filterkategori får filtren i kategorin nya startintervall. Struktur kan t.ex. sättas till 100% medan Värde & svårighet kan ligga på 95%.")
@@ -8897,10 +9002,15 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 k = spec['key']
                 mode_key = f'filter_mode_{k}'
                 range_key = _range_key_for_spec(spec)
-                default_mode = st.session_state.get(mode_key, 'Av')
+                default_mode = _filtercentral_get_persisted_mode(k, st.session_state.get(mode_key, 'Av'))
+                # Sätt widgetvärdet från persistent store innan widgeten skapas.
+                if mode_key not in st.session_state:
+                    st.session_state[mode_key] = default_mode
                 lo, hi = spec['bounds']
                 dec = spec['decimals']
-                val = _default_interval_for_spec(spec)
+                val = _filtercentral_get_persisted_interval(spec, _default_interval_for_spec(spec))
+                if range_key not in st.session_state and isinstance(val, (list, tuple)) and len(val) >= 2:
+                    st.session_state[range_key] = val
                 if range_key in st.session_state:
                     try:
                         cur = st.session_state[range_key]
@@ -8941,14 +9051,19 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 st.divider()
             filter_apply = st.form_submit_button("✅ Applicera filterändringar", use_container_width=True)
 
+        if filter_apply:
+            # Spara den renderade kategorins widgetvärden till persistent store.
+            # Då ligger de kvar när användaren byter filterkategori.
+            _sync_rendered_filter_widgets_to_store(cat_specs, filter_hist_target_pct, top_fav_count)
+
     # Samla inställningar för ALLA filter, inte bara den kategori som renderades.
     for spec in specs:
         k = spec['key']
         mode_key = f'filter_mode_{k}'
         range_key = _range_key_for_spec(spec)
         settings[k] = {
-            'mode': st.session_state.get(mode_key, 'Av'),
-            'interval': st.session_state.get(range_key, _default_interval_for_spec(spec)),
+            'mode': _filtercentral_get_persisted_mode(k, st.session_state.get(mode_key, 'Av')),
+            'interval': st.session_state.get(range_key, _filtercentral_get_persisted_interval(spec, _default_interval_for_spec(spec))),
         }
     if filter_apply:
         st.session_state['v12_last_result_stale'] = True
