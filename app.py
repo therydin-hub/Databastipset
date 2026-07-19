@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0cm – Två paketlägen utan balanserad"
+APP_VERSION = "v12.0cn – Kategorivisa filterträffmål"
 
 
 st.markdown("""
@@ -3773,6 +3773,67 @@ def _slug(s):
     return re.sub(r'[^a-zA-Z0-9_]+', '_', str(s)).strip('_').lower()
 
 
+FILTER_HIST_TARGET_DEFAULTS_BY_CATEGORY = {
+    'Värde & svårighet': 95,
+    'FAT': 95,
+    'FAT-sekvenser': 95,
+    'Favorit & skräll': 95,
+    'Struktur': 100,
+    'Super-Makro': 95,
+}
+
+
+def _filter_target_key_for_category(category):
+    return f"v12_filter_hist_target_cat_{_slug(category)}"
+
+
+def _clamp_filter_hist_target(value, default=95):
+    try:
+        return int(max(50, min(100, int(value))))
+    except Exception:
+        return int(default)
+
+
+def _get_filter_hist_target_pct_by_category():
+    """Returnerar kategori-specifika träffmål för rekommenderade filterintervall.
+
+    Den gamla globala slidern finns kvar som bakåtkompatibel fallback för gamla
+    sparfiler, men nya sessioner använder separata värden per filterkategori.
+    """
+    legacy = st.session_state.get('v12_filter_hist_target_pct', None)
+    out = {}
+    for category, default in FILTER_HIST_TARGET_DEFAULTS_BY_CATEGORY.items():
+        key = _filter_target_key_for_category(category)
+        if key not in st.session_state:
+            st.session_state[key] = _clamp_filter_hist_target(legacy, default) if legacy is not None else int(default)
+        out[category] = _clamp_filter_hist_target(st.session_state.get(key), default)
+    return out
+
+
+def _set_filter_hist_target_pct_by_category(targets):
+    if not isinstance(targets, dict):
+        return
+    for category, default in FILTER_HIST_TARGET_DEFAULTS_BY_CATEGORY.items():
+        if category in targets:
+            st.session_state[_filter_target_key_for_category(category)] = _clamp_filter_hist_target(targets.get(category), default)
+
+
+def _hist_target_for_spec(spec, fallback=95):
+    if isinstance(spec, dict) and spec.get('target_hist_pct') is not None:
+        return _clamp_filter_hist_target(spec.get('target_hist_pct'), fallback)
+    if isinstance(spec, dict) and spec.get('category') in FILTER_HIST_TARGET_DEFAULTS_BY_CATEGORY:
+        targets = _get_filter_hist_target_pct_by_category()
+        return _clamp_filter_hist_target(targets.get(spec.get('category')), FILTER_HIST_TARGET_DEFAULTS_BY_CATEGORY.get(spec.get('category'), fallback))
+    return _clamp_filter_hist_target(fallback, fallback)
+
+
+def _hist_pass_label_from_pct(pct, total):
+    try:
+        return int(math.ceil(float(pct) * float(total) / 100.0))
+    except Exception:
+        return 0
+
+
 def _hist_pass_count(values, interval):
     ok = [v for v in values if in_range(v, interval)]
     return len(ok), len(values), (100.0 * len(ok) / len(values) if len(values) else 0.0)
@@ -4147,11 +4208,12 @@ def _frame_cache_tuple(frame):
     return tuple(tuple(x) for x in frame)
 
 
-def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, target_hist_pct=90, u_rows=None, hist_df=None, max_shock_pct=22, candidate_rows=None, include_supermakro=False):
+def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, target_hist_pct=90, u_rows=None, hist_df=None, max_shock_pct=22, candidate_rows=None, include_supermakro=False, category_hist_target_pct=None):
     """Bygger exakt en spec per filter. Inga AutoHard-varianter/dubbletter.
 
-    target_hist_pct styr rekommenderat intervall/startvärde för varje filter.
-    Exempel: 90% på 30 liknande omgångar ger normalt minst 27/30 i rek. träff.
+    Rekommenderat intervall/startvärde styrs kategori för kategori.
+    Exempel: Struktur kan ligga på 100% medan Värde & svårighet ligger på 95%.
+    target_hist_pct finns kvar som bakåtkompatibel fallback.
     """
     rows = list(v_m['Correct_Row'])
     probs = list(v_m['Prob_Vector'])
@@ -4160,15 +4222,22 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
     specs = []
 
     target_hist_pct = int(max(50, min(100, target_hist_pct)))
+    category_hist_target_pct = category_hist_target_pct or {}
+
+    def _category_target_pct(category, fallback=None):
+        if fallback is None:
+            fallback = target_hist_pct
+        default = FILTER_HIST_TARGET_DEFAULTS_BY_CATEGORY.get(str(category), fallback)
+        return _clamp_filter_hist_target(category_hist_target_pct.get(str(category), fallback), default)
 
     def add_interval(name, category, values, getter, decimals=0, coverage=85, hard_min=None, hard_max=None, help_text="", key_override=None, meta=None, default_interval_override=None):
         vals = [v for v in values if not pd.isna(v)]
         if not vals:
             return
-        # I v12.0j styr användaren själv minsta historiska träff för rekommenderat
-        # intervall/startvärde. Tidigare låg olika filter på 85/90/100, vilket gjorde
-        # att vissa filter fortfarande kunde visa t.ex. 26/30 trots att användaren ville ha 100%.
-        coverage = target_hist_pct
+        # v12.0cn: träffmålet styrs per filterkategori. Struktur kan t.ex.
+        # sättas till 100% medan Värde & svårighet/FAT/Favorit & skräll ligger
+        # på 95%. Det gamla globala värdet används bara som fallback.
+        coverage = _category_target_pct(category, coverage)
         if default_interval_override is None:
             default_interval = get_best_interval(vals, coverage)
         else:
@@ -4195,6 +4264,7 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
             'hist_pass': hist_pass,
             'hist_total': hist_total,
             'hist_pct': hist_pct,
+            'target_hist_pct': int(coverage),
             'help': help_text,
             'meta': meta or {},
         })
@@ -4446,6 +4516,7 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
         return specs
 
     # Super-Makro: bygg flera synliga makron. Strukturmakrot är gamla Super-Makro-logiken.
+    super_macro_target_pct = _category_target_pct('Super-Makro', target_hist_pct)
     value_macro_specs = [sp for sp in specs if sp.get('category') == 'Värde & svårighet']
     favorite_macro_specs = [sp for sp in specs if sp.get('category') == 'Favorit & skräll']
 
@@ -4465,7 +4536,7 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
         candidate_rows or [],
         filter_vec,
         macro_bounds,
-        target_hist_pct=target_hist_pct,
+        target_hist_pct=super_macro_target_pct,
     )
     _macro_help = (
         'Gamla Super-Makro-logiken, nu tydligare som Strukturmakro. Räknar 8 struktur/FAT-block: '
@@ -4481,7 +4552,7 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
         macro_vals,
         lambda r, b=macro_bounds: _super_macro_count(r, filter_vec, b),
         0,
-        90,
+        super_macro_target_pct,
         0,
         8,
         _macro_help,
@@ -4505,7 +4576,7 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
             candidate_rows or [],
             _value_row_getter,
             value_macro_max,
-            target_hist_pct=target_hist_pct,
+            target_hist_pct=super_macro_target_pct,
         )
         _value_help = (
             f'Räknar hur många av {value_macro_max} filter i Värde & svårighet som klarar sina rekommenderade intervall. '
@@ -4520,7 +4591,7 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
             value_macro_vals,
             _value_row_getter,
             0,
-            90,
+            super_macro_target_pct,
             0,
             value_macro_max,
             _value_help,
@@ -4548,7 +4619,7 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
             candidate_rows or [],
             _fav_row_getter,
             favorite_macro_max,
-            target_hist_pct=target_hist_pct,
+            target_hist_pct=super_macro_target_pct,
         )
         _fav_help = (
             f'Räknar hur många av {favorite_macro_max} filter i Favorit & skräll som klarar sina rekommenderade intervall. '
@@ -4562,7 +4633,7 @@ def build_clean_filter_specs(v_m, filter_vec, antal_matcher, slider_u_count=3, t
             favorite_macro_vals,
             _fav_row_getter,
             0,
-            90,
+            super_macro_target_pct,
             0,
             favorite_macro_max,
             _fav_help,
@@ -5035,7 +5106,8 @@ def _apply_saved_applied_package_snapshot(package, saved_filter_keys=None, filte
         st.session_state[f'filter_mode_{k}'] = c.get('package_mode', 'Tvingat')
         interval = c.get('interval')
         if isinstance(interval, (list, tuple)) and len(interval) >= 2:
-            st.session_state[f'filter_range_{k}_h{fhp}_tf{tfc}'] = (interval[0], interval[1])
+            _fhp_filter = _clamp_filter_hist_target(c.get('target_hist_pct', fhp), fhp)
+            st.session_state[f'filter_range_{k}_h{_fhp_filter}_tf{tfc}'] = (interval[0], interval[1])
 
     # Gruppkrav från paketet ska ersätta gamla sidomenykrav.
     for i in range(1, 7):
@@ -5182,11 +5254,13 @@ def _collect_filter_settings_for_save(specs, filter_hist_target_pct, top_fav_cou
             interval = settings_override[k].get('interval', spec.get('default_interval'))
         else:
             mode = st.session_state.get(f'filter_mode_{k}', 'Av')
-            range_key = f'filter_range_{k}_h{int(filter_hist_target_pct)}_tf{int(top_fav_count)}'
+            _fhp_spec = _hist_target_for_spec(spec, filter_hist_target_pct)
+            range_key = f'filter_range_{k}_h{int(_fhp_spec)}_tf{int(top_fav_count)}'
             interval = st.session_state.get(range_key, spec.get('default_interval'))
         out[k] = {
             'name': spec.get('name', k),
             'category': spec.get('category', ''),
+            'target_hist_pct': int(_hist_target_for_spec(spec, filter_hist_target_pct)),
             'mode': mode,
             'interval': _json_safe_value(interval),
         }
@@ -5220,7 +5294,6 @@ def _collect_recommended_package_state_for_save(specs=None, settings=None, group
         'rec_display_max_rows': _json_safe_value(st.session_state.get('v12_rec_display_max_rows')),
         'rec_frame_adapt': _json_safe_value(st.session_state.get('v12_rec_frame_adapt')),
         'rec_min_value_filters': _json_safe_value(st.session_state.get('v12_rec_min_value_filters')),
-        'rec_package_strategy': _json_safe_value(st.session_state.get('v12_rec_package_strategy')),
         'required_keys': _json_safe_value(required_keys),
         'recommended_meta': _json_safe_value(st.session_state.get('v12_recommended_meta', {})),
         'recommended_packages': _packages_for_spelfil(st.session_state.get('v12_recommended_packages', []) or []),
@@ -5243,14 +5316,18 @@ def _current_group_reqs_from_session():
     return out
 
 
-def _apply_filter_settings_to_session(saved_settings, filter_hist_target_pct, top_fav_count):
+def _apply_filter_settings_to_session(saved_settings, filter_hist_target_pct, top_fav_count, category_hist_target_pct=None):
+    category_hist_target_pct = category_hist_target_pct or {}
     for k, v in (saved_settings or {}).items():
         if not isinstance(v, dict):
             continue
         st.session_state[f'filter_mode_{k}'] = v.get('mode', 'Av')
         interval = v.get('interval')
         if isinstance(interval, (list, tuple)) and len(interval) >= 2:
-            range_key = f'filter_range_{k}_h{int(filter_hist_target_pct)}_tf{int(top_fav_count)}'
+            _cat = v.get('category', '')
+            _fhp_filter = v.get('target_hist_pct', category_hist_target_pct.get(_cat, filter_hist_target_pct))
+            _fhp_filter = _clamp_filter_hist_target(_fhp_filter, filter_hist_target_pct)
+            range_key = f'filter_range_{k}_h{int(_fhp_filter)}_tf{int(top_fav_count)}'
             # Behåll int/float-typen från filen. Streamlits int-sliders kan annars
             # bli griniga om de får float-värden i session_state.
             st.session_state[range_key] = (interval[0], interval[1])
@@ -5280,6 +5357,7 @@ def _build_filterpaket_payload(specs, group_reqs, filter_hist_target_pct, top_fa
         'spelform': spelform,
         'antal_matcher': int(antal_matcher),
         'filter_hist_target_pct': int(filter_hist_target_pct),
+        'filter_hist_target_pct_by_category': _json_safe_value(_get_filter_hist_target_pct_by_category()),
         'top_fav_filters': 'Topp 3/4/5/6',
         'filters': _collect_filter_settings_for_save(specs, filter_hist_target_pct, top_fav_count, settings_override=settings_override),
         'group_reqs': _json_safe_value(group_reqs),
@@ -5343,9 +5421,17 @@ def _apply_spelfil_payload(payload):
         st.session_state['v12_pay_max'] = 2500000
     if payload.get('filter_hist_target_pct') is not None:
         st.session_state['v12_filter_hist_target_pct'] = int(payload.get('filter_hist_target_pct') or 90)
+    if isinstance(payload.get('filter_hist_target_pct_by_category'), dict):
+        _set_filter_hist_target_pct_by_category(payload.get('filter_hist_target_pct_by_category') or {})
+    elif payload.get('filter_hist_target_pct') is not None:
+        # Bakåtkompatibilitet: gamla sparfiler hade ett globalt värde. Använd det
+        # i alla kategorier så gamla intervallnycklar kan läsas tillbaka.
+        _legacy_fhp = int(payload.get('filter_hist_target_pct') or 90)
+        _set_filter_hist_target_pct_by_category({cat: _legacy_fhp for cat in FILTER_HIST_TARGET_DEFAULTS_BY_CATEGORY})
     # top_fav_count är borttaget i v12.0ar. Toppfavoriter finns som fasta filter 3/4/5/6.
     # Använd fast bakåtkompatibel slidernyckel så gamla sparade intervall kan läsas in stabilt.
     fhp = int(st.session_state.get('v12_filter_hist_target_pct', payload.get('filter_hist_target_pct', 90)) or 90)
+    category_fhp = _get_filter_hist_target_pct_by_category()
     tfc = 3
     # Viktigt vid uppladdning: gamla filter/slidervärden från tidigare kupong
     # ska bort, och träffmålets prev-nyckel ska synkas. Annars raderas de
@@ -5353,10 +5439,11 @@ def _apply_spelfil_payload(payload):
     # som t.ex. 11/30 fast sparad snapshot var 29/30.
     _clear_filtercentral_widget_state_for_load()
     st.session_state['v12_filter_hist_target_prev'] = int(fhp)
+    st.session_state['v12_filter_hist_target_prev_by_category'] = dict(category_fhp)
     _apply_u_rows_to_session(payload.get('u_rows', {}))
     if payload.get('manual_sign_groups') is not None:
         st.session_state['v12_manual_sign_groups'] = _normalize_manual_sign_groups(payload.get('manual_sign_groups') or [], int(payload.get('antal_matcher') or 13))
-    _apply_filter_settings_to_session(payload.get('filters', {}), fhp, tfc)
+    _apply_filter_settings_to_session(payload.get('filters', {}), fhp, tfc, category_fhp)
     _apply_group_reqs_to_session(payload.get('group_reqs', {}))
 
     pkg_state = payload.get('recommended_package_state') or {}
@@ -5371,7 +5458,6 @@ def _apply_spelfil_payload(payload):
             'rec_display_max_rows': 'v12_rec_display_max_rows',
             'rec_frame_adapt': 'v12_rec_frame_adapt',
             'rec_min_value_filters': 'v12_rec_min_value_filters',
-            'rec_package_strategy': 'v12_rec_package_strategy',
         }
         _pkg_settings_loaded = False
         for src, dst in _map.items():
@@ -5381,7 +5467,7 @@ def _apply_spelfil_payload(payload):
         if _pkg_settings_loaded:
             # En sparad spelfil/filterpaket ska få behålla sina egna paketmotorvärden
             # och inte skrivas över av nya standardvärden längre ner i gränssnittet.
-            st.session_state['v12_pkg_defaults_version'] = 'v12.0cj'
+            st.session_state['v12_pkg_defaults_version'] = 'v12.0bw'
         req_loaded = [str(rk) for rk in (pkg_state.get('required_keys', []) or []) if rk]
         st.session_state['v12_required_pkg_keys'] = list(dict.fromkeys(req_loaded))
         # Bakåtkompatibilitet för äldre sessionsnycklar/formulär.
@@ -6930,7 +7016,7 @@ def _best_filter_pair_lift(candidates, cur_hist, cur_frame, used_keys, target, h
     except Exception:
         return None
 
-def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14, min_hit_count=15, frame_adapt=True, min_value_filters=3, required_keys=None, target_frame_after=None, progress_cb=None, manual_hist_mask=None, package_strategy='profile_first'):
+def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matcher, hit_levels=None, min_step_reduction_pct=5.0, max_filters=14, min_hit_count=15, frame_adapt=True, min_value_filters=3, required_keys=None, target_frame_after=None, progress_cb=None, manual_hist_mask=None):
     """Bygger Pareto-rekommenderade filterpaket.
 
     Viktigt från v12.0n:
@@ -6958,11 +7044,6 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
     if pre_hist_hit <= 0:
         return [], pd.DataFrame()
     required_keys = set(required_keys or [])
-    package_strategy = str(package_strategy or 'profile_first').strip().lower()
-    if package_strategy not in {'profile_first', 'profile_then_structure'}:
-        # Äldre spelfiler/sessioner kan innehålla 'balanced'. Mappa då till ny standard.
-        package_strategy = 'profile_first'
-    profile_categories = {'Värde & svårighet', 'FAT', 'FAT-sekvenser', 'Favorit & skräll'}
     try:
         target_frame_after = int(target_frame_after) if target_frame_after is not None else None
     except Exception:
@@ -7000,15 +7081,6 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
     coverage_grid = [100, 99, 98, 97, 96, 95, 94, 93, 92, 91, 90, 88, 86, 84, 82, 80, 78, 76, 74, 72, 70, 68, 66, 64, 62, 60, 58, 56, 54, 52, 50]
     for si, spec in enumerate(specs, 1):
         spec_cands = []
-        # Spelprofil först: bygg rekommenderade paket av spelprofilfilter, inte strukturform.
-        # Strukturfilter kan fortfarande användas manuellt och som obligatoriskt filter.
-        spec_category = str(spec.get('category', ''))
-        if package_strategy == 'profile_first' and spec_category not in profile_categories and spec.get('key') not in required_keys:
-            if si == 1 or si == len(specs) or si % 3 == 0:
-                _progress(f"Steg 1/4: hoppar struktur/övrigt i spelprofilläge · filter {si}/{len(specs)} · kandidater {len(candidates)}")
-            else:
-                progress_done = min(progress_total, progress_done + 1)
-            continue
         try:
             getter = spec.get('getter')
             frame_vals = np.array([float(getter(r)) for r in frame_rows], dtype=float)
@@ -7163,19 +7235,6 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                     continue
                 step_red_pct = 100.0 * (cur_frame_count - new_frame_count) / max(1, cur_frame_count)
                 is_value = str(cand.get('category', '')) == 'Värde & svårighet'
-                cand_category = str(cand.get('category', ''))
-                is_profile_category = cand_category in profile_categories
-
-                # Strategi: spelprofil först + strukturtrim sist.
-                # I detta läge får struktur/övrigt inte dominera paketbygget från start.
-                # De släpps in först när värdekärnan är uppfylld och paketet fortfarande
-                # ligger över användarens radbudget, eller om filtret uttryckligen är
-                # markerat som måste ingå.
-                if package_strategy == 'profile_then_structure' and (not is_profile_category) and cand.get('key') not in required_keys:
-                    if value_count_now < int(min_value_filters):
-                        continue
-                    if target_frame_after is None or cur_frame_count <= int(target_frame_after):
-                        continue
 
                 # Värde-/poängfilter ska kunna bilda en värdekärna.
                 # Om användaren kräver minst t.ex. 3 värdefilter men varje filter måste ge 5%
@@ -7271,14 +7330,8 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             pair_min_step = max(1.0, float(min_step_reduction_pct) * 1.10)
             if required_keys and target_frame_after is not None and cur_frame_count > int(target_frame_after):
                 pair_min_step = min(pair_min_step, 0.75)
-            pair_candidates = candidates
-            if package_strategy == 'profile_then_structure':
-                # Parlyft får använda struktur först när vi faktiskt behöver trimma mot radbudget.
-                # Annars hålls parlyften till spelprofilkategorier + eventuella måste-ingå-filter.
-                if target_frame_after is None or cur_frame_count <= int(target_frame_after) or value_count_now < int(min_value_filters):
-                    pair_candidates = [c for c in candidates if str(c.get('category', '')) in profile_categories or c.get('key') in required_keys]
             pair = _best_filter_pair_lift(
-                pair_candidates,
+                candidates,
                 cur_hist,
                 cur_frame,
                 used_keys,
@@ -7379,7 +7432,6 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
             'fat_filters': int(fat_filters),
             'structure_filters': int(structure_filters),
             'post_trim_notes': post_trim_notes,
-            'package_strategy': package_strategy,
         })
         _progress(f"Steg 2/4: bygger tvingade paket · träffnivå {target_idx}/{len(hit_levels)} · bästa hittills {final_hit}/{htot}, {final_keep:,} rader".replace(',', ' '), best={'hit': final_hit, 'total': htot, 'rows': final_keep})
 
@@ -7398,7 +7450,6 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
                 initial_hist_mask=pre_hist_mask,
             )
             if gp is not None:
-                gp['package_strategy'] = package_strategy
                 group_packages.append(gp)
                 _progress(f"Steg 3/4: bygger hårda grupper · träffnivå {group_idx}/{len(hit_levels)} · bästa grupp {gp.get('hist_hit',0)}/{htot}, {int(gp.get('frame_after',0)):,} rader".replace(',', ' '), best={'hit': gp.get('hist_hit',0), 'total': htot, 'rows': gp.get('frame_after',0)})
             else:
@@ -7416,12 +7467,6 @@ def _build_recommended_filter_packages(v_m, specs, frame_rows, frame, antal_matc
     # v12.0ad: Grupppaket ska inte bara vara fallback. De visas som egen
     # risk-/reduceringsväg även om rena tvingade paket dominerar i radantal.
     final_packages = _append_group_representatives(pareto_packages, packages, max_group_packages=6)
-    # Hård slutkontroll: om användaren har markerat "måste ingå" får inga paket
-    # överleva final/Pareto-listan utan dessa filter. Detta gör funktionen deterministisk
-    # även efter dedupe/representantval.
-    if required_keys:
-        _req = set(required_keys)
-        final_packages = [p for p in final_packages if _req.issubset({c.get('key') for c in (p.get('filters', []) or [])})]
 
     # Kandidatanalys: visa att alla filter faktiskt testades, även om de inte hamnade
     # i ett Pareto-paket. Särskilt viktigt för värde-/poängfilter som ofta överlappar
@@ -7797,7 +7842,7 @@ def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_mat
                 engine_rows_after_manual,
                 engine_frame,
                 int(antal_matcher),
-                min_step_reduction_pct=float(rec_settings.get('min_step', 5.0)),
+                min_step_reduction_pct=float(rec_settings.get('min_step', 1.0)),
                 max_filters=int(rec_settings.get('max_filters', 30)),
                 min_hit_count=min(int(rec_settings.get('min_hit', 28)), int(len(sim_df))),
                 frame_adapt=bool(rec_settings.get('frame_adapt', True)),
@@ -7806,7 +7851,6 @@ def _run_package_engine_backtest(global_db, frame, manual_sign_groups, antal_mat
                 target_frame_after=int(rec_settings.get('display_max_rows', 5000)),
                 progress_cb=None,
                 manual_hist_mask=None,
-                package_strategy=str(rec_settings.get('package_strategy', 'profile_first')),
             )
             packages_bt = rec_result[0] if isinstance(rec_result, tuple) else rec_result
             pkg, pkg_note = _choose_backtest_package(packages_bt, int(rec_settings.get('display_max_rows', 5000)))
@@ -8071,7 +8115,8 @@ def _apply_recommended_package_to_session(package, specs, filter_hist_target_pct
     chosen_by_key = {c['key']: c for c in package.get('filters', [])}
     for spec in specs:
         k = spec['key']
-        range_key = f'filter_range_{k}_h{int(filter_hist_target_pct)}_tf{int(top_fav_count)}'
+        _fhp_spec = _hist_target_for_spec(spec, filter_hist_target_pct)
+        range_key = f'filter_range_{k}_h{int(_fhp_spec)}_tf{int(top_fav_count)}'
         if k in chosen_by_key:
             chosen = chosen_by_key[k]
             st.session_state[f'filter_mode_{k}'] = chosen.get('package_mode', 'Tvingat')
@@ -8335,40 +8380,39 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     # 5 bästa skrällar använder fast maxstreck 22% enligt standardvalet.
     top_fav_count = 3  # behålls bara för bakåtkompatibla sparnycklar
     max_shock_pct = 22
-    filter_hist_target_pct = int(st.session_state.get('v12_filter_hist_target_pct', 90))
+    # v12.0cn: träffmål för rekommenderade filterintervall styrs per kategori.
+    # Det gamla globala värdet finns kvar som fallback för gamla sparfiler, men
+    # visas inte längre som en styrande global slider.
+    filter_hist_target_pct_by_category = _get_filter_hist_target_pct_by_category()
+    filter_hist_target_pct = int(st.session_state.get('v12_filter_hist_target_pct', 95))
     filter_hist_target_pct = max(50, min(100, filter_hist_target_pct))
 
     st.markdown("<div class='v12-card'>", unsafe_allow_html=True)
     st.markdown("<div class='v12-step'>Steg 3</div><div class='v12-title'>Filtercentral</div>", unsafe_allow_html=True)
-    st.caption("Ett filter finns bara en gång. Välj Av, Tvingat eller Grupp. Du styr intervallen själv med sliders. 5 bästa skrällar använder maxstreck 22%.")
+    st.caption("Ett filter finns bara en gång. Välj Av, Tvingat eller Grupp. Varje filterkategori har nu eget träffmål för rekommenderat startintervall. 5 bästa skrällar använder maxstreck 22%.")
 
     ctrl_a, ctrl_b = st.columns([1.4, 1.0])
     with ctrl_a:
-        filter_hist_target_pct = st.slider(
-            "Minsta historiska träff på filterintervall",
-            min_value=50,
-            max_value=100,
-            value=filter_hist_target_pct,
-            step=1,
-            key="v12_filter_hist_target_pct",
-            help="Styr rekommenderat intervall och startvärde för varje filter. 90% = ungefär 27/30 vid 30 historiska omgångar. 100% = intervallet täcker alla 30.",
-        )
-    filter_hist_target_pct = int(max(50, min(100, filter_hist_target_pct)))
+        _target_summary_txt = " · ".join([f"{cat}: {pct}%" for cat, pct in filter_hist_target_pct_by_category.items()])
+        st.caption(f"Träffmål per kategori: {_target_summary_txt}")
 
     # Statistikfilen används för de färdiga streckfiltren under Favorit & skräll.
     _streck_db_path = find_local_database(spelform)
     _streck_hist_db = load_database(_streck_db_path, antal_matcher) if _streck_db_path else pd.DataFrame()
 
-    # Varje intervallslider har en nyckel som innehåller träffmålet.
+    # Varje intervallslider har en nyckel som innehåller kategorins träffmål.
     # Annars återanvänder Streamlit gamla slider-värden och ignorerar nya defaultintervall.
-    prev_target = st.session_state.get('v12_filter_hist_target_prev')
-    if prev_target != filter_hist_target_pct:
-        for _k in list(st.session_state.keys()):
-            if str(_k).startswith('filter_range_'):
-                del st.session_state[_k]
-        st.session_state['v12_filter_hist_target_prev'] = filter_hist_target_pct
-        st.info("Filterintervallen uppdateras efter nytt träffmål…")
-        st.rerun()
+    prev_targets = st.session_state.get('v12_filter_hist_target_prev_by_category')
+    if prev_targets != filter_hist_target_pct_by_category:
+        if prev_targets is not None:
+            for _k in list(st.session_state.keys()):
+                if str(_k).startswith('filter_range_'):
+                    del st.session_state[_k]
+            st.session_state['v12_filter_hist_target_prev_by_category'] = dict(filter_hist_target_pct_by_category)
+            st.info("Filterintervallen uppdateras efter nya kategorivisa träffmål…")
+            st.rerun()
+        else:
+            st.session_state['v12_filter_hist_target_prev_by_category'] = dict(filter_hist_target_pct_by_category)
 
     # Prestandafix v12.0bc:
     # Super-Makro Total är borttaget, så de tre konkreta Super-Makrona kan visas
@@ -8386,7 +8430,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     _t_specs = time.perf_counter()
     _spec_sig = (
         int(antal_matcher),
-        int(filter_hist_target_pct),
+        tuple(sorted((str(k), int(v)) for k, v in filter_hist_target_pct_by_category.items())),
         int(max_shock_pct),
         bool(enable_supermakro),
         tuple(round(float(x), 4) for x in list(filter_vec or [])),
@@ -8413,6 +8457,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             max_shock_pct=max_shock_pct,
             candidate_rows=spec_candidate_rows,
             include_supermakro=enable_supermakro,
+            category_hist_target_pct=filter_hist_target_pct_by_category,
         )
         st.session_state['v12_specs_cache_sig'] = _spec_sig
         st.session_state['v12_specs_cache'] = specs
@@ -8430,13 +8475,13 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 st.session_state[f"filter_mode_{_spec.get('key')}"] = 'Av'
             st.success("Alla filter är satta till Av.")
             st.rerun()
-    st.caption("När du ändrar minsta historiska träff får varje filter nya slider-nycklar och startar på sitt rekommenderade intervall. 100% ska därför ge startintervall med 30/30 där det är möjligt.")
+    st.caption("När du ändrar träffmål i en filterkategori får filtren i kategorin nya startintervall. Struktur kan t.ex. sättas till 100% medan Värde & svårighet kan ligga på 95%.")
 
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
         st.caption("Testar Pareto-bästa paket på radmassan efter dina manuella teckengrupper. De manuella teckengrupperna visas separat och drar inte ner paketens historiska filterträff. Paketmotorn bygger nivåtrappa per filter, testar även kombinationslyft av småfilter, visar progressklocka/ETA, eftertrimmar valt paket och visar hårda grupppaket som egen pakettyp.")
 
         with st.expander("Välj filter som måste ingå i rekommenderade paket", expanded=False):
-            st.caption("Kryssa i filter du vill att paketmotorn ska använda. Viktigt: tryck först på '1) Spara obligatoriska filter' och därefter '2) Beräkna paket'. Då hårdspärras paketen så att bara paket som innehåller dessa filter visas.")
+            st.caption("Kryssa i filter du vill att paketmotorn ska använda. Ändringar ligger i ett formulär och sparas först när du trycker på knappen, så sidan laddar inte om för varje kryss.")
             saved_required_keys = set(st.session_state.get('v12_required_pkg_keys', []))
             required_keys_draft = []
             with st.form("v12_required_pkg_form"):
@@ -8450,7 +8495,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                             _key = _spec.get('key')
                             if st.checkbox(_spec.get('name',''), value=(_key in saved_required_keys), key=f"v12_reqpkg_form_{_key}"):
                                 required_keys_draft.append(_key)
-                req_save = st.form_submit_button("1) Spara obligatoriska filter", use_container_width=True)
+                req_save = st.form_submit_button("Spara obligatoriska filter", use_container_width=True)
             if req_save:
                 st.session_state['v12_required_pkg_keys'] = list(dict.fromkeys(required_keys_draft))
                 # Paket som redan är beräknade bygger på gamla obligatoriska val.
@@ -8458,94 +8503,46 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 # nya "måste ingå"-filtren saknas.
                 for _k in ['v12_recommended_packages', 'v12_recommended_candidate_audit', 'v12_recommended_meta', 'v12_applied_package_meta', 'v12_applied_package_snapshot']:
                     st.session_state.pop(_k, None)
-                st.success(f"{len(required_keys_draft)} obligatoriska filter sparade. 2) Beräkna paket igen.")
+                st.success(f"{len(required_keys_draft)} obligatoriska filter sparade. Beräkna paket igen.")
             required_keys_saved = st.session_state.get('v12_required_pkg_keys', [])
             if required_keys_saved:
-                _req_names = []
-                _spec_by_key_req = {s.get('key'): s for s in specs}
-                for _rk in required_keys_saved:
-                    _sp = _spec_by_key_req.get(_rk)
-                    _req_names.append((_sp.get('name') if _sp else str(_rk)))
-                st.success(f"{len(required_keys_saved)} filter är markerade som måste ingå i paketmotorn: " + ", ".join(_req_names[:8]) + (" …" if len(_req_names) > 8 else ""))
+                st.success(f"{len(required_keys_saved)} filter är markerade som måste ingå i paketmotorn.")
             else:
                 st.info("Inga obligatoriska filter valda. Paketmotorn söker fritt.")
         required_keys_now = list(st.session_state.get('v12_required_pkg_keys', []))
 
-        # Standard för paketmotorn. Två lägen används nu:
-        # - Spelprofil först: standardläge, minsta extra reducering 5,00.
-        # - Spelprofil först + strukturtrim sist: budgetläge/större grundram, minsta extra reducering 10,00.
-        # Balanserad/äldre modell är borttagen från UI och gamla spelfiler mappas till Spelprofil först.
+        # Standard för paketmotorn. Dessa värden gäller bara när inget redan är sparat
+        # i session/spelfil. För att uppdatera gamla öppna sessioner byts det gamla
+        # standardvärdet 22/30 till nya 28/30 en gång, men egna val lämnas i fred.
+        default_rec_min_step = 1.0
         default_rec_max_filters = 30
         default_rec_min_hit = min(28, int(len(v_m)))
         default_rec_display_max_rows = int(st.session_state.get("v12_matrix_limit", 5000))
         default_rec_frame_adapt = True
         default_rec_min_value_filters = 3
-        default_rec_package_strategy = 'profile_first'
-        _strategy_labels = {
-            'profile_first': 'Spelprofil först – standard (minsta extra reducering 5,00)',
-            'profile_then_structure': 'Spelprofil + strukturtrim – budget/större grundram (minsta extra reducering 10,00)',
-        }
-        _strategy_default_steps = {
-            'profile_first': 5.0,
-            'profile_then_structure': 10.0,
-        }
-        _strategy_options = list(_strategy_labels.keys())
-        if st.session_state.get("v12_pkg_defaults_version") != "v12.0cm":
+        if st.session_state.get("v12_pkg_defaults_version") != "v12.0bw":
             if "v12_rec_min_hit" not in st.session_state or int(st.session_state.get("v12_rec_min_hit", 22)) <= 22:
                 st.session_state["v12_rec_min_hit"] = default_rec_min_hit
+            st.session_state.setdefault("v12_rec_min_step", default_rec_min_step)
             st.session_state.setdefault("v12_rec_max_filters", default_rec_max_filters)
             st.session_state.setdefault("v12_rec_display_max_rows", default_rec_display_max_rows)
             st.session_state.setdefault("v12_rec_frame_adapt", default_rec_frame_adapt)
             st.session_state.setdefault("v12_rec_min_value_filters", default_rec_min_value_filters)
-            st.session_state.setdefault("v12_rec_package_strategy", default_rec_package_strategy)
-            if st.session_state.get("v12_rec_package_strategy") not in set(_strategy_options):
-                st.session_state["v12_rec_package_strategy"] = default_rec_package_strategy
-            _cur_for_default = st.session_state.get("v12_rec_package_strategy", default_rec_package_strategy)
-            try:
-                _old_step = float(st.session_state.get("v12_rec_min_step", _strategy_default_steps.get(_cur_for_default, 5.0)))
-            except Exception:
-                _old_step = _strategy_default_steps.get(_cur_for_default, 5.0)
-            if "v12_rec_min_step" not in st.session_state or abs(_old_step - 1.0) < 0.001:
-                st.session_state["v12_rec_min_step"] = _strategy_default_steps.get(_cur_for_default, 5.0)
-            st.session_state["v12_rec_package_strategy_last"] = st.session_state.get("v12_rec_package_strategy", default_rec_package_strategy)
-            st.session_state["v12_pkg_defaults_version"] = "v12.0cm"
-
-        _cur_strategy = st.session_state.get('v12_rec_package_strategy', default_rec_package_strategy)
-        if _cur_strategy not in _strategy_options:
-            _cur_strategy = default_rec_package_strategy
-            st.session_state['v12_rec_package_strategy'] = default_rec_package_strategy
-        st.caption("Paketmotorn har nu två lägen. Balanserad/äldre modell är borttagen.")
-        rec_package_strategy = st.selectbox(
-            "Paketstrategi",
-            options=_strategy_options,
-            index=_strategy_options.index(_cur_strategy),
-            format_func=lambda x: _strategy_labels.get(x, x),
-            key="v12_rec_package_strategy",
-            help="Standardläget väljer spelprofilfilter först. Budgetläget bygger spelprofil först och släpper sedan in struktur/övrigt för att pressa radantalet mot vald radbudget.",
-        )
-        if st.session_state.get("v12_rec_package_strategy_last") != rec_package_strategy:
-            st.session_state["v12_rec_min_step"] = _strategy_default_steps.get(rec_package_strategy, 5.0)
-            st.session_state["v12_rec_package_strategy_last"] = rec_package_strategy
-        _strategy_step_default = float(_strategy_default_steps.get(rec_package_strategy, 5.0))
-        st.info(
-            "Valt läge: "
-            + _strategy_labels.get(rec_package_strategy, rec_package_strategy)
-            + f". Rekommenderad standard för minsta extra reducering: {_strategy_step_default:.2f}."
-        )
+            st.session_state["v12_pkg_defaults_version"] = "v12.0bw"
 
         with st.form("v12_recommended_package_engine_form"):
-            st.caption("Ändra vid behov och tryck Beräkna paket. Väljer du annat paketläge ovan sätts rekommenderad minsta extra reducering automatiskt.")
+            st.caption("Paketmotorns standard är nu: sök ner till 28/30, max 30 filter, minsta extra reducering 1,00, anpassa mot grundram och minst 3 värde-/poängfilter. Ändra flera saker och tryck Beräkna paket en gång.")
             rp_c1, rp_c2, rp_c3, rp_c4, rp_c5, rp_c6 = st.columns([1, 1, 1, 1, 1, 1])
             with rp_c1:
                 rec_min_step = st.number_input(
-                    "Minsta extra reducering per paketsteg",
+                    "Minsta extra reducering",
                     min_value=0.5,
                     max_value=20.0,
-                    value=float(st.session_state.get("v12_rec_min_step", _strategy_step_default)),
+                    value=float(st.session_state.get("v12_rec_min_step", default_rec_min_step)),
                     step=0.25,
                     format="%.2f",
                     key="v12_rec_min_step",
-                    help="Auto-standard: Spelprofil först = 5,00. Spelprofil + strukturtrim = 10,00. Ett paketsteg kan vara ett enskilt filter eller ett kombinationslyft med två filter.",
+                    help="Gäller främst efter att värdekärnan är byggd. Värde-/poängfilter som behövs för kvoten får läggas till med lägre marginalkrav om de håller samlad träff.",
                 )
             with rp_c2:
                 rec_max_filters = st.number_input("Max filter i paket", min_value=1, max_value=40, value=int(st.session_state.get("v12_rec_max_filters", default_rec_max_filters)), step=1, key="v12_rec_max_filters")
@@ -8570,7 +8567,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     key="v12_rec_min_value_filters",
                     help="Hård spärr: ett rekommenderat paket måste innehålla minst detta antal filter från Värde & svårighet. Annars visas paketet inte i listan.",
                 )
-            build_recs = st.form_submit_button("2) Beräkna paket", use_container_width=True)
+            build_recs = st.form_submit_button("Beräkna paket", use_container_width=True)
         if build_recs:
             start_clock = time.time()
             progress_bar = st.progress(0, text="Startar paketmotor...")
@@ -8605,7 +8602,6 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 target_frame_after=int(rec_display_max_rows),
                 progress_cb=_ui_package_progress,
                 manual_hist_mask=None,
-                package_strategy=str(rec_package_strategy),
             )
             if isinstance(rec_result, tuple):
                 packages, candidate_audit = rec_result
@@ -8617,7 +8613,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             st.session_state['v12_recommended_packages'] = packages
             st.session_state['v12_recommended_candidate_audit'] = candidate_audit
             st.session_state['v12_recommended_meta'] = {
-                'package_engine': 'pareto_multilevel_two_modes_no_balanced_v12_0cm',
+                'package_engine': 'pareto_multilevel_progress_posttrim_group_visible_diagnostics_filter_hist_independent_of_manual_groups',
                 'manual_hist_target_pct': int(filter_hist_target_pct),
                 'top_fav_filters': 'Topp 3/4/5/6',
                 'frame_rows': int(len(manual_frame_rows)),
@@ -8630,7 +8626,6 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 'display_max_rows': int(rec_display_max_rows),
                 'frame_adapt': bool(rec_frame_adapt),
                 'min_value_filters': int(rec_min_value_filters),
-                'package_strategy': str(rec_package_strategy),
                 'required_keys': list(required_keys_now),
             }
         packages = st.session_state.get('v12_recommended_packages') or []
@@ -8638,12 +8633,6 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         if packages and _pkg_meta.get('manual_sign_groups_sig') != manual_sign_groups_sig:
             st.warning('Manuella teckengrupper har ändrats sedan paketen beräknades. Beräkna rekommenderade paket igen innan du använder ett paket.')
             packages = []
-        if required_keys_now and packages:
-            _req_set_show = set(required_keys_now)
-            _bad_req = [p for p in packages if not _req_set_show.issubset({c.get('key') for c in (p.get('filters', []) or [])})]
-            if _bad_req:
-                st.error('Varning: några paket saknade filter som markerats som måste ingå. De döljs automatiskt. Beräkna paket igen om listan ser gammal ut.')
-                packages = [p for p in packages if _req_set_show.issubset({c.get('key') for c in (p.get('filters', []) or [])})]
         rec_display_max_rows = int(st.session_state.get('v12_rec_display_max_rows', 5000))
         visible_packages = [p for p in packages if int(p.get('frame_after', 10**12)) <= rec_display_max_rows]
         hidden_packages = [p for p in packages if int(p.get('frame_after', 10**12)) > rec_display_max_rows]
@@ -8748,7 +8737,6 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                             'display_max_rows': int(bt_display_rows),
                             'frame_adapt': bool(st.session_state.get('v12_rec_frame_adapt', rec_frame_adapt)),
                             'min_value_filters': int(st.session_state.get('v12_rec_min_value_filters', rec_min_value_filters)),
-                            'package_strategy': str(st.session_state.get('v12_rec_package_strategy', 'profile_first')),
                         }
                         bt_df, bt_meta = _run_package_engine_backtest(
                             db_bt,
@@ -8855,7 +8843,8 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     cats = _ordered_categories_from_specs(specs)
 
     def _range_key_for_spec(_spec):
-        return f"filter_range_{_spec.get('key')}_h{filter_hist_target_pct}_tf{top_fav_count}"
+        _fhp_spec = _hist_target_for_spec(_spec, filter_hist_target_pct)
+        return f"filter_range_{_spec.get('key')}_h{int(_fhp_spec)}_tf{top_fav_count}"
 
     def _default_interval_for_spec(_spec):
         lo, hi = _spec['bounds']
@@ -8883,6 +8872,23 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     if selected_cat == cat_closed_label:
         st.info("Alla filterkategorier är stängda. Aktiva filter ligger kvar och används fortfarande när du kör filtrering/reducering.")
     else:
+        _cat_target_key = _filter_target_key_for_category(selected_cat)
+        _cat_default_target = FILTER_HIST_TARGET_DEFAULTS_BY_CATEGORY.get(selected_cat, 95)
+        _cat_target_val = st.slider(
+            f"Minsta historiska träff på filterintervall – {selected_cat}",
+            min_value=50,
+            max_value=100,
+            value=_clamp_filter_hist_target(st.session_state.get(_cat_target_key, _cat_default_target), _cat_default_target),
+            step=1,
+            key=_cat_target_key,
+            help=(
+                "Styr rekommenderat startintervall bara för denna filterkategori. "
+                "Exempel: Struktur 100% = intervallen täcker alla liknande historiska omgångar; "
+                "Värde & svårighet 95% ger snävare profilfilter men släpper viss historisk variation."
+            ),
+        )
+        _cat_target_hits = _hist_pass_label_from_pct(_cat_target_val, len(v_m))
+        st.caption(f"{selected_cat}: startintervallen byggs på minst cirka {_cat_target_hits}/{len(v_m)} historiska träffar.")
         with st.form("v12_filtercentral_form"):
             st.caption("Ändra flera filter i vald kategori och tryck Applicera filterändringar. Övriga filter behåller sina sparade lägen/intervall.")
             st.markdown(f"### 📂 {selected_cat}")
@@ -8906,7 +8912,8 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 with c1:
                     st.markdown(f"**{spec['name']}**")
                     hp, ht, pct = _hist_pass_count(spec['hist_values'], spec['default_interval'])
-                    st.caption(f"Rek: {_display_interval(spec['default_interval'], dec)} · {hp}/{ht}")
+                    _spec_target = int(spec.get('target_hist_pct', _cat_target_val))
+                    st.caption(f"Rek: {_display_interval(spec['default_interval'], dec)} · {hp}/{ht} · mål {_spec_target}%")
                 with c2:
                     mode = st.selectbox(
                         "Läge",
