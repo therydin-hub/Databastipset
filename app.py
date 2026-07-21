@@ -10,11 +10,16 @@ import matplotlib.pyplot as plt
 import time
 import json
 import hashlib
+import math
+import sys
+import importlib.util
+import argparse
+import traceback
 from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0co – Filtercentral persistensfix"
+APP_VERSION = "v12.0cp – Slutmotor B52200 micro-rescue"
 
 
 st.markdown("""
@@ -8259,6 +8264,272 @@ def _apply_recommended_package_to_session(package, specs, filter_hist_target_pct
 
 
 
+# =============================================================================
+# v12.0cp – Slutmotor: B52200_TRUE + MICRO_TIGHT_CLOSE
+# =============================================================================
+# Slutmotorn använder V46-testmotorns låsta logik:
+# 1) bygg B52200_TRUE som baspaket
+# 2) bygg B52200_BS29_TIGHT som möjlig rescue
+# 3) byt endast till rescue om V46:s snäva, facitfria rad-/diagnostikregel uppfylls.
+#
+# Själva V46-maskineriet ligger i en sidomodul, tipset_final_motor_v46.py, så appfilen
+# inte behöver duplicera hela Colab-testmotorn. Lägg sidomodulen i samma mapp som appen.
+
+
+def _v46_engine_module_path():
+    try:
+        base = Path(__file__).resolve().parent
+    except Exception:
+        base = Path.cwd()
+    return base / 'tipset_final_motor_v46.py'
+
+
+@st.cache_resource(show_spinner=False)
+def _load_v46_engine_module_cached(path_str):
+    path = Path(path_str)
+    if not path.exists():
+        raise FileNotFoundError(f"Hittar inte V46-motorn: {path.name}. Lägg tipset_final_motor_v46.py i samma mapp som appen.")
+    spec = importlib.util.spec_from_file_location('tipset_final_motor_v46', str(path))
+    if spec is None or spec.loader is None:
+        raise RuntimeError('Kunde inte ladda V46-motorn som Python-modul.')
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules['tipset_final_motor_v46'] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _load_v46_engine_module():
+    return _load_v46_engine_module_cached(str(_v46_engine_module_path()))
+
+
+def _v46_final_args(top_n, pay_min, pay_max, filter_hist_target_pct=95):
+    """Standardargument från V46-finalen, anpassade för aktuell kupong i appen."""
+    return argparse.Namespace(
+        variants='B52200_TRUE,B52200_BS29_TIGHT',
+        max_tests=1, test_offset=0, random_seed=20260720, sample_mode='current_coupon',
+        top_n=int(top_n), wide_n=max(35, int(top_n)), pay_min=int(pay_min), pay_max=int(pay_max),
+        filter_hist_target_pct=int(filter_hist_target_pct), frame_profile='manual', frames='manual', mode='leave-one-out',
+        candidate_min_hit=24, min_candidate_val_pct=52.0, min_structure_val_pct=64.0,
+        min_gap_score=0.45, variants_per_key=10, max_candidates=340,
+        fast_no_supermakro=True, min_hit=23, min_package_val_pct=56.0,
+        min_structure_package_val_pct=74.0, min_unique_rows=8,
+        beam_width=80, archive_width=950, structure_seed_count=2,
+        hit_power=2.40, validation_power=0.70, reduction_power=4.50,
+        payout_weight=0.02, cluster_weight=0.05, payout_direction_weight=0.03,
+        bundle_pool_size=8, triple_pool_size=0, max_bundle_trials_per_state=18,
+        max_bundle_keep_per_state=6, row_bucket_size=200, per_bucket_keep=9,
+        enable_triples=False, v15_group_max_filters=18, v15_max_group_candidates=75,
+        v15_min_group_size=3, v15_cross_per_family=2, v15_cross_max_filters=12,
+    )
+
+
+def _v46_pkg_diag_row(label, pkg=None, error=''):
+    if not isinstance(pkg, dict):
+        return {
+            'Paket': label,
+            'Status': 'Fel' if error else 'Saknas',
+            'Paketträff': '-',
+            'Validering': '-',
+            'Paketrader': '-',
+            'Filter': '-',
+            'Reducerar %': '-',
+            'Budgetstatus': '-',
+            'Orsak': error or 'Paket saknas',
+        }
+    return {
+        'Paket': label,
+        'Status': 'OK',
+        'Paketträff': f"{int(pkg.get('hist_hit', 0))}/{int(pkg.get('hist_total', 0))}",
+        'Validering': f"{int(pkg.get('val_hit', 0))}/{int(pkg.get('val_total', 0))}",
+        'Paketrader': int(pkg.get('frame_after', 0)),
+        'Filter': int(pkg.get('num_filters', len(pkg.get('filters', []) or []))),
+        'Reducerar %': round(float(pkg.get('reduction_pct', 0.0) or 0.0), 1),
+        'Budgetstatus': str(pkg.get('v31_budget_status', '')),
+        'Orsak': 'OK',
+    }
+
+
+def _v46_micro_tight_close_select(base_pkg, tight_pkg):
+    """V46 MICRO_TIGHT_CLOSE. Använder endast paketdiagnostik före facit."""
+    if not isinstance(base_pkg, dict):
+        return None, {
+            'selected_source': 'INGEN',
+            'rescue_active': False,
+            'reason': 'B52200_TRUE kunde inte byggas.',
+            'eligible': False,
+        }
+    b_rows = float(base_pkg.get('frame_after', 10**9) or 10**9)
+    b_filters = float(base_pkg.get('num_filters', len(base_pkg.get('filters', []) or [])) or 0)
+    b_pkg_hit = int(base_pkg.get('hist_hit', 0) or 0)
+    htot = int(base_pkg.get('hist_total', 30) or 30)
+    # Samma golv som V46 när htot=30: 23/30. Anpassas proportionellt om användaren kör annan historikbas.
+    min_rescue_hit = max(1, min(htot, int(math.ceil(htot * 23.0 / 30.0))))
+
+    if not isinstance(tight_pkg, dict):
+        return base_pkg, {
+            'selected_source': 'B52200_TRUE',
+            'rescue_active': False,
+            'eligible': False,
+            'reason': 'Behåller B52200_TRUE: B52200_BS29_TIGHT kunde inte byggas.',
+        }
+
+    rr = float(tight_pkg.get('frame_after', 10**9) or 10**9)
+    rf = float(tight_pkg.get('num_filters', len(tight_pkg.get('filters', []) or [])) or 0)
+    rh = int(tight_pkg.get('hist_hit', 0) or 0)
+    ok_rule = (
+        2300 <= b_rows <= 2500 and
+        1900 <= rr <= 2600 and
+        abs(rr - b_rows) <= 250 and
+        rf <= (b_filters + 3) and
+        rh >= max(min_rescue_hit, b_pkg_hit - 1)
+    )
+    reason = (
+        f"bas_rows={b_rows:.0f}, rescue_rows={rr:.0f}, diff={rr-b_rows:.0f}, "
+        f"bas_filter={b_filters:.0f}, rescue_filter={rf:.0f}, "
+        f"bas_hit={b_pkg_hit}/{htot}, rescue_hit={rh}/{htot}, min_rescue_hit={min_rescue_hit}"
+    )
+    if ok_rule:
+        return tight_pkg, {
+            'selected_source': 'B52200_BS29_TIGHT',
+            'rescue_active': True,
+            'eligible': True,
+            'reason': 'Rescue aktiv enligt MICRO_TIGHT_CLOSE · ' + reason,
+        }
+    return base_pkg, {
+        'selected_source': 'B52200_TRUE',
+        'rescue_active': False,
+        'eligible': False,
+        'reason': 'Behåller B52200_TRUE · ' + reason,
+    }
+
+
+def _normalize_v46_package_for_app(pkg, source_label, decision_meta):
+    """Gör V46-paketet kompatibelt med appens paketlista/appliceringslogik."""
+    if not isinstance(pkg, dict):
+        return pkg
+    out = dict(pkg)
+    out.setdefault('groups', [])
+    out['package_type'] = 'Slutmotor V46 – B52200_TRUE + MICRO_TIGHT_CLOSE'
+    out['variant'] = 'B52200_MICRO_TIGHT_CLOSE'
+    out['variant_label'] = 'B52200_TRUE bas + MICRO_TIGHT_CLOSE rescue'
+    out['target_label'] = f"V46 slutmotor {int(out.get('hist_hit', 0))}/{int(out.get('hist_total', 0))}"
+    # Appens sammanfattning förväntar dessa fält.
+    out['value_filters'] = int(out.get('value_filters', out.get('profile_filters', 0)) or 0)
+    out['fat_filters'] = int(out.get('fat_filters', 0) or 0)
+    out['structure_filters'] = int(out.get('structure_filters', 0) or 0)
+    out['num_filters'] = int(out.get('num_filters', len(out.get('filters', []) or [])) or 0)
+    meta = dict(out.get('meta') or {})
+    meta.update({
+        'engine': 'v46_b52200_micro_tight_close_app',
+        'selected_source': source_label,
+        'micro_rescue_active': bool(decision_meta.get('rescue_active', False)),
+        'micro_reason': decision_meta.get('reason', ''),
+    })
+    out['meta'] = meta
+    return out
+
+
+def _run_v46_final_motor_current(sim_df, specs, frame_rows, frame, filter_vec, antal_matcher, global_db=None, top_n=30, pay_min=100000, pay_max=2500000, filter_hist_target_pct=95):
+    """Bygger aktuell kupongs slutmotorpaket med V46-maskineriet."""
+    if int(antal_matcher) != 13:
+        raise ValueError('V46-slutmotorn är endast låst/testad för 13 matcher.')
+    mod = _load_v46_engine_module()
+    ns = globals()
+    try:
+        mod._ACTIVE_V9_NS = ns
+    except Exception:
+        pass
+
+    args = _v46_final_args(top_n=top_n, pay_min=pay_min, pay_max=pay_max, filter_hist_target_pct=filter_hist_target_pct)
+    if isinstance(global_db, pd.DataFrame) and not global_db.empty:
+        try:
+            wide_df = _similar_history_for_backtest(
+                global_db, filter_vec, int(antal_matcher),
+                top_n=max(int(top_n), 35), pay_min=int(pay_min), pay_max=int(pay_max),
+                exclude_index=None, mode='leave-one-out', test_date=None,
+            )
+            if not isinstance(wide_df, pd.DataFrame) or wide_df.empty:
+                wide_df = sim_df
+        except Exception:
+            wide_df = sim_df
+    else:
+        wide_df = sim_df
+
+    base_args = mod._v15_variant_args(args, 'B5')
+    global_settings = {
+        'profile_min_hit': int(getattr(base_args, 'candidate_min_hit', getattr(base_args, 'min_hit', 29))),
+        'min_candidate_val_pct': float(getattr(base_args, 'min_candidate_val_pct', 85.0)),
+        'min_structure_val_pct': float(getattr(base_args, 'min_structure_val_pct', 95.0)),
+        'min_gap_score': float(getattr(base_args, 'min_gap_score', 0.75)),
+    }
+
+    candidates, htot, vtot, ftot, hist_payout = mod._build_dynamic_candidates_v9(
+        ns, specs, sim_df, frame_rows, frame, int(antal_matcher),
+        profile_min_hit=int(global_settings['profile_min_hit']),
+        variants_per_key=int(args.variants_per_key),
+        max_candidates=int(args.max_candidates),
+        validation_df=wide_df,
+        min_candidate_val_pct=float(global_settings['min_candidate_val_pct']),
+        min_structure_val_pct=float(global_settings['min_structure_val_pct']),
+        min_gap_score=float(global_settings['min_gap_score']),
+        frame_adapt=True,
+    )
+    candidates = mod._v13_enrich_candidates(candidates, hist_payout, htot)
+    if not candidates:
+        raise RuntimeError('V46 kunde inte bygga några giltiga kandidater för aktuell kupong.')
+
+    built = {}
+    errors = {}
+    group_counts = {}
+    for variant_id in ['B52200_TRUE', 'B52200_BS29_TIGHT']:
+        try:
+            vargs = mod._v15_variant_args(args, variant_id)
+            cand0 = mod._v15_filter_candidates_for_variant(candidates, vargs, htot)
+            cand_v, group_cands = mod._v15_transform_candidates(cand0, htot, vtot, ftot, hist_payout, vargs, variant_id)
+            group_counts[variant_id] = int(len(group_cands))
+            if not cand_v:
+                raise RuntimeError('Inga kandidater efter V15-transformering.')
+            pkg, meta = mod._build_cluster_payout_package_v13_from_candidates(
+                ns, cand_v, htot, vtot, ftot, hist_payout, frame_rows, frame, int(antal_matcher), vargs, variant_id,
+            )
+            if pkg is None:
+                raise RuntimeError((meta or {}).get('error', 'Inget paket'))
+            built[variant_id] = pkg
+        except Exception as e:
+            errors[variant_id] = str(e)
+
+    selected, decision = _v46_micro_tight_close_select(built.get('B52200_TRUE'), built.get('B52200_BS29_TIGHT'))
+    if selected is None:
+        raise RuntimeError(decision.get('reason', 'V46 kunde inte välja paket.'))
+    selected_app = _normalize_v46_package_for_app(selected, decision.get('selected_source', ''), decision)
+
+    diag_rows = [
+        _v46_pkg_diag_row('B52200_TRUE', built.get('B52200_TRUE'), errors.get('B52200_TRUE', '')),
+        _v46_pkg_diag_row('B52200_BS29_TIGHT', built.get('B52200_BS29_TIGHT'), errors.get('B52200_BS29_TIGHT', '')),
+    ]
+    diag = pd.DataFrame(diag_rows)
+    if not diag.empty:
+        diag['Vald'] = diag['Paket'].astype(str).eq(decision.get('selected_source', '')).map(lambda x: 'JA' if x else '')
+        diag['Gruppkandidater'] = diag['Paket'].map(lambda x: group_counts.get(str(x), 0))
+
+    meta = {
+        'package_engine': 'v46_b52200_micro_tight_close_app',
+        'selected_source': decision.get('selected_source', ''),
+        'micro_rescue_active': bool(decision.get('rescue_active', False)),
+        'micro_reason': decision.get('reason', ''),
+        'candidates': int(len(candidates)),
+        'hist_total': int(htot),
+        'validation_total': int(vtot),
+        'frame_rows': int(ftot),
+        'top_n': int(top_n),
+        'pay_min': int(pay_min),
+        'pay_max': int(pay_max),
+        'module_path': str(_v46_engine_module_path()),
+    }
+    return selected_app, meta, diag
+
+
+
 # Init state
 for k, v in {
     'v12_analysis_ready': False,
@@ -8584,6 +8855,59 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
 
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
         st.caption("Testar Pareto-bästa paket på radmassan efter dina manuella teckengrupper. De manuella teckengrupperna visas separat och drar inte ner paketens historiska filterträff. Paketmotorn bygger nivåtrappa per filter, testar även kombinationslyft av småfilter, visar progressklocka/ETA, eftertrimmar valt paket och visar hårda grupppaket som egen pakettyp.")
+
+        st.markdown("**🎯 Slutmotor V46 – B52200 + micro-rescue**")
+        st.caption("Låst huvudmotor för riktig test: B52200_TRUE byggs först. B52200_BS29_TIGHT får bara ta över om MICRO_TIGHT_CLOSE-regeln säger att rescue är nära i radantal, inte sväller och håller intern paketträff. Detta använder inte facit.")
+        v46_warns = []
+        if int(antal_matcher) != 13:
+            v46_warns.append("Slutmotorn är låst/testad för 13 matcher.")
+        if int(top_n) != 30:
+            v46_warns.append("V46-testen kördes med 30 liknande omgångar. Du kör nu annat värde.")
+        if int(pay_min) != 100000 or int(pay_max) != 2500000:
+            v46_warns.append("V46-testen kördes med utdelningsintervall 100 000–2 500 000 kr.")
+        if v46_warns:
+            st.warning(" ".join(v46_warns))
+        run_v46_final = st.button("🎯 Beräkna slutmotor B52200 + MICRO_TIGHT_CLOSE", use_container_width=True, key="v12_run_v46_final_motor")
+        if run_v46_final:
+            for _k in ['v12_recommended_packages', 'v12_recommended_candidate_audit', 'v12_recommended_meta', 'v12_applied_package_meta', 'v12_applied_package_snapshot']:
+                st.session_state.pop(_k, None)
+            try:
+                with st.spinner("Kör V46-slutmotorn: B52200_TRUE + tight micro-rescue..."):
+                    final_pkg, final_meta, final_diag = _run_v46_final_motor_current(
+                        v_m, specs, manual_frame_rows, frame, filter_vec, int(antal_matcher),
+                        global_db=_streck_hist_db,
+                        top_n=int(top_n), pay_min=int(pay_min), pay_max=int(pay_max),
+                        filter_hist_target_pct=int(filter_hist_target_pct),
+                    )
+                st.session_state['v12_recommended_packages'] = [final_pkg]
+                st.session_state['v12_recommended_candidate_audit'] = final_diag
+                st.session_state['v12_recommended_meta'] = {
+                    **final_meta,
+                    'manual_sign_groups_sig': manual_sign_groups_sig,
+                    'manual_sign_groups_active': int(sum(1 for g in manual_sign_groups if g.get('active'))),
+                    'frame_rows_before_manual': int(len(frame_rows)),
+                    'frame_rows': int(len(manual_frame_rows)),
+                    'display_max_rows': int(st.session_state.get('v12_rec_display_max_rows', 5000)),
+                    'required_keys': [],
+                }
+                st.session_state['v12_final_motor_meta'] = final_meta
+                st.session_state['v12_final_motor_diag'] = final_diag
+                st.success(f"Slutmotor klar: {final_meta.get('selected_source')} vald · {int(final_pkg.get('frame_after', 0)):,} rader · {int(final_pkg.get('hist_hit', 0))}/{int(final_pkg.get('hist_total', 0))} intern paketträff.".replace(',', ' '))
+                if final_meta.get('micro_rescue_active'):
+                    st.info("Micro-rescue aktiverades: " + str(final_meta.get('micro_reason', '')))
+                else:
+                    st.caption(str(final_meta.get('micro_reason', '')))
+            except Exception as e:
+                st.error(f"V46-slutmotorn kunde inte köras: {e}")
+                with st.expander("Visa tekniskt fel", expanded=False):
+                    st.code(traceback.format_exc(), language="text")
+
+        final_diag_show = st.session_state.get('v12_final_motor_diag')
+        final_meta_show = st.session_state.get('v12_final_motor_meta') or {}
+        if isinstance(final_diag_show, pd.DataFrame) and not final_diag_show.empty:
+            st.dataframe(final_diag_show, use_container_width=True, hide_index=True)
+            if final_meta_show:
+                st.caption(str(final_meta_show.get('micro_reason', '')))
 
         with st.expander("Välj filter som måste ingå i rekommenderade paket", expanded=False):
             st.caption("Kryssa i filter du vill att paketmotorn ska använda. Ändringar ligger i ett formulär och sparas först när du trycker på knappen, så sidan laddar inte om för varje kryss.")
