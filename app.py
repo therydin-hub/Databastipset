@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0de – Mönstermotor sortering + grundramsradantal"
+APP_VERSION = "v12.0df – Mönstermotor sortering + grundramsradantal"
 
 
 st.markdown("""
@@ -31,6 +31,11 @@ st.markdown("""
     .tm-title {font-size: 1.25rem; font-weight: 800; margin-bottom: .2rem;}
     .tm-muted {opacity: .72; font-size: .92rem;}
     .tm-pill {display:inline-block; padding: .16rem .50rem; border:1px solid rgba(128,128,128,.35); border-radius:999px; font-size:.82rem; margin-right:.25rem; margin-top:.2rem;}
+
+    .v12-preview-grid {display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap:10px; margin:.55rem 0 .85rem 0;}
+    .v12-preview-card {border:1px solid rgba(120,120,120,.24); border-radius:12px; padding:8px 11px; background:rgba(128,128,128,.04); min-height:58px;}
+    .v12-preview-label {font-size:.76rem; opacity:.82; font-weight:800; margin-bottom:.18rem;}
+    .v12-preview-value {font-size:1.08rem; font-weight:850; line-height:1.15; white-space:normal; overflow-wrap:anywhere; word-break:break-word;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -3752,6 +3757,11 @@ st.markdown("""
     .v12-info-label {font-size:.82rem; opacity:.86; font-weight:800; margin-bottom:.34rem;}
     .v12-info-value {font-size:1.38rem; font-weight:850; line-height:1.15; white-space:normal; overflow-wrap:anywhere; word-break:break-word;}
     .v12-info-sub {font-size:.82rem; opacity:.76; margin-top:.32rem; line-height:1.25;}
+
+    .v12-preview-grid {display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap:10px; margin:.55rem 0 .85rem 0;}
+    .v12-preview-card {border:1px solid rgba(120,120,120,.24); border-radius:12px; padding:8px 11px; background:rgba(128,128,128,.04); min-height:58px;}
+    .v12-preview-label {font-size:.76rem; opacity:.82; font-weight:800; margin-bottom:.18rem;}
+    .v12-preview-value {font-size:1.08rem; font-weight:850; line-height:1.15; white-space:normal; overflow-wrap:anywhere; word-break:break-word;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -8723,7 +8733,7 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
                 hh = int(s['hist_mask'].sum())
                 pc = int(s.get('profile_count',0)); sc = int(s.get('structure_count',0))
                 in_band = 0 if int(min_rows) <= rows_left <= int(max_rows) else 1
-                # v12.0de: maxrader är bara ett tak. Rangordna spelbara paket efter
+                # v12.0df: maxrader är bara ett tak. Rangordna spelbara paket efter
                 # högsta historikträff och därefter lägst radantal (=bäst reducering).
                 return (in_band, max(0, rows_left-int(max_rows)), -hh, rows_left, len(s['rules']), -pc, sc, abs(rows_left-int(target_rows)))
             nxt.sort(key=state_rank)
@@ -10327,11 +10337,25 @@ else:
     _halv = sum(1 for signs in frame_new if len(signs) == 2)
     _hel = sum(1 for signs in frame_new if len(signs) == 3)
     _sign_counts = {s: sum(1 for signs in frame_new if s in signs) for s in ['1','X','2']}
-    pc1, pc2, pc3, pc4 = st.columns(4)
-    pc1.metric("Förhandsvisning rader", f"{_preview_rows:,}".replace(',', ' '))
-    pc2.metric("Ramtyp", f"{_spikar} spik · {_hel} hel · {_halv} halv")
-    pc3.metric("Markerade tecken", f"1:{_sign_counts['1']} · X:{_sign_counts['X']} · 2:{_sign_counts['2']}")
-    pc4.metric("Kompakt", frame_compact_string(frame_new))
+    st.markdown(
+        f"""
+        <div class='v12-preview-grid'>
+          <div class='v12-preview-card'>
+            <div class='v12-preview-label'>Förhandsvisning rader</div>
+            <div class='v12-preview-value'>{f'{_preview_rows:,}'.replace(',', ' ')}</div>
+          </div>
+          <div class='v12-preview-card'>
+            <div class='v12-preview-label'>Ramtyp</div>
+            <div class='v12-preview-value'>{_spikar} spik · {_hel} hel · {_halv} halv</div>
+          </div>
+          <div class='v12-preview-card'>
+            <div class='v12-preview-label'>Markerade tecken</div>
+            <div class='v12-preview-value'>1:{_sign_counts['1']} · X:{_sign_counts['X']} · 2:{_sign_counts['2']}</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 save_frame = st.button("💾 Spara grundram", use_container_width=True, key=f"v12_save_frame_btn_{_frame_token}")
 
