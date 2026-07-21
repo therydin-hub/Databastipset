@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0da – Budgetmotor 2K profilförst"
+APP_VERSION = "v12.0db – Mönstermotor 2K diagnos"
 
 
 st.markdown("""
@@ -8264,6 +8264,473 @@ def _apply_recommended_package_to_session(package, specs, filter_hist_target_pct
 
 
 
+
+
+# =============================================================================
+# v12.0db – MÖNSTERMOTOR 2K DIAGNOS
+# =============================================================================
+# Prototyp/diagnos: skapar egna dynamiska regler från 30 liknande rätta rader.
+# Den använder inte bara befintliga filterintervall, utan bygger egna features
+# från streck/procent, favorit/skräll, zoner och sammansatta poäng. I denna
+# version appliceras den inte i Filtercentralen; den visar om konceptet kan nå
+# 2k-bandet innan vi bygger applicering.
+
+
+def _pm2k_row_str(row):
+    try:
+        if isinstance(row, str):
+            return row.strip().upper()
+        if isinstance(row, (list, tuple)):
+            return ''.join(str(x).strip().upper() for x in row)
+        return str(row).strip().upper()
+    except Exception:
+        return ''
+
+
+def _pm2k_prob_groups(prob_vec, n=13):
+    try:
+        vals = [float(x) for x in list(prob_vec or [])]
+    except Exception:
+        vals = []
+    out = []
+    for i in range(int(n)):
+        base = 3*i
+        tri = vals[base:base+3]
+        if len(tri) < 3:
+            tri = [0.0, 0.0, 0.0]
+        out.append((float(tri[0]), float(tri[1]), float(tri[2])))
+    return out
+
+
+def _pm2k_selected_pcts(row, prob_vec, n=13):
+    s = _pm2k_row_str(row)
+    groups = _pm2k_prob_groups(prob_vec, n)
+    idx_map = {'1': 0, 'X': 1, '2': 2}
+    vals = []
+    for i in range(min(int(n), len(s), len(groups))):
+        idx = idx_map.get(s[i], None)
+        if idx is None:
+            vals.append(0.0)
+        else:
+            vals.append(float(groups[i][idx]))
+    while len(vals) < int(n):
+        vals.append(0.0)
+    return vals
+
+
+def _pm2k_fav_idxs(prob_vec, n=13):
+    groups = _pm2k_prob_groups(prob_vec, n)
+    out = []
+    for i, tri in enumerate(groups):
+        try:
+            mi = int(np.argmax(list(tri)))
+            out.append((i, mi, float(tri[mi]), tuple(float(x) for x in tri)))
+        except Exception:
+            out.append((i, 0, 0.0, (0.0,0.0,0.0)))
+    return out
+
+
+def _pm2k_sign_idx(ch):
+    return {'1':0,'X':1,'2':2}.get(str(ch).upper(), -1)
+
+
+def _pm2k_longest_run(row, target=None):
+    s = _pm2k_row_str(row)
+    best = cur = 0
+    prev = None
+    for ch in s:
+        if target is not None and ch != target:
+            cur = 0
+            prev = None
+            continue
+        if target is None:
+            if ch == prev:
+                cur += 1
+            else:
+                cur = 1
+                prev = ch
+        else:
+            cur += 1
+        best = max(best, cur)
+    return int(best)
+
+
+def _pm2k_changes(row):
+    s = _pm2k_row_str(row)
+    return int(sum(1 for i in range(1, len(s)) if s[i] != s[i-1]))
+
+
+def _pm2k_zone(row, start, end):
+    s = _pm2k_row_str(row)
+    return s[int(start):int(end)]
+
+
+def _pm2k_make_feature_defs(filter_vec, antal_matcher=13):
+    """Skapar egna dynamiska featuredefinitioner för mönstermotorn.
+
+    Varje feature räknas både på historiska facitrader med respektive historisk
+    procentvektor och på dagens grundram med dagens procentvektor.
+    """
+    n = int(antal_matcher or 13)
+    defs = []
+    def add(name, group, fn, desc='', risk='Normal'):
+        defs.append({'name': str(name), 'group': str(group), 'fn': fn, 'desc': str(desc), 'risk': str(risk)})
+
+    # Grundläggande streckvärde på vald rad.
+    add('Egen poäng: strecksumma vald rad', 'Egen poäng/värde', lambda row,pv: sum(_pm2k_selected_pcts(row,pv,n)), 'Summa av streckprocent på de tecken raden väljer.')
+    add('Egen poäng: snittstreck vald rad', 'Egen poäng/värde', lambda row,pv: float(np.mean(_pm2k_selected_pcts(row,pv,n))), 'Medelstreck på valda tecken.')
+    add('Egen poäng: streckspridning', 'Egen poäng/värde', lambda row,pv: float(np.std(_pm2k_selected_pcts(row,pv,n))), 'Spridning mellan höga/låga valda streck.')
+    add('Egen poäng: lågstreck under 10', 'Egen poäng/värde', lambda row,pv: sum(1 for x in _pm2k_selected_pcts(row,pv,n) if x < 10), 'Antal valda tecken under 10%.')
+    add('Egen poäng: lågstreck under 15', 'Egen poäng/värde', lambda row,pv: sum(1 for x in _pm2k_selected_pcts(row,pv,n) if x < 15), 'Antal valda tecken under 15%.')
+    add('Egen poäng: mellanskräll 10–25', 'Egen poäng/värde', lambda row,pv: sum(1 for x in _pm2k_selected_pcts(row,pv,n) if 10 <= x <= 25), 'Antal valda tecken 10–25%.')
+    add('Egen poäng: värdetecken 20–45', 'Egen poäng/värde', lambda row,pv: sum(1 for x in _pm2k_selected_pcts(row,pv,n) if 20 <= x <= 45), 'Antal valda tecken i mellanzonen 20–45%.')
+    add('Egen poäng: högstreck 60+', 'Egen poäng/värde', lambda row,pv: sum(1 for x in _pm2k_selected_pcts(row,pv,n) if x >= 60), 'Antal valda tecken över 60%.')
+    add('Egen poäng: överfavoriter 70+', 'Egen poäng/värde', lambda row,pv: sum(1 for x in _pm2k_selected_pcts(row,pv,n) if x >= 70), 'Antal valda tecken över 70%.')
+    add('Egen värdebalans: mellan minus extrem', 'Egen poäng/värde', lambda row,pv: sum(1 for x in _pm2k_selected_pcts(row,pv,n) if 20 <= x <= 45) - sum(1 for x in _pm2k_selected_pcts(row,pv,n) if x < 10 or x >= 70), 'Mellantecken minus extrema tecken.')
+    add('Egen skrällbalans: små + mellan', 'Egen skräll', lambda row,pv: sum(2 for x in _pm2k_selected_pcts(row,pv,n) if 10 <= x < 25) + sum(1 for x in _pm2k_selected_pcts(row,pv,n) if 25 <= x <= 40) - sum(2 for x in _pm2k_selected_pcts(row,pv,n) if x < 8), 'Premierar spelbara skrällar 10–40%, straffar extrema under 8%.')
+
+    # Favorit-/skrällrelationer.
+    def fav_count_top(row, pv, topn):
+        s = _pm2k_row_str(row)
+        favs = sorted(_pm2k_fav_idxs(pv,n), key=lambda t: t[2], reverse=True)[:int(topn)]
+        return sum(1 for i, mi, pct, tri in favs if i < len(s) and _pm2k_sign_idx(s[i]) == mi)
+    def fav_miss_top(row, pv, topn):
+        s = _pm2k_row_str(row)
+        favs = sorted(_pm2k_fav_idxs(pv,n), key=lambda t: t[2], reverse=True)[:int(topn)]
+        return sum(1 for i, mi, pct, tri in favs if i < len(s) and _pm2k_sign_idx(s[i]) != mi)
+    for topn in [3,4,5,6,8]:
+        add(f'Egen favoritregel: topp {topn} favoriter sitter', 'Egen favorit/skräll', lambda row,pv,topn=topn: fav_count_top(row,pv,topn), f'Antal av topp {topn} favoriter som raden tar.')
+        add(f'Egen favoritregel: topp {topn} favoritmissar', 'Egen favorit/skräll', lambda row,pv,topn=topn: fav_miss_top(row,pv,topn), f'Antal av topp {topn} favoriter som raden fäller.')
+
+    def fav_count_threshold(row, pv, thr):
+        s = _pm2k_row_str(row)
+        c=0
+        for i,mi,pct,tri in _pm2k_fav_idxs(pv,n):
+            if pct >= float(thr) and i < len(s) and _pm2k_sign_idx(s[i]) == mi:
+                c += 1
+        return c
+    def fav_miss_threshold(row, pv, thr):
+        s = _pm2k_row_str(row)
+        c=0
+        for i,mi,pct,tri in _pm2k_fav_idxs(pv,n):
+            if pct >= float(thr) and i < len(s) and _pm2k_sign_idx(s[i]) != mi:
+                c += 1
+        return c
+    for thr in [50,60,70]:
+        add(f'Egen favoritregel: {thr}%+ favoriter sitter', 'Egen favorit/skräll', lambda row,pv,thr=thr: fav_count_threshold(row,pv,thr), f'Antal favoriter över {thr}% som sitter.')
+        add(f'Egen favoritregel: {thr}%+ favoriter faller', 'Egen favorit/skräll', lambda row,pv,thr=thr: fav_miss_threshold(row,pv,thr), f'Antal favoriter över {thr}% som faller.')
+
+    # Tecken och zoner. Detta är egna strukturregler, inte gamla färdiga specs.
+    for sign in ['1','X','2']:
+        add(f'Egen struktur: antal {sign}', 'Egen struktur', lambda row,pv,sign=sign: _pm2k_row_str(row).count(sign), f'Totalt antal {sign}.')
+        add(f'Egen struktur: {sign} första 6', 'Egen struktur', lambda row,pv,sign=sign: _pm2k_zone(row,0,6).count(sign), f'Antal {sign} i match 1–6.')
+        add(f'Egen struktur: {sign} sista 7', 'Egen struktur', lambda row,pv,sign=sign: _pm2k_zone(row,6,n).count(sign), f'Antal {sign} i match 7–{n}.')
+        add(f'Egen sekvens: längsta följd {sign}', 'Egen struktur', lambda row,pv,sign=sign: _pm2k_longest_run(row,sign), f'Längsta följd med {sign}.')
+    add('Egen sekvens: längsta följd totalt', 'Egen struktur', lambda row,pv: _pm2k_longest_run(row,None), 'Längsta följd av samma tecken.')
+    add('Egen sekvens: antal teckenbyten', 'Egen struktur', lambda row,pv: _pm2k_changes(row), 'Antal byten mellan tecken i raden.')
+
+    # Zonvärde: streckprofil i första/sista delen.
+    def selected_zone_pcts(row,pv,start,end):
+        vals = _pm2k_selected_pcts(row,pv,n)
+        return vals[int(start):int(end)]
+    for label,start,end in [('första 6',0,6),('sista 7',6,n),('mittzon 4–10',3,min(n,10))]:
+        add(f'Egen zonpoäng: strecksumma {label}', 'Egen poäng/värde', lambda row,pv,start=start,end=end: sum(selected_zone_pcts(row,pv,start,end)), f'Strecksumma i {label}.')
+        add(f'Egen zonpoäng: lågstreck {label}', 'Egen skräll', lambda row,pv,start=start,end=end: sum(1 for x in selected_zone_pcts(row,pv,start,end) if x < 20), f'Antal valda tecken under 20% i {label}.')
+        add(f'Egen zonpoäng: värdetecken {label}', 'Egen poäng/värde', lambda row,pv,start=start,end=end: sum(1 for x in selected_zone_pcts(row,pv,start,end) if 20 <= x <= 45), f'Antal valda tecken 20–45% i {label}.')
+
+    return defs
+
+
+def _pm2k_hist_pairs(v_m, antal_matcher=13):
+    pairs = []
+    try:
+        for _, row in v_m.iterrows():
+            pairs.append((_pm2k_row_str(row.get('Correct_Row','')), list(row.get('Prob_Vector', []) or [])))
+    except Exception:
+        pass
+    return pairs
+
+
+def _pm2k_feature_values(feature, hist_pairs, frame_rows, filter_vec, antal_matcher=13):
+    hist_vals = []
+    for r, pv in hist_pairs:
+        try:
+            hist_vals.append(float(feature['fn'](r, pv)))
+        except Exception:
+            hist_vals.append(np.nan)
+    frame_vals = []
+    for r in frame_rows or []:
+        try:
+            frame_vals.append(float(feature['fn'](r, filter_vec)))
+        except Exception:
+            frame_vals.append(np.nan)
+    return hist_vals, frame_vals
+
+
+def _pm2k_candidate_intervals_for_feature(feature, hist_vals, frame_vals, frame_total, min_hit_floor=27, max_rules_per_feature=6):
+    clean = [float(v) for v in hist_vals if not pd.isna(v)]
+    if not clean or not frame_vals:
+        return []
+    htot = len(clean)
+    arr = sorted(clean)
+    rules = []
+    # Skapa fönster som täcker 30/29/28/27 av 30, och låt de mest reducerande vinna.
+    for hit_target in range(htot, max(0, int(min_hit_floor)-1), -1):
+        if hit_target <= 0 or hit_target > htot:
+            continue
+        for i in range(0, htot - hit_target + 1):
+            lo = arr[i]
+            hi = arr[i + hit_target - 1]
+            # Numerisk padding för decimalvärden, men inte mer än nödvändigt.
+            if abs(lo - round(lo)) < 1e-9 and abs(hi - round(hi)) < 1e-9:
+                lo2, hi2 = int(round(lo)), int(round(hi))
+            else:
+                lo2, hi2 = round(lo, 3), round(hi, 3)
+            hist_hit = sum(1 for v in clean if lo2 <= float(v) <= hi2)
+            if hist_hit < int(min_hit_floor):
+                continue
+            keep = 0
+            for v in frame_vals:
+                try:
+                    if lo2 <= float(v) <= hi2:
+                        keep += 1
+                except Exception:
+                    pass
+            if keep <= 0 or keep >= int(frame_total):
+                continue
+            red = 100.0 - 100.0 * keep / max(1, int(frame_total))
+            if red < 2.0:
+                continue
+            width = float(hi2) - float(lo2)
+            rules.append({
+                'feature': feature,
+                'name': feature.get('name',''),
+                'group': feature.get('group','Mönster'),
+                'lo': lo2,
+                'hi': hi2,
+                'hist_hit': int(hist_hit),
+                'hist_total': int(htot),
+                'frame_after_single': int(keep),
+                'single_reduction_pct': float(red),
+                'width': float(width),
+                'desc': feature.get('desc',''),
+                'risk': feature.get('risk','Normal'),
+                'key': 'PM2K::' + str(abs(hash((feature.get('name',''), lo2, hi2))) % 10**12),
+            })
+    # Dedupe per exakt intervall.
+    best = {}
+    for r in rules:
+        k = (r['name'], r['lo'], r['hi'])
+        cur = best.get(k)
+        if cur is None or (r['hist_hit'], r['single_reduction_pct']) > (cur['hist_hit'], cur['single_reduction_pct']):
+            best[k] = r
+    rules = list(best.values())
+    # Enskilda regler: historik först, sedan reduktion. För paketbyggaren behåller vi bredd.
+    rules.sort(key=lambda r: (-int(r['hist_hit']), -float(r['single_reduction_pct']), float(r['width'])))
+    return rules[:int(max_rules_per_feature)]
+
+
+def _pm2k_build_rule_pool(v_m, frame_rows, filter_vec, antal_matcher=13, min_hit_floor=27):
+    features = _pm2k_make_feature_defs(filter_vec, antal_matcher)
+    hist_pairs = _pm2k_hist_pairs(v_m, antal_matcher)
+    frame_total = len(frame_rows or [])
+    all_rules = []
+    feature_diag = []
+    for feat in features:
+        hv, fv = _pm2k_feature_values(feat, hist_pairs, frame_rows, filter_vec, antal_matcher)
+        rules = _pm2k_candidate_intervals_for_feature(feat, hv, fv, frame_total, min_hit_floor=min_hit_floor, max_rules_per_feature=5)
+        all_rules.extend(rules)
+        if rules:
+            best = rules[0]
+            feature_diag.append({
+                'Feature': feat.get('name',''), 'Grupp': feat.get('group',''),
+                'Bästa intervall': f"{best['lo']}–{best['hi']}",
+                'Träff': f"{best['hist_hit']}/{best['hist_total']}",
+                'Kvar rader': int(best['frame_after_single']),
+                'Reducerar %': round(float(best['single_reduction_pct']), 1),
+                'Beskrivning': feat.get('desc',''),
+            })
+    # Prioritera egna profil/poängregler i poolen men behåll struktur som möjligt stöd.
+    def rule_score(r):
+        grp = str(r.get('group',''))
+        profile_bonus = 10.0 if any(x in grp for x in ['poäng','värde','skräll','favorit']) else 0.0
+        structure_penalty = -4.0 if 'struktur' in grp.lower() else 0.0
+        return (int(r.get('hist_hit',0))*100.0 + float(r.get('single_reduction_pct',0))*2.0 + profile_bonus + structure_penalty)
+    all_rules = sorted(all_rules, key=rule_score, reverse=True)
+    return all_rules, pd.DataFrame(feature_diag)
+
+
+def _pm2k_rule_masks(rules, v_m, frame_rows, filter_vec, antal_matcher=13):
+    hist_pairs = _pm2k_hist_pairs(v_m, antal_matcher)
+    out = []
+    for r in rules:
+        fn = r['feature']['fn']
+        lo, hi = r['lo'], r['hi']
+        hm = []
+        for hr, hpv in hist_pairs:
+            try:
+                hm.append(bool(lo <= float(fn(hr, hpv)) <= hi))
+            except Exception:
+                hm.append(False)
+        fm = []
+        for row in frame_rows or []:
+            try:
+                fm.append(bool(lo <= float(fn(row, filter_vec)) <= hi))
+            except Exception:
+                fm.append(False)
+        rr = dict(r)
+        rr['_hist_mask'] = np.array(hm, dtype=bool)
+        rr['_frame_mask'] = np.array(fm, dtype=bool)
+        out.append(rr)
+    return out
+
+
+def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_rows=2200, min_rows=1850, max_rows=2500, min_hit_floor=27):
+    frame_total = int(len(frame_rows or []))
+    htot = int(len(v_m))
+    rules, feat_diag = _pm2k_build_rule_pool(v_m, frame_rows, filter_vec, antal_matcher, min_hit_floor=min_hit_floor)
+    # Begränsa för snabbhet men behåll bra blandning.
+    # Ta topp per grupp + topp total.
+    selected = []
+    by_group = {}
+    for r in rules:
+        by_group.setdefault(str(r.get('group','')), []).append(r)
+    for g, rs in by_group.items():
+        selected.extend(rs[:35])
+    selected.extend(rules[:90])
+    # Dedupe.
+    seen = set(); cand = []
+    for r in selected:
+        k = (r['name'], r['lo'], r['hi'])
+        if k in seen:
+            continue
+        seen.add(k); cand.append(r)
+    cand = cand[:140]
+    cand = _pm2k_rule_masks(cand, v_m, frame_rows, filter_vec, antal_matcher)
+
+    diag_rows = []
+    for floor in range(htot, max(0, int(min_hit_floor)-1), -1):
+        beam = [{
+            'rules': [],
+            'used_features': set(),
+            'hist_mask': np.ones(htot, dtype=bool),
+            'frame_mask': np.ones(frame_total, dtype=bool),
+            'profile_count': 0,
+            'structure_count': 0,
+        }]
+        best_under = None
+        best_any = None
+        max_depth = 12
+        beam_width = 160
+        for depth in range(max_depth):
+            nxt = []
+            for state in beam:
+                cur_rows = int(state['frame_mask'].sum())
+                # Stanna om det redan ligger för lågt; fler filter hjälper inte.
+                if cur_rows < int(min_rows):
+                    continue
+                for rule in cand:
+                    fname = str(rule.get('name',''))
+                    if fname in state['used_features']:
+                        continue
+                    new_hmask = state['hist_mask'] & rule['_hist_mask']
+                    hh = int(new_hmask.sum())
+                    if hh < int(floor):
+                        continue
+                    new_fmask = state['frame_mask'] & rule['_frame_mask']
+                    rows_left = int(new_fmask.sum())
+                    if rows_left <= 0 or rows_left >= cur_rows:
+                        continue
+                    grp = str(rule.get('group','')).lower()
+                    is_struct = 'struktur' in grp
+                    pc = int(state['profile_count']) + (0 if is_struct else 1)
+                    sc = int(state['structure_count']) + (1 if is_struct else 0)
+                    # Hindra struktur från att bli ryggrad i denna mönstermotor.
+                    if sc > max(3, pc):
+                        continue
+                    ns = {
+                        'rules': state['rules'] + [rule],
+                        'used_features': set(state['used_features']) | {fname},
+                        'hist_mask': new_hmask,
+                        'frame_mask': new_fmask,
+                        'profile_count': pc,
+                        'structure_count': sc,
+                    }
+                    val = (abs(rows_left-int(target_rows)), -hh, len(ns['rules']), sc)
+                    if int(min_rows) <= rows_left <= int(max_rows):
+                        if best_under is None or val < best_under[0]:
+                            best_under = (val, ns)
+                    if rows_left >= int(min_rows):
+                        any_val = (max(0, rows_left-int(max_rows)), abs(rows_left-int(target_rows)), -hh, len(ns['rules']), sc)
+                        if best_any is None or any_val < best_any[0]:
+                            best_any = (any_val, ns)
+                    nxt.append(ns)
+            if not nxt:
+                break
+            def state_rank(s):
+                rows_left = int(s['frame_mask'].sum())
+                hh = int(s['hist_mask'].sum())
+                pc = int(s.get('profile_count',0)); sc = int(s.get('structure_count',0))
+                in_band = 0 if int(min_rows) <= rows_left <= int(max_rows) else 1
+                return (in_band, max(0, rows_left-int(max_rows)), abs(rows_left-int(target_rows)), -hh, -pc, sc, len(s['rules']))
+            nxt.sort(key=state_rank)
+            beam = nxt[:beam_width]
+            if best_under is not None:
+                # Fortsätt ett varv kan hitta närmare mål, men inte för länge.
+                if depth >= 5:
+                    break
+        chosen = best_under[1] if best_under is not None else (best_any[1] if best_any is not None else None)
+        if chosen is not None:
+            rows_left = int(chosen['frame_mask'].sum())
+            hh = int(chosen['hist_mask'].sum())
+            diag_rows.append({
+                'Variant': f'MÖNSTERMOTOR2K {floor}/{htot}',
+                'Typ': 'Mönstermotor2K',
+                'Status': 'UNDER_2500' if rows_left <= int(max_rows) and rows_left >= int(min_rows) else 'ÖVER_BUDGET',
+                'Orsak': f'egna dynamiska regler · kandidater={len(cand)} · feature-regler={len(rules)} · profil={int(chosen.get("profile_count",0))} · struktur={int(chosen.get("structure_count",0))}',
+                'Paketträff': f'{hh}/{htot}',
+                'Paketrader': rows_left,
+                'Filter totalt': len(chosen['rules']),
+                'Budgetstatus': 'JA' if rows_left <= int(max_rows) and rows_left >= int(min_rows) else 'NEJ',
+            })
+            if rows_left <= int(max_rows) and rows_left >= int(min_rows):
+                return chosen, {'status':'MÖNSTERMOTOR2K_VALD','rows':rows_left,'hit':hh,'total':htot,'candidate_count':len(cand),'feature_rule_count':len(rules)}, pd.DataFrame(diag_rows), feat_diag
+        else:
+            diag_rows.append({
+                'Variant': f'MÖNSTERMOTOR2K {floor}/{htot}', 'Typ': 'Mönstermotor2K', 'Status': 'INGEN_KANDIDAT',
+                'Orsak': f'kandidater={len(cand)} · feature-regler={len(rules)}', 'Paketträff': f'0/{htot}', 'Paketrader': 0, 'Filter totalt': 0, 'Budgetstatus':'NEJ'
+            })
+    # inget under budget
+    best_row = None
+    try:
+        nonzero = [r for r in diag_rows if int(r.get('Paketrader',0) or 0) > 0]
+        best_row = min(nonzero, key=lambda r: int(r.get('Paketrader',10**12))) if nonzero else None
+    except Exception:
+        best_row = None
+    meta = {'status':'MÖNSTERMOTOR2K_INGET_UNDER_2500','candidate_count':len(cand),'feature_rule_count':len(rules)}
+    if best_row:
+        meta.update({'best_rows': int(best_row.get('Paketrader',0)), 'best_hit': str(best_row.get('Paketträff',''))})
+    return None, meta, pd.DataFrame(diag_rows), feat_diag
+
+
+def _pm2k_rules_to_rows(chosen):
+    rows = []
+    if not isinstance(chosen, dict):
+        return pd.DataFrame(rows)
+    for i, r in enumerate(chosen.get('rules', []) or [], 1):
+        rows.append({
+            'Regel': f'MÖNSTERREGEL – {i:02d}',
+            'Grupp': r.get('group',''),
+            'Namn': r.get('name',''),
+            'Intervall': f"{r.get('lo')}–{r.get('hi')}",
+            'Träff ensam': f"{r.get('hist_hit')}/{r.get('hist_total')}",
+            'Kvar ensam': int(r.get('frame_after_single',0)),
+            'Reducerar ensam %': round(float(r.get('single_reduction_pct',0.0)), 1),
+            'Beskrivning': r.get('desc',''),
+        })
+    return pd.DataFrame(rows)
+
+
 # =============================================================================
 # v12.0cu – EXAKT COLAB V46-PORT
 # =============================================================================
@@ -9797,6 +10264,46 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             st.dataframe(final_diag_show, use_container_width=True, hide_index=True)
             if final_meta_show:
                 st.caption(str(final_meta_show.get('micro_reason', '')))
+
+
+        st.divider()
+        st.markdown("**🧬 Mönstermotor 2K – diagnos/prototyp**")
+        st.caption("Skapar egna dynamiska regler från de 30 liknande rätta raderna: egna poäng, värde, skräll, favorit, zon och strukturmönster. Detta är diagnos först och appliceras inte automatiskt i Filtercentralen ännu.")
+        run_pm2k = st.button("🧬 Beräkna Mönstermotor 2K diagnos", use_container_width=True, key="v12_run_pm2k_diag")
+        if run_pm2k:
+            try:
+                with st.spinner("Skapar egna mönster-/poängregler och söker paket 1 850–2 500 rader..."):
+                    pm_chosen, pm_meta, pm_diag, pm_feat_diag = _pm2k_search_package(
+                        v_m, manual_frame_rows, filter_vec, int(antal_matcher),
+                        target_rows=2200, min_rows=1850, max_rows=2500, min_hit_floor=27,
+                    )
+                st.session_state['v12_pm2k_meta'] = pm_meta
+                st.session_state['v12_pm2k_diag'] = pm_diag
+                st.session_state['v12_pm2k_feature_diag'] = pm_feat_diag
+                st.session_state['v12_pm2k_rules'] = _pm2k_rules_to_rows(pm_chosen)
+                status = str(pm_meta.get('status',''))
+                if status == 'MÖNSTERMOTOR2K_VALD':
+                    st.success(f"Mönstermotor hittade paket: {int(pm_meta.get('rows',0)):,} rader · {int(pm_meta.get('hit',0))}/{int(pm_meta.get('total',0))} träff.".replace(',', ' '))
+                else:
+                    st.warning(f"Mönstermotor hittade inget under 2 500. Bästa info: {pm_meta}")
+            except Exception as e:
+                st.error(f"Mönstermotor kunde inte köras: {e}")
+                with st.expander("Visa tekniskt fel", expanded=False):
+                    st.code(traceback.format_exc(), language="text")
+        pm_diag_show = st.session_state.get('v12_pm2k_diag')
+        pm_rules_show = st.session_state.get('v12_pm2k_rules')
+        pm_feat_show = st.session_state.get('v12_pm2k_feature_diag')
+        pm_meta_show = st.session_state.get('v12_pm2k_meta') or {}
+        if isinstance(pm_diag_show, pd.DataFrame) and not pm_diag_show.empty:
+            st.caption("Mönstermotor 2K – sökresultat per träffgolv")
+            st.dataframe(pm_diag_show, use_container_width=True, hide_index=True)
+            st.caption(str(pm_meta_show))
+        if isinstance(pm_rules_show, pd.DataFrame) and not pm_rules_show.empty:
+            st.caption("Valda egna regler i mönsterpaketet")
+            st.dataframe(pm_rules_show, use_container_width=True, hide_index=True)
+        if isinstance(pm_feat_show, pd.DataFrame) and not pm_feat_show.empty:
+            with st.expander("Visa toppfeatures som mönstermotorn skapade", expanded=False):
+                st.dataframe(pm_feat_show.head(80), use_container_width=True, hide_index=True)
 
         with st.expander("Välj filter som måste ingå i rekommenderade paket", expanded=False):
             st.caption("Kryssa i filter du vill att paketmotorn ska använda. Ändringar ligger i ett formulär och sparas först när du trycker på knappen, så sidan laddar inte om för varje kryss.")
