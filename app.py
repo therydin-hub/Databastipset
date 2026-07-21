@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0db – Mönstermotor 2K diagnos"
+APP_VERSION = "v12.0dc – Mönstermotor 2K valbar"
 
 
 st.markdown("""
@@ -8585,10 +8585,20 @@ def _pm2k_rule_masks(rules, v_m, frame_rows, filter_vec, antal_matcher=13):
     return out
 
 
-def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_rows=2200, min_rows=1850, max_rows=2500, min_hit_floor=27):
+def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_rows=2200, min_rows=1850, max_rows=2500, min_hit_floor=27, progress_cb=None):
     frame_total = int(len(frame_rows or []))
     htot = int(len(v_m))
+    try:
+        if progress_cb:
+            progress_cb(3, 'Startar Mönstermotor 2K...')
+    except Exception:
+        pass
     rules, feat_diag = _pm2k_build_rule_pool(v_m, frame_rows, filter_vec, antal_matcher, min_hit_floor=min_hit_floor)
+    try:
+        if progress_cb:
+            progress_cb(18, f'Skapade {len(rules)} dynamiska regler. Förbereder kandidatpool...')
+    except Exception:
+        pass
     # Begränsa för snabbhet men behåll bra blandning.
     # Ta topp per grupp + topp total.
     selected = []
@@ -8606,10 +8616,21 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
             continue
         seen.add(k); cand.append(r)
     cand = cand[:140]
+    try:
+        if progress_cb:
+            progress_cb(28, f'Räknar masker för {len(cand)} kandidater...')
+    except Exception:
+        pass
     cand = _pm2k_rule_masks(cand, v_m, frame_rows, filter_vec, antal_matcher)
 
     diag_rows = []
-    for floor in range(htot, max(0, int(min_hit_floor)-1), -1):
+    floors = list(range(htot, max(0, int(min_hit_floor)-1), -1))
+    for floor_i, floor in enumerate(floors):
+        try:
+            if progress_cb:
+                progress_cb(32 + int(55 * floor_i / max(1, len(floors))), f'Söker paket med träffgolv {floor}/{htot}...')
+        except Exception:
+            pass
         beam = [{
             'rules': [],
             'used_features': set(),
@@ -8667,6 +8688,11 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
                     nxt.append(ns)
             if not nxt:
                 break
+            try:
+                if progress_cb and depth % 2 == 0:
+                    progress_cb(32 + int(55 * (floor_i + (depth+1)/max(1, max_depth)) / max(1, len(floors))), f'Träffgolv {floor}/{htot}: djup {depth+1}/{max_depth}, beam {len(nxt)}...')
+            except Exception:
+                pass
             def state_rank(s):
                 rows_left = int(s['frame_mask'].sum())
                 hh = int(s['hist_mask'].sum())
@@ -8694,6 +8720,11 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
                 'Budgetstatus': 'JA' if rows_left <= int(max_rows) and rows_left >= int(min_rows) else 'NEJ',
             })
             if rows_left <= int(max_rows) and rows_left >= int(min_rows):
+                try:
+                    if progress_cb:
+                        progress_cb(100, f'Mönstermotor klar: {rows_left} rader · {hh}/{htot}.')
+                except Exception:
+                    pass
                 return chosen, {'status':'MÖNSTERMOTOR2K_VALD','rows':rows_left,'hit':hh,'total':htot,'candidate_count':len(cand),'feature_rule_count':len(rules)}, pd.DataFrame(diag_rows), feat_diag
         else:
             diag_rows.append({
@@ -8710,6 +8741,11 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
     meta = {'status':'MÖNSTERMOTOR2K_INGET_UNDER_2500','candidate_count':len(cand),'feature_rule_count':len(rules)}
     if best_row:
         meta.update({'best_rows': int(best_row.get('Paketrader',0)), 'best_hit': str(best_row.get('Paketträff',''))})
+    try:
+        if progress_cb:
+            progress_cb(100, 'Mönstermotor klar: inget paket under 2 500.')
+    except Exception:
+        pass
     return None, meta, pd.DataFrame(diag_rows), feat_diag
 
 
@@ -8729,6 +8765,45 @@ def _pm2k_rules_to_rows(chosen):
             'Beskrivning': r.get('desc',''),
         })
     return pd.DataFrame(rows)
+
+
+def _pm2k_apply_chosen_to_rows(rows, chosen, filter_vec, antal_matcher=13):
+    """Applicerar valda Mönstermotor2K-regler på en radlista.
+
+    Reglerna är dynamiska och finns inte som vanliga filtercentral-specs. Därför
+    används de direkt på raden vid körning i stället för att skrivas in i
+    filtercentralens fasta filterlista.
+    """
+    if not isinstance(chosen, dict) or not (chosen.get('rules') or []):
+        return list(rows or [])
+    out = []
+    for row in rows or []:
+        ok = True
+        for r in chosen.get('rules') or []:
+            try:
+                fn = r.get('feature', {}).get('fn')
+                if fn is None:
+                    ok = False
+                    break
+                val = float(fn(row, filter_vec))
+                if not (float(r.get('lo')) <= val <= float(r.get('hi'))):
+                    ok = False
+                    break
+            except Exception:
+                ok = False
+                break
+        if ok:
+            out.append(row)
+    return out
+
+
+def _pm2k_active_label(meta):
+    if not isinstance(meta, dict):
+        return ''
+    try:
+        return f"Mönstermotor2K aktiv: {int(meta.get('rows', 0)):,} rader · {int(meta.get('hit', 0))}/{int(meta.get('total', 0))} träff".replace(',', ' ')
+    except Exception:
+        return 'Mönstermotor2K aktiv'
 
 
 # =============================================================================
@@ -10206,84 +10281,43 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     st.caption("När du ändrar träffmål i en filterkategori får filtren i kategorin nya startintervall. Struktur kan t.ex. sättas till 100% medan Värde & svårighet kan ligga på 95%.")
 
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
-        st.caption("Testar Pareto-bästa paket på radmassan efter dina manuella teckengrupper. De manuella teckengrupperna visas separat och drar inte ner paketens historiska filterträff. Paketmotorn bygger nivåtrappa per filter, testar även kombinationslyft av småfilter, visar progressklocka/ETA, eftertrimmar valt paket och visar hårda grupppaket som egen pakettyp.")
-
-        st.markdown("**🎯 Budgetmotor 2K – profilförst (sista chansen)**")
-        st.caption("Först körs V46 som referens. Om V46 hamnar över 2 500 rader eller får INGET_2K_BAND_HITTAT startar Budgetmotor 2K. Den använder samma kandidatpool, men börjar med profilfilter/FAT/värde/favorit-skräll och använder struktur som trim. Målet är 1 850–2 500 rader, helst nära 2 200.")
-        v46_warns = []
-        if int(antal_matcher) != 13:
-            v46_warns.append("Slutmotorn är låst/testad för 13 matcher.")
-        if int(top_n) != 30:
-            v46_warns.append("V46-testen kördes med 30 liknande omgångar. Du kör nu annat värde.")
-        if int(pay_min) != 100000 or int(pay_max) != 2500000:
-            v46_warns.append("V46-testen kördes med utdelningsintervall 100 000–2 500 000 kr.")
-        if v46_warns:
-            st.warning(" ".join(v46_warns))
-        run_v46_final = st.button("🎯 Beräkna Budgetmotor 2K", use_container_width=True, key="v12_run_v46_final_motor")
-        if run_v46_final:
-            for _k in ['v12_recommended_packages', 'v12_recommended_candidate_audit', 'v12_recommended_meta', 'v12_applied_package_meta', 'v12_applied_package_snapshot']:
-                st.session_state.pop(_k, None)
-            try:
-                with st.spinner("Kör V46 som referens och Budgetmotor 2K om V46 hamnar över 2 500 rader..."):
-                    final_pkg, final_meta, final_diag = _run_v46_final_motor_current(
-                        v_m, specs, manual_frame_rows, frame, filter_vec, int(antal_matcher),
-                        global_db=_streck_hist_db,
-                        top_n=int(top_n), pay_min=int(pay_min), pay_max=int(pay_max),
-                        filter_hist_target_pct=int(filter_hist_target_pct),
-                    )
-                st.session_state['v12_recommended_packages'] = [final_pkg]
-                st.session_state['v12_recommended_candidate_audit'] = final_diag
-                st.session_state['v12_recommended_meta'] = {
-                    **final_meta,
-                    'manual_sign_groups_sig': manual_sign_groups_sig,
-                    'manual_sign_groups_active': int(sum(1 for g in manual_sign_groups if g.get('active'))),
-                    'frame_rows_before_manual': int(len(frame_rows)),
-                    'frame_rows': int(len(manual_frame_rows)),
-                    'display_max_rows': int(st.session_state.get('v12_rec_display_max_rows', 5000)),
-                    'required_keys': [],
-                }
-                st.session_state['v12_final_motor_meta'] = final_meta
-                st.session_state['v12_final_motor_diag'] = final_diag
-                st.success(f"V46 + budgetjakt klar: {final_meta.get('selected_variant')} via {final_meta.get('selected_source')} · {int(final_pkg.get('frame_after', 0)):,} rader · {int(final_pkg.get('hist_hit', 0))}/{int(final_pkg.get('hist_total', 0))} intern paketträff.".replace(',', ' '))
-                _bh_status = str(final_meta.get('budget_hunt_status', ''))
-                if _bh_status and _bh_status != 'BUDGETJAKT_EJ_KÖRD':
-                    st.info(f"Budgetmotor status: {_bh_status}. Om den hittade spelbart paket ska tabellen innehålla BUDGETMOTOR_2K/BUDGETMOTOR2K-rader.")
-                if final_meta.get('micro_rescue_active'):
-                    st.info("Micro-rescue aktiverades: " + str(final_meta.get('micro_reason', '')))
-                else:
-                    st.caption(str(final_meta.get('micro_reason', '')))
-            except Exception as e:
-                st.error(f"V46 + budgetjakt kunde inte köras: {e}")
-                with st.expander("Visa tekniskt fel", expanded=False):
-                    st.code(traceback.format_exc(), language="text")
-
-        final_diag_show = st.session_state.get('v12_final_motor_diag')
-        final_meta_show = st.session_state.get('v12_final_motor_meta') or {}
-        if isinstance(final_diag_show, pd.DataFrame) and not final_diag_show.empty:
-            st.caption("Diagnostabellen ska visa BUDGETMOTOR2K-rader om V46 hamnade över 2 500 rader eller fick INGET_2K_BAND_HITTAT.")
-            st.dataframe(final_diag_show, use_container_width=True, hide_index=True)
-            if final_meta_show:
-                st.caption(str(final_meta_show.get('micro_reason', '')))
-
+        st.caption("Mönstermotor 2K är nu huvudspåret. Den skapar egna dynamiska regler från de 30 liknande facitraderna och kan aktiveras direkt i nästa filtrering. Den gamla V46/Budgetmotor-sektionen är borttagen från huvudflödet.")
 
         st.divider()
-        st.markdown("**🧬 Mönstermotor 2K – diagnos/prototyp**")
-        st.caption("Skapar egna dynamiska regler från de 30 liknande rätta raderna: egna poäng, värde, skräll, favorit, zon och strukturmönster. Detta är diagnos först och appliceras inte automatiskt i Filtercentralen ännu.")
-        run_pm2k = st.button("🧬 Beräkna Mönstermotor 2K diagnos", use_container_width=True, key="v12_run_pm2k_diag")
+        st.markdown("**🧬 Mönstermotor 2K – valbar filtermotor**")
+        st.caption("Skapar egna dynamiska regler från de 30 liknande rätta raderna: egna poäng, värde, skräll, favorit, zon och strukturmönster. Om paketet hamnar i 1 850–2 500 rader kan du aktivera det som extra filter i nästa körning.")
+        run_pm2k = st.button("🧬 Beräkna Mönstermotor 2K", use_container_width=True, key="v12_run_pm2k_diag")
         if run_pm2k:
             try:
-                with st.spinner("Skapar egna mönster-/poängregler och söker paket 1 850–2 500 rader..."):
-                    pm_chosen, pm_meta, pm_diag, pm_feat_diag = _pm2k_search_package(
-                        v_m, manual_frame_rows, filter_vec, int(antal_matcher),
-                        target_rows=2200, min_rows=1850, max_rows=2500, min_hit_floor=27,
-                    )
+                pm_progress = st.progress(0, text="Startar Mönstermotor 2K...")
+                pm_status = st.empty()
+                pm_start = time.time()
+                def _pm_progress(pct, label):
+                    try:
+                        pct = int(max(0, min(100, pct)))
+                        elapsed = time.time() - pm_start
+                        eta_txt = ""
+                        if pct > 3 and pct < 100:
+                            eta = elapsed * (100 - pct) / max(1, pct)
+                            eta_txt = f" · beräknas klar om ca {_fmt_elapsed(eta)}"
+                        pm_progress.progress(pct, text=f"{label} · {pct}%{eta_txt}")
+                        pm_status.caption(f"Förfluten tid: {_fmt_elapsed(elapsed)}{eta_txt}")
+                    except Exception:
+                        pass
+                pm_chosen, pm_meta, pm_diag, pm_feat_diag = _pm2k_search_package(
+                    v_m, manual_frame_rows, filter_vec, int(antal_matcher),
+                    target_rows=2200, min_rows=1850, max_rows=2500, min_hit_floor=27,
+                    progress_cb=_pm_progress,
+                )
+                pm_progress.progress(100, text=f"Mönstermotor 2K klar på {_fmt_elapsed(time.time() - pm_start)}")
                 st.session_state['v12_pm2k_meta'] = pm_meta
                 st.session_state['v12_pm2k_diag'] = pm_diag
                 st.session_state['v12_pm2k_feature_diag'] = pm_feat_diag
+                st.session_state['v12_pm2k_chosen'] = pm_chosen
                 st.session_state['v12_pm2k_rules'] = _pm2k_rules_to_rows(pm_chosen)
                 status = str(pm_meta.get('status',''))
                 if status == 'MÖNSTERMOTOR2K_VALD':
-                    st.success(f"Mönstermotor hittade paket: {int(pm_meta.get('rows',0)):,} rader · {int(pm_meta.get('hit',0))}/{int(pm_meta.get('total',0))} träff.".replace(',', ' '))
+                    st.success(f"Mönstermotor hittade paket: {int(pm_meta.get('rows',0)):,} rader · {int(pm_meta.get('hit',0))}/{int(pm_meta.get('total',0))} träff. Du kan aktivera paketet med knappen nedanför.".replace(',', ' '))
                 else:
                     st.warning(f"Mönstermotor hittade inget under 2 500. Bästa info: {pm_meta}")
             except Exception as e:
@@ -10294,6 +10328,21 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         pm_rules_show = st.session_state.get('v12_pm2k_rules')
         pm_feat_show = st.session_state.get('v12_pm2k_feature_diag')
         pm_meta_show = st.session_state.get('v12_pm2k_meta') or {}
+        if str(pm_meta_show.get('status','')) == 'MÖNSTERMOTOR2K_VALD' and isinstance(st.session_state.get('v12_pm2k_chosen'), dict):
+            c_use_pm, c_clear_pm = st.columns([2, 1])
+            with c_use_pm:
+                if st.button('✅ Använd Mönstermotor2K i nästa filtrering', use_container_width=True, key='v12_use_pm2k_as_filter'):
+                    st.session_state['v12_pm2k_active'] = True
+                    st.session_state['v12_last_result_stale'] = True
+                    st.success(_pm2k_active_label(pm_meta_show))
+            with c_clear_pm:
+                if st.button('Stäng av Mönstermotor2K', use_container_width=True, key='v12_clear_pm2k_as_filter'):
+                    st.session_state['v12_pm2k_active'] = False
+                    st.session_state['v12_last_result_stale'] = True
+                    st.info('Mönstermotor2K är avstängd.')
+        if bool(st.session_state.get('v12_pm2k_active')):
+            st.success(_pm2k_active_label(st.session_state.get('v12_pm2k_meta') or {}))
+
         if isinstance(pm_diag_show, pd.DataFrame) and not pm_diag_show.empty:
             st.caption("Mönstermotor 2K – sökresultat per träffgolv")
             st.dataframe(pm_diag_show, use_container_width=True, hide_index=True)
@@ -11017,8 +11066,16 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         st.session_state['v12_last_result_stale'] = False
         with st.spinner("Filtrerar exakt grundram..."):
             filtered_rows = _apply_manual_filters(manual_frame_rows, specs, settings, group_reqs)
-        st.session_state['v12_last_result'] = {'filtered_rows': filtered_rows, 'reduced_rows': [], 'settings': settings, 'group_reqs': group_reqs, 'hist_package': {'hit': int(hpkg), 'total': int(htot)}}
-        st.success(f"Filtrering klar: {len(frame_rows):,} → {len(manual_frame_rows):,} efter manuella teckengrupper → {len(filtered_rows):,} rader.".replace(',', ' '))
+            pm2k_before = len(filtered_rows)
+            pm2k_active = bool(st.session_state.get('v12_pm2k_active'))
+            pm2k_chosen = st.session_state.get('v12_pm2k_chosen') if pm2k_active else None
+            if pm2k_active and isinstance(pm2k_chosen, dict):
+                filtered_rows = _pm2k_apply_chosen_to_rows(filtered_rows, pm2k_chosen, filter_vec, int(antal_matcher))
+        st.session_state['v12_last_result'] = {'filtered_rows': filtered_rows, 'reduced_rows': [], 'settings': settings, 'group_reqs': group_reqs, 'hist_package': {'hit': int(hpkg), 'total': int(htot)}, 'pm2k_active': bool(st.session_state.get('v12_pm2k_active')), 'pm2k_before': int(pm2k_before) if 'pm2k_before' in locals() else None}
+        if bool(st.session_state.get('v12_pm2k_active')):
+            st.success(f"Filtrering klar: {len(frame_rows):,} → {len(manual_frame_rows):,} efter manuella teckengrupper → {pm2k_before:,} efter filtercentral → {len(filtered_rows):,} efter Mönstermotor2K.".replace(',', ' '))
+        else:
+            st.success(f"Filtrering klar: {len(frame_rows):,} → {len(manual_frame_rows):,} efter manuella teckengrupper → {len(filtered_rows):,} rader.".replace(',', ' '))
         miss = selected_signs_missing(filtered_rows, frame, antal_matcher)
         if miss:
             st.warning("Vissa markerade tecken saknas efter filter: " + format_missing_signs(miss))
