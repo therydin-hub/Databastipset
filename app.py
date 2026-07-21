@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0di – Mönstermotor stark grundramsadapt"
+APP_VERSION = "v12.0dk – PM2K konservativ grundramsadapt"
 
 
 st.markdown("""
@@ -8489,71 +8489,45 @@ def _pm2k_candidate_intervals_for_feature(feature, hist_vals, frame_vals, frame_
     rules = []
 
     def _maybe_frame_adapt_interval(lo2, hi2):
-        """Grundramsanpassning för dynamiska PM2K-intervall.
+        """Mjuk grundramsanpassning för dynamiska PM2K-intervall.
 
-        Historiken sätter originalintervallet. Om intervallet ligger nära en
-        ytterkant i veckans manuella grundram breddas det utåt, aldrig inåt.
-        v12.0di: starkare anpassning för poäng-/strecksummor. Tidigare kunde
-        t.ex. strecksumma första 6 bara breddas 175–296 -> 175–302 och ändå
-        kapa en rimlig toppstyrd ram. Nu används även grundramens percentiler
-        så justeringen blir mer relevant för veckans ram.
+        Historiken sätter originalintervallet, men om intervallet ligger nära en
+        kant i veckans manuella grundram breddas det försiktigt. Syftet är inte
+        att rädda facit i efterhand, utan att undvika att PM2K väljer filter som
+        bara kapar en grundramsdriven ytterkant, t.ex. strecksumma första 6 när
+        ramen redan har flera spikar/halvor i toppdelen.
         """
         if not frame_adapt or len(frame_clean) < 20:
             return lo2, hi2, False, ''
         try:
             name = str(feature.get('name', ''))
             group = str(feature.get('group', ''))
-            label = (name + ' ' + group).lower()
             fmin = float(min(frame_clean)); fmax = float(max(frame_clean))
             if fmax <= fmin:
                 return lo2, hi2, False, ''
             fspan = max(1.0, fmax - fmin)
-            q10 = float(np.quantile(frame_clean, 0.10))
-            q15 = float(np.quantile(frame_clean, 0.15))
             q25 = float(np.quantile(frame_clean, 0.25))
             q75 = float(np.quantile(frame_clean, 0.75))
-            q85 = float(np.quantile(frame_clean, 0.85))
-            q90 = float(np.quantile(frame_clean, 0.90))
             old_lo, old_hi = lo2, hi2
-            is_score_like = any(x in label for x in ['poäng', 'värde', 'skräll', 'favorit', 'strecksumma', 'balans'])
-            is_structure_like = 'struktur' in label or 'sekvens' in label
+            is_score_like = any(x in (name + ' ' + group).lower() for x in ['poäng', 'värde', 'skräll', 'favorit', 'strecksumma', 'balans'])
+            is_structure_like = 'struktur' in group.lower() or 'sekvens' in name.lower()
             if not (is_score_like or is_structure_like):
                 return lo2, hi2, False, ''
 
-            # Grundramen får påverka utåtbreddning. Strecksummor får störst
-            # marginal eftersom spikar/halvor i en zon kan flytta hela ramen.
-            if 'strecksumma' in label:
-                hi_margin = max(12.0, round(0.08 * fspan, 3))
-                lo_margin = max(12.0, round(0.08 * fspan, 3))
-                upper_target = q90
-                lower_target = q10
-                edge_share = 0.50
+            # Större marginal på strecksumma/poäng, mindre på rena antal/struktur.
+            if 'strecksumma' in name.lower():
+                margin = max(6.0, round(0.04 * fspan, 3))
             elif is_score_like:
-                hi_margin = max(4.0, round(0.07 * fspan, 3))
-                lo_margin = max(4.0, round(0.07 * fspan, 3))
-                upper_target = q85
-                lower_target = q15
-                edge_share = 0.45
+                margin = max(2.0, round(0.04 * fspan, 3))
             else:
-                hi_margin = max(1.0, round(0.04 * fspan, 3))
-                lo_margin = max(1.0, round(0.04 * fspan, 3))
-                upper_target = q75
-                lower_target = q25
-                edge_share = 0.35
+                margin = max(1.0, round(0.03 * fspan, 3))
 
-            upper_cut = float(hi2) < fmax and (float(hi2) >= q75 or (fmax - float(hi2)) <= edge_share * fspan)
-            lower_cut = float(lo2) > fmin and (float(lo2) <= q25 or (float(lo2) - fmin) <= edge_share * fspan)
-
+            upper_cut = float(hi2) < fmax and (float(hi2) >= q75 or (fmax - float(hi2)) <= 0.35 * fspan)
+            lower_cut = float(lo2) > fmin and (float(lo2) <= q25 or (float(lo2) - fmin) <= 0.35 * fspan)
             if upper_cut:
-                # Bredda alltid uppåt; minst margin, gärna till ramens övre percentil.
-                hi2 = min(fmax, max(float(hi2) + hi_margin, float(upper_target)))
+                hi2 = min(fmax, float(hi2) + margin)
             if lower_cut:
-                # Bredda alltid nedåt; minst margin, gärna till ramens nedre percentil.
-                lo2 = max(fmin, min(float(lo2) - lo_margin, float(lower_target)))
-
-            # Säkerhet: anpassning får aldrig göra intervallet tajtare än originalet.
-            lo2 = min(float(lo2), float(old_lo))
-            hi2 = max(float(hi2), float(old_hi))
+                lo2 = max(fmin, float(lo2) - margin)
 
             # Bevara heltalskänsla där featurevärdena är heltal.
             if all(abs(float(v) - round(float(v))) < 1e-9 for v in frame_clean[:200]):
@@ -9074,6 +9048,14 @@ def _pm2k_hist_pass_count(chosen, v_m, antal_matcher=13):
 
 
 def _pm2k_correction_df(corr_row, chosen, filter_vec):
+    """Rättningstabell för aktiva Mönstermotor2K-regler.
+
+    v12.0dj: returnerar samma huvudkolumner som vanliga filtercentralen
+    (Status, Läge, Kategori, Filter, Facitvärde, Intervall/regler,
+    Historisk träff med intervallet). Tidigare hamnade Träff/Miss i en separat
+    kolumn längst till höger, vilket gjorde att Mönstermotor-raderna såg
+    tomma ut i den sammanslagna rättningstabellen.
+    """
     rows = []
     if not isinstance(chosen, dict) or not (chosen.get('rules') or []):
         return pd.DataFrame(rows)
@@ -9081,14 +9063,28 @@ def _pm2k_correction_df(corr_row, chosen, filter_vec):
         val = _pm2k_rule_value(r, corr_row, filter_vec)
         lo, hi = r.get('lo'), r.get('hi')
         ok = False if val is None else bool(float(lo) <= float(val) <= float(hi))
+        if val is None:
+            val_txt = ''
+        else:
+            try:
+                fv = float(val)
+                val_txt = str(int(round(fv))) if abs(fv - round(fv)) < 1e-9 else str(round(fv, 3))
+            except Exception:
+                val_txt = str(val)
+        hist_hit = r.get('hist_hit', '')
+        hist_total = r.get('hist_total', '')
+        hist_txt = f'{hist_hit}/{hist_total}' if hist_hit != '' and hist_total != '' else ''
+        interval_txt = f'{lo}–{hi}'
         rows.append({
-            'Filter': f'Mönstermotor2K – {i:02d} {r.get("name", "")}',
+            'Status': '✅ Träff' if ok else '❌ Miss',
+            'Läge': 'Mönstermotor2K',
             'Kategori': r.get('group','Mönstermotor2K'),
-            'Intervall': f'{lo}–{hi}',
+            'Filter': f'Mönstermotor2K – {i:02d} {r.get("name", "")}',
+            'Facitvärde': val_txt,
+            'Intervall/regler': interval_txt,
+            'Historisk träff med intervallet': hist_txt,
             'Original': f"{r.get('original_lo')}–{r.get('original_hi')}" if r.get('frame_adapted') else '',
             'Justerad': 'Ja' if r.get('frame_adapted') else 'Nej',
-            'Värde rätt rad': '' if val is None else round(float(val), 3),
-            'Träff': 'Ja' if ok else 'Nej',
             'Typ': 'Dynamisk regel',
         })
     return pd.DataFrame(rows)
