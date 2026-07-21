@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0dd – Mönstermotor 2K aktiv topp 3"
+APP_VERSION = "v12.0de – Mönstermotor sortering + grundramsradantal"
 
 
 st.markdown("""
@@ -8645,7 +8645,7 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
             'profile_filters': pc,
             'structure_filters': sc,
             'status': status,
-            'score': (abs(rows_left-int(target_rows)), -hh, -pc, sc, len(state.get('rules',[]) or [])),
+            'score': (-hh, rows_left, len(state.get('rules',[]) or []), -pc, sc, abs(rows_left-int(target_rows))),
         }
 
     def _rule_signature(state):
@@ -8702,12 +8702,12 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
                         'profile_count': pc,
                         'structure_count': sc,
                     }
-                    val = (abs(rows_left-int(target_rows)), -hh, -pc, sc, len(ns['rules']))
+                    val = (-hh, rows_left, len(ns['rules']), -pc, sc, abs(rows_left-int(target_rows)))
                     if int(min_rows) <= rows_left <= int(max_rows):
                         if best_under is None or val < best_under[0]:
                             best_under = (val, ns)
                     if rows_left >= int(min_rows):
-                        any_val = (max(0, rows_left-int(max_rows)), abs(rows_left-int(target_rows)), -hh, -pc, sc, len(ns['rules']))
+                        any_val = (max(0, rows_left-int(max_rows)), -hh, rows_left, len(ns['rules']), -pc, sc, abs(rows_left-int(target_rows)))
                         if best_any is None or any_val < best_any[0]:
                             best_any = (any_val, ns)
                     nxt.append(ns)
@@ -8723,7 +8723,9 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
                 hh = int(s['hist_mask'].sum())
                 pc = int(s.get('profile_count',0)); sc = int(s.get('structure_count',0))
                 in_band = 0 if int(min_rows) <= rows_left <= int(max_rows) else 1
-                return (in_band, max(0, rows_left-int(max_rows)), abs(rows_left-int(target_rows)), -hh, -pc, sc, len(s['rules']))
+                # v12.0de: maxrader är bara ett tak. Rangordna spelbara paket efter
+                # högsta historikträff och därefter lägst radantal (=bäst reducering).
+                return (in_band, max(0, rows_left-int(max_rows)), -hh, rows_left, len(s['rules']), -pc, sc, abs(rows_left-int(target_rows)))
             nxt.sort(key=state_rank)
             beam = nxt[:beam_width]
             # Fortsätt söka även efter första träff, så topp 3 kan bli bättre.
@@ -8765,7 +8767,7 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
         return list(best.values())
 
     under = _dedupe_options(all_under)
-    under.sort(key=lambda x: x[0])
+    under.sort(key=lambda x: (-int(x[2].get('hit', 0)), int(x[2].get('rows', 10**9)), int(x[2].get('filters', 10**9)), -int(x[2].get('profile_filters', 0)), int(x[2].get('structure_filters', 10**9))))
     if under:
         top = under[:max(1, int(top_n or 3))]
         option_states = []
@@ -10289,7 +10291,7 @@ st.markdown("</div>", unsafe_allow_html=True)
 # Step 2 – ground frame
 st.markdown("<div class='v12-card'>", unsafe_allow_html=True)
 st.markdown("<div class='v12-step'>Steg 2</div><div class='v12-title'>Manuell grundram</div>", unsafe_allow_html=True)
-st.caption("Tecknen ligger i ett formulär. Appen räknar inte om när du klickar 1/X/2, utan först när du sparar grundramen.")
+st.caption("Tecknen uppdateras direkt: du ser radantalet innan du sparar grundramen. Själva filtercentralen räknas först när du sparar/kör vidare.")
 
 if 'v12_frame_defaults' not in st.session_state or st.session_state.get('v12_frame_spelform') != spelform:
     st.session_state['v12_frame_defaults'] = [['1', 'X', '2'] for _ in range(antal_matcher)]
@@ -10298,25 +10300,40 @@ if 'v12_frame_defaults' not in st.session_state or st.session_state.get('v12_fra
 
 _frame_token = int(st.session_state.get('v12_frame_widget_token', 0) or 0)
 
-with st.form(f"v12_frame_form_{_frame_token}"):
-    header_cols = st.columns([0.55, 0.8, 0.8, 0.8, 1.2])
-    header_cols[0].markdown("**Match**"); header_cols[1].markdown("**1**"); header_cols[2].markdown("**X**"); header_cols[3].markdown("**2**"); header_cols[4].markdown("**Val**")
-    frame_new = []
-    for i in range(antal_matcher):
-        prev = st.session_state.get('v12_saved_frame', st.session_state['v12_frame_defaults'])
-        signs_prev = prev[i] if i < len(prev) else ['1','X','2']
-        c0, c1, c2, c3, c4 = st.columns([0.55, 0.8, 0.8, 0.8, 1.2])
-        c0.write(f"M{i+1}")
-        b1 = c1.checkbox("", value=('1' in signs_prev), key=f"v12_frame_{_frame_token}_{i}_1")
-        bx = c2.checkbox("", value=('X' in signs_prev), key=f"v12_frame_{_frame_token}_{i}_x")
-        b2 = c3.checkbox("", value=('2' in signs_prev), key=f"v12_frame_{_frame_token}_{i}_2")
-        signs = []
-        if b1: signs.append('1')
-        if bx: signs.append('X')
-        if b2: signs.append('2')
-        c4.write(''.join(signs) if signs else '—')
-        frame_new.append(signs)
-    save_frame = st.form_submit_button("💾 Spara grundram", use_container_width=True)
+header_cols = st.columns([0.55, 0.8, 0.8, 0.8, 1.2])
+header_cols[0].markdown("**Match**"); header_cols[1].markdown("**1**"); header_cols[2].markdown("**X**"); header_cols[3].markdown("**2**"); header_cols[4].markdown("**Val**")
+frame_new = []
+prev = st.session_state.get('v12_saved_frame', st.session_state['v12_frame_defaults'])
+for i in range(antal_matcher):
+    signs_prev = prev[i] if i < len(prev) else ['1','X','2']
+    c0, c1, c2, c3, c4 = st.columns([0.55, 0.8, 0.8, 0.8, 1.2])
+    c0.write(f"M{i+1}")
+    b1 = c1.checkbox("", value=('1' in signs_prev), key=f"v12_frame_{_frame_token}_{i}_1")
+    bx = c2.checkbox("", value=('X' in signs_prev), key=f"v12_frame_{_frame_token}_{i}_x")
+    b2 = c3.checkbox("", value=('2' in signs_prev), key=f"v12_frame_{_frame_token}_{i}_2")
+    signs = []
+    if b1: signs.append('1')
+    if bx: signs.append('X')
+    if b2: signs.append('2')
+    c4.write(''.join(signs) if signs else '—')
+    frame_new.append(signs)
+
+_missing_frame_matches = [f"M{i+1}" for i, signs in enumerate(frame_new) if len(signs) == 0]
+if _missing_frame_matches:
+    st.warning("Grundram ej komplett: " + ", ".join(_missing_frame_matches) + " saknar tecken.")
+else:
+    _preview_rows = frame_row_count(frame_new)
+    _spikar = sum(1 for signs in frame_new if len(signs) == 1)
+    _halv = sum(1 for signs in frame_new if len(signs) == 2)
+    _hel = sum(1 for signs in frame_new if len(signs) == 3)
+    _sign_counts = {s: sum(1 for signs in frame_new if s in signs) for s in ['1','X','2']}
+    pc1, pc2, pc3, pc4 = st.columns(4)
+    pc1.metric("Förhandsvisning rader", f"{_preview_rows:,}".replace(',', ' '))
+    pc2.metric("Ramtyp", f"{_spikar} spik · {_hel} hel · {_halv} halv")
+    pc3.metric("Markerade tecken", f"1:{_sign_counts['1']} · X:{_sign_counts['X']} · 2:{_sign_counts['2']}")
+    pc4.metric("Kompakt", frame_compact_string(frame_new))
+
+save_frame = st.button("💾 Spara grundram", use_container_width=True, key=f"v12_save_frame_btn_{_frame_token}")
 
 if save_frame:
     if any(len(x) == 0 for x in frame_new):
@@ -10463,10 +10480,10 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
 
         st.divider()
         st.markdown("**🧬 Mönstermotor 2K – valbar filtermotor**")
-        st.caption("Skapar egna regler för poäng, värde, skräll, favorit, zon och struktur. Du kan själv sätta högsta tillåtna radantal och välja bland de 3 bästa spelbara alternativen.")
+        st.caption("Skapar egna regler för poäng, värde, skräll, favorit, zon och struktur. Maxrader är bara ett tak: topp 3 sorteras efter högsta träffsäkerhet och därefter lägst radantal/bäst reducering.")
         c_pm_a, c_pm_b, c_pm_c = st.columns(3)
         with c_pm_a:
-            pm_target_rows = st.number_input("Mål rader", min_value=1000, max_value=6000, value=int(st.session_state.get('v12_pm2k_target_rows', 2200)), step=50, key='v12_pm2k_target_rows')
+            pm_target_rows = st.number_input("Mål rader (diagnos)", min_value=1000, max_value=6000, value=int(st.session_state.get('v12_pm2k_target_rows', 2200)), step=50, key='v12_pm2k_target_rows')
         with c_pm_b:
             pm_min_rows = st.number_input("Min spelbara rader", min_value=500, max_value=5000, value=int(st.session_state.get('v12_pm2k_min_rows', 1850)), step=50, key='v12_pm2k_min_rows')
         with c_pm_c:
@@ -10519,7 +10536,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         if str(pm_meta_show.get('status','')) == 'MÖNSTERMOTOR2K_VALD' and pm_options_show:
             opt_df = _pm2k_options_to_df(pm_options_show)
             if isinstance(opt_df, pd.DataFrame) and not opt_df.empty:
-                st.caption("Topp 3 spelbara Mönstermotor2K-alternativ")
+                st.caption("Topp 3 spelbara Mönstermotor2K-alternativ – sorterat på högst träff och därefter lägst radantal")
                 st.dataframe(opt_df, use_container_width=True, hide_index=True)
             def _fmt_pm_opt(i):
                 try:
@@ -11302,7 +11319,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             st.success(f"Filtrering klar: {len(frame_rows):,} → {len(manual_frame_rows):,} efter manuella teckengrupper → {len(filtered_rows):,} rader.".replace(',', ' '))
         miss = selected_signs_missing(filtered_rows, frame, antal_matcher)
         if miss:
-            st.warning("Vissa markerade tecken saknas efter filter: " + format_missing_signs(miss))
+            st.warning("Vissa markerade tecken saknas efter filter: " + format_missing_signs(miss) + " · Varningsläge endast: appen stoppar inte detta ännu, men paketet har låst bort tecknet helt.")
         if run_matrix:
             if len(filtered_rows) == 0:
                 st.error("Inga rader kvar efter filter.")
