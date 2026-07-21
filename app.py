@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0dh – Mönstermotor grundramsadapt"
+APP_VERSION = "v12.0di – Mönstermotor stark grundramsadapt"
 
 
 st.markdown("""
@@ -8489,45 +8489,71 @@ def _pm2k_candidate_intervals_for_feature(feature, hist_vals, frame_vals, frame_
     rules = []
 
     def _maybe_frame_adapt_interval(lo2, hi2):
-        """Mjuk grundramsanpassning för dynamiska PM2K-intervall.
+        """Grundramsanpassning för dynamiska PM2K-intervall.
 
-        Historiken sätter originalintervallet, men om intervallet ligger nära en
-        kant i veckans manuella grundram breddas det försiktigt. Syftet är inte
-        att rädda facit i efterhand, utan att undvika att PM2K väljer filter som
-        bara kapar en grundramsdriven ytterkant, t.ex. strecksumma första 6 när
-        ramen redan har flera spikar/halvor i toppdelen.
+        Historiken sätter originalintervallet. Om intervallet ligger nära en
+        ytterkant i veckans manuella grundram breddas det utåt, aldrig inåt.
+        v12.0di: starkare anpassning för poäng-/strecksummor. Tidigare kunde
+        t.ex. strecksumma första 6 bara breddas 175–296 -> 175–302 och ändå
+        kapa en rimlig toppstyrd ram. Nu används även grundramens percentiler
+        så justeringen blir mer relevant för veckans ram.
         """
         if not frame_adapt or len(frame_clean) < 20:
             return lo2, hi2, False, ''
         try:
             name = str(feature.get('name', ''))
             group = str(feature.get('group', ''))
+            label = (name + ' ' + group).lower()
             fmin = float(min(frame_clean)); fmax = float(max(frame_clean))
             if fmax <= fmin:
                 return lo2, hi2, False, ''
             fspan = max(1.0, fmax - fmin)
+            q10 = float(np.quantile(frame_clean, 0.10))
+            q15 = float(np.quantile(frame_clean, 0.15))
             q25 = float(np.quantile(frame_clean, 0.25))
             q75 = float(np.quantile(frame_clean, 0.75))
+            q85 = float(np.quantile(frame_clean, 0.85))
+            q90 = float(np.quantile(frame_clean, 0.90))
             old_lo, old_hi = lo2, hi2
-            is_score_like = any(x in (name + ' ' + group).lower() for x in ['poäng', 'värde', 'skräll', 'favorit', 'strecksumma', 'balans'])
-            is_structure_like = 'struktur' in group.lower() or 'sekvens' in name.lower()
+            is_score_like = any(x in label for x in ['poäng', 'värde', 'skräll', 'favorit', 'strecksumma', 'balans'])
+            is_structure_like = 'struktur' in label or 'sekvens' in label
             if not (is_score_like or is_structure_like):
                 return lo2, hi2, False, ''
 
-            # Större marginal på strecksumma/poäng, mindre på rena antal/struktur.
-            if 'strecksumma' in name.lower():
-                margin = max(6.0, round(0.04 * fspan, 3))
+            # Grundramen får påverka utåtbreddning. Strecksummor får störst
+            # marginal eftersom spikar/halvor i en zon kan flytta hela ramen.
+            if 'strecksumma' in label:
+                hi_margin = max(12.0, round(0.08 * fspan, 3))
+                lo_margin = max(12.0, round(0.08 * fspan, 3))
+                upper_target = q90
+                lower_target = q10
+                edge_share = 0.50
             elif is_score_like:
-                margin = max(2.0, round(0.04 * fspan, 3))
+                hi_margin = max(4.0, round(0.07 * fspan, 3))
+                lo_margin = max(4.0, round(0.07 * fspan, 3))
+                upper_target = q85
+                lower_target = q15
+                edge_share = 0.45
             else:
-                margin = max(1.0, round(0.03 * fspan, 3))
+                hi_margin = max(1.0, round(0.04 * fspan, 3))
+                lo_margin = max(1.0, round(0.04 * fspan, 3))
+                upper_target = q75
+                lower_target = q25
+                edge_share = 0.35
 
-            upper_cut = float(hi2) < fmax and (float(hi2) >= q75 or (fmax - float(hi2)) <= 0.35 * fspan)
-            lower_cut = float(lo2) > fmin and (float(lo2) <= q25 or (float(lo2) - fmin) <= 0.35 * fspan)
+            upper_cut = float(hi2) < fmax and (float(hi2) >= q75 or (fmax - float(hi2)) <= edge_share * fspan)
+            lower_cut = float(lo2) > fmin and (float(lo2) <= q25 or (float(lo2) - fmin) <= edge_share * fspan)
+
             if upper_cut:
-                hi2 = min(fmax, float(hi2) + margin)
+                # Bredda alltid uppåt; minst margin, gärna till ramens övre percentil.
+                hi2 = min(fmax, max(float(hi2) + hi_margin, float(upper_target)))
             if lower_cut:
-                lo2 = max(fmin, float(lo2) - margin)
+                # Bredda alltid nedåt; minst margin, gärna till ramens nedre percentil.
+                lo2 = max(fmin, min(float(lo2) - lo_margin, float(lower_target)))
+
+            # Säkerhet: anpassning får aldrig göra intervallet tajtare än originalet.
+            lo2 = min(float(lo2), float(old_lo))
+            hi2 = max(float(hi2), float(old_hi))
 
             # Bevara heltalskänsla där featurevärdena är heltal.
             if all(abs(float(v) - round(float(v))) < 1e-9 for v in frame_clean[:200]):
