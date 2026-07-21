@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0cz – Kandidatdiagnos filteruniversum"
+APP_VERSION = "v12.0da – Budgetmotor 2K profilförst"
 
 
 st.markdown("""
@@ -8748,6 +8748,313 @@ def _v46_budget_hunt_current(mod, ns, candidates, htot, vtot, ftot, hist_payout,
 
 
 
+def _budgetmotor2k_profile_first_current(mod, ns, candidates, htot, vtot, ftot, hist_payout, frame_rows, frame, antal_matcher, *, target_rows=2200, min_rows=1850, max_rows=2500, min_hit_floor=27):
+    """Budgetmotor 2K: separat spelbarhetsmotor efter V46.
+
+    Den här är avsiktligt inte en V46/B52200-fallback. Den använder samma
+    kandidatpool som appen redan skapat, men styr sökningen efter spelbarhet:
+    1) först profilfilter/FAT/värde/favorit-skräll,
+    2) därefter struktur som trim,
+    3) mål 1850-2500 rader, helst nära 2200,
+    4) historikgolv 30->29->28->27.
+
+    Validering används som ranking, inte som hård spärr. Det är medvetet:
+    tidigare budgetjakter dog runt 3200-5300 rader eftersom valideringsgolvet
+    låste bort filter som behövdes för att nå spelbart radantal.
+    """
+    if not candidates:
+        return None, {'status': 'BUDGETMOTOR2K_INGA_KANDIDATER'}, pd.DataFrame()
+    try:
+        raw_row_matrix = ns['_frame_row_matrix'](frame_rows, int(antal_matcher))
+        sign_bits = mod._build_teckenskydd_bits(ns, raw_row_matrix, frame, int(antal_matcher))
+    except Exception:
+        sign_bits = tuple()
+
+    def cat(c):
+        return str((c or {}).get('category','') or '')
+
+    def is_structure(c):
+        try:
+            return bool(mod._is_structure_candidate(c))
+        except Exception:
+            return cat(c) == 'Struktur'
+
+    def is_profile(c):
+        return not is_structure(c)
+
+    def is_fat(c):
+        return cat(c) in {'FAT', 'FAT-sekvenser'}
+
+    def is_edge(c):
+        return cat(c) in {'Värde & svårighet', 'Favorit & skräll'}
+
+    def red(c):
+        try: return float(c.get('red_pct', 0.0) or 0.0)
+        except Exception: return 0.0
+
+    def val_hit(c):
+        try: return int(float(c.get('val_hit', 0) or 0))
+        except Exception: return 0
+
+    def hist_hit(c):
+        try: return int(float(c.get('hist_hit', 0) or 0))
+        except Exception: return 0
+
+    # Dedupe hårt på filter+intervall. Dubbletter från RAW/B52200/REF ska inte
+    # få beam-sökningen att tro att samma filter är flera alternativa vägar.
+    by_sig = {}
+    for c in candidates or []:
+        if not isinstance(c, dict) or not c.get('key'):
+            continue
+        hb = int(c.get('hist_bits', 0) or 0)
+        fb = int(c.get('frame_bits', 0) or 0)
+        if hb <= 0 or fb <= 0:
+            continue
+        sig = (str(c.get('key')), str(c.get('interval_txt', c.get('interval', ''))))
+        old = by_sig.get(sig)
+        def keep_key(x):
+            # Egen reducering först, därefter historik/validering. Detta gör att
+            # riktiga profilfilter som Total Diff/FAT/Favorittryck överlever.
+            return (
+                red(x),
+                1 if is_profile(x) else 0,
+                hist_hit(x),
+                val_hit(x),
+                -int(x.get('frame_keep', 10**12) or 10**12),
+            )
+        if old is None or keep_key(c) > keep_key(old):
+            by_sig[sig] = dict(c)
+    cands = list(by_sig.values())
+    if not cands:
+        return None, {'status': 'BUDGETMOTOR2K_INGA_GILTIGA_KANDIDATER'}, pd.DataFrame()
+
+    # Behåll svagare profilfilter också, men kasta nästan helt kosmetiska
+    # strukturfilter om de inte används som sluttrim. Kandidatpoolen var full av
+    # små strukturfilter med 0.2-2%, vilket drog V46 åt fel håll.
+    profile_cands = [c for c in cands if is_profile(c) and red(c) >= 2.0]
+    structure_cands = [c for c in cands if is_structure(c) and red(c) >= 2.0]
+    # Om något viktigt profilfilter har red_pct under 2 men hög träff kan det få
+    # vara med, men rankas lågt. Säkerhetsnät:
+    if len(profile_cands) < 8:
+        profile_cands = [c for c in cands if is_profile(c) and red(c) > 0.0]
+    if not profile_cands:
+        return None, {'status': 'BUDGETMOTOR2K_INGA_PROFILKANDIDATER', 'candidate_count': len(cands)}, pd.DataFrame()
+
+    def cand_rank(c):
+        # För kandidatordning: profil och egen reducering före ren träff.
+        return (
+            1 if is_profile(c) else 0,
+            1 if is_edge(c) else 0,
+            1 if is_fat(c) else 0,
+            red(c),
+            hist_hit(c),
+            val_hit(c),
+            -int(c.get('frame_keep', 10**12) or 10**12),
+        )
+    profile_cands.sort(key=cand_rank, reverse=True)
+    structure_cands.sort(key=cand_rank, reverse=True)
+    # Begränsa för fart men inte så hårt att profilen tappas.
+    profile_cands = profile_cands[:120]
+    structure_cands = structure_cands[:80]
+
+    full_h = (1 << int(htot)) - 1
+    full_v = (1 << int(vtot)) - 1 if int(vtot) > 0 else 0
+    full_f = (1 << int(ftot)) - 1
+
+    def counts(st):
+        return int(st['hist_bits'].bit_count()), (int(st['val_bits'].bit_count()) if int(vtot)>0 else 0), int(st['frame_bits'].bit_count())
+
+    def profile_count(st):
+        return sum(1 for c in st.get('chosen', ()) if is_profile(c))
+    def structure_count(st):
+        return sum(1 for c in st.get('chosen', ()) if is_structure(c))
+    def fat_count(st):
+        return sum(1 for c in st.get('chosen', ()) if is_fat(c))
+    def edge_count(st):
+        return sum(1 for c in st.get('chosen', ()) if is_edge(c))
+
+    def quality(st, hfloor, min_prof):
+        hh, vv, rr = counts(st)
+        pc = profile_count(st); sc = structure_count(st); fc = fat_count(st); ec = edge_count(st)
+        in_band = 1 if int(min_rows) <= rr <= int(max_rows) else 0
+        under = 1 if rr <= int(max_rows) else 0
+        # Hård prioritet: spelbart radantal. Sedan närhet till 2200.
+        # Profilkravet gör att 11 struktur + 1 favorit inte kan vinna om en
+        # rimlig profilväg existerar.
+        profile_ok = 1 if pc >= int(min_prof) else 0
+        return (
+            in_band,
+            under,
+            profile_ok,
+            -abs(rr - int(target_rows)),
+            -max(0, rr - int(max_rows)),
+            -max(0, int(min_rows) - rr),
+            hh,
+            vv,
+            pc,
+            ec + fc,
+            -sc,
+            -len(st.get('chosen', ())),
+        )
+
+    def apply_one(st, c, hfloor):
+        key = str(c.get('key',''))
+        if not key or key in st['used_keys']:
+            return None
+        new_h = int(st['hist_bits']) & int(c.get('hist_bits', 0) or 0)
+        if int(new_h.bit_count()) < int(hfloor):
+            return None
+        new_v = (int(st['val_bits']) & int(c.get('val_bits', 0) or 0)) if int(vtot)>0 else 0
+        new_f = int(st['frame_bits']) & int(c.get('frame_bits', 0) or 0)
+        new_rows = int(new_f.bit_count())
+        cur_rows = int(st['frame_bits'].bit_count())
+        if new_rows <= 0 or new_rows >= cur_rows:
+            return None
+        # Låt den gå något under bandet i sökningen, men inte döda allt.
+        if new_rows < 1400:
+            return None
+        try:
+            if sign_bits and any((new_f & int(bits)) == 0 for bits in sign_bits):
+                return None
+        except Exception:
+            pass
+        c2 = dict(c)
+        c2['step_red_pct'] = 100.0 * (cur_rows - new_rows) / max(1, cur_rows)
+        c2['budget_hunt_source_variant'] = str(c2.get('budget_hunt_source_variant', c2.get('variant', '')))
+        step = {
+            'Filter': c2.get('name',''),
+            'Kategori': c2.get('category',''),
+            'Intervall': c2.get('interval_txt','-'),
+            'Intervallträff': f"{int(c2.get('hist_hit',0) or 0)}/{int(c2.get('hist_total', htot) or htot)}",
+            'Stegreducering': f"{float(c2['step_red_pct']):.1f}%",
+            'Efter filter': int(new_rows),
+            'Samlad träff efter steg': f"{int(new_h.bit_count())}/{int(htot)}",
+            'Samlad validering': f"{int(new_v.bit_count())}/{int(vtot)}" if int(vtot)>0 else '-',
+            'Fas': 'budgetmotor2k',
+        }
+        return {
+            'hist_bits': new_h,
+            'val_bits': new_v,
+            'frame_bits': new_f,
+            'used_keys': frozenset(set(st['used_keys']) | {key}),
+            'chosen': tuple(list(st.get('chosen', ())) + [c2]),
+            'steps': tuple(list(st.get('steps', ())) + [step]),
+        }
+
+    diag_rows = []
+    best_any = None
+
+    # Kravstege: prova högt profilkrav först. Om det inte finns någon väg,
+    # sänk. Detta är sista chansen men fortfarande kontrollerat.
+    for hfloor in range(int(htot), int(min_hit_floor)-1, -1):
+        for min_prof in [6, 5, 4, 3, 2]:
+            initial = {'hist_bits': full_h, 'val_bits': full_v, 'frame_bits': full_f, 'used_keys': frozenset(), 'chosen': tuple(), 'steps': tuple()}
+            states = [initial]
+            archive = []
+            seen = set()
+            max_depth = 24
+            beam_width = 420
+            archive_width = 6000
+            for depth in range(max_depth):
+                expanded = []
+                for st0 in states:
+                    pc = profile_count(st0)
+                    rr0 = int(st0['frame_bits'].bit_count())
+                    # Profilfas: innan min_prof är uppnått får den bara ta profil.
+                    # Efteråt får struktur trimma, men profilen ligger redan som bas.
+                    if pc < int(min_prof):
+                        pool = profile_cands
+                    else:
+                        # När vi är nära budget, struktur får hjälpa. Profil får alltid fortsätta.
+                        pool = profile_cands + structure_cands
+                    for cand in pool:
+                        ns2 = apply_one(st0, cand, hfloor)
+                        if ns2 is None:
+                            continue
+                        sig = (ns2['hist_bits'], ns2['val_bits'], ns2['frame_bits'], profile_count(ns2), structure_count(ns2))
+                        if sig in seen:
+                            continue
+                        seen.add(sig)
+                        expanded.append(ns2)
+                if not expanded:
+                    break
+                expanded.sort(key=lambda st: quality(st, hfloor, min_prof), reverse=True)
+                states = expanded[:beam_width]
+                archive.extend(states)
+                if len(archive) > archive_width:
+                    archive.sort(key=lambda st: quality(st, hfloor, min_prof), reverse=True)
+                    archive = archive[:archive_width]
+            if archive:
+                archive.sort(key=lambda st: quality(st, hfloor, min_prof), reverse=True)
+                best_level = archive[0]
+                bh, bv, br = counts(best_level)
+                diag_rows.append({
+                    'Variant': f'BUDGETMOTOR2K {hfloor}/{htot} prof>={min_prof}',
+                    'Typ': 'Budgetmotor2K',
+                    'Status': 'Diagnos',
+                    'Orsak': f'profilförst, kandidater profil={len(profile_cands)}, strukturtrim={len(structure_cands)}, min_prof={min_prof}',
+                    'Paketträff': f'{bh}/{htot}',
+                    'Valideringsträff': f'{bv}/{vtot}' if int(vtot)>0 else '-',
+                    'Paketrader': int(br),
+                    'Filter totalt': int(len(best_level.get('chosen', ()))),
+                    'Budgetstatus': 'JA' if int(min_rows) <= int(br) <= int(max_rows) else ('UNDER' if int(br) < int(min_rows) else 'NEJ'),
+                })
+                if best_any is None or quality(best_level, hfloor, min_prof) > quality(best_any, hfloor, min_prof):
+                    best_any = best_level
+            winners = [st for st in archive if int(min_rows) <= int(st['frame_bits'].bit_count()) <= int(max_rows) and profile_count(st) >= int(min_prof)]
+            if winners:
+                winners.sort(key=lambda st: quality(st, hfloor, min_prof), reverse=True)
+                best = winners[0]
+                bh, bv, br = counts(best)
+                chosen = list(best.get('chosen', ()))
+                structure_filters = sum(1 for c in chosen if is_structure(c))
+                profile_filters = sum(1 for c in chosen if is_profile(c))
+                fat_filters = sum(1 for c in chosen if is_fat(c))
+                edge_filters = sum(1 for c in chosen if is_edge(c))
+                pkg = {
+                    'variant': 'BUDGETMOTOR_2K',
+                    'variant_label': f'Budgetmotor 2K {bh}/{htot}',
+                    'target': int(bh),
+                    'target_label': f'Budgetmotor 2K {bh}/{htot}',
+                    'hist_hit': int(bh), 'hist_total': int(htot),
+                    'val_hit': int(bv), 'val_total': int(vtot),
+                    'frame_start': int(ftot), 'frame_before': int(ftot), 'frame_after': int(br),
+                    'reduction_pct': 100.0 - 100.0 * int(br) / max(1, int(ftot)),
+                    'num_filters': int(len(chosen)),
+                    'filters': chosen,
+                    'steps': list(best.get('steps', ())),
+                    'package_type': 'Budgetmotor 2K – profilförst',
+                    'structure_filters': int(structure_filters),
+                    'profile_filters': int(profile_filters),
+                    'fat_filters': int(fat_filters),
+                    'edge_filters': int(edge_filters),
+                    'value_filters': int(profile_filters),
+                    'v31_budget_status': 'BUDGETMOTOR2K_UNDER_2500',
+                    'groups': [],
+                    'meta': {
+                        'engine': 'budgetmotor_2k_profile_first',
+                        'source': 'same_candidate_pool_but_profile_first',
+                        'hist_floor_used': int(hfloor),
+                        'min_profile_used': int(min_prof),
+                        'target_rows': int(target_rows),
+                        'min_rows': int(min_rows),
+                        'max_rows': int(max_rows),
+                        'candidate_count': int(len(cands)),
+                        'profile_candidates': int(len(profile_cands)),
+                        'structure_candidates': int(len(structure_cands)),
+                    },
+                }
+                meta = dict(pkg['meta'])
+                meta.update({'status': 'BUDGETMOTOR2K_VALD', 'rows': int(br), 'hit': int(bh), 'val': int(bv), 'filters': int(len(chosen))})
+                return pkg, meta, pd.DataFrame(diag_rows)
+
+    meta = {'status': 'BUDGETMOTOR2K_INGET_UNDER_2500', 'candidate_count': int(len(cands)), 'profile_candidates': int(len(profile_cands)), 'structure_candidates': int(len(structure_cands)), 'target_rows': int(target_rows), 'max_rows': int(max_rows)}
+    if best_any is not None:
+        bh, bv, br = counts(best_any)
+        meta.update({'best_rows': int(br), 'best_hit': int(bh), 'best_val': int(bv), 'best_filters': int(len(best_any.get('chosen', ()))), 'best_profile_filters': int(profile_count(best_any)), 'best_structure_filters': int(structure_count(best_any))})
+    return None, meta, pd.DataFrame(diag_rows)
+
+
 # === v12.0cz: Kandidatdiagnos för filteruniversum ===
 def _cz_norm_category(x):
     try:
@@ -9025,26 +9332,25 @@ def _run_v46_final_motor_current(sim_df, specs, frame_rows, frame, filter_vec, a
     selected_app = _normalize_v46_package_for_app(selected_pkg, V46_COLAB_PRIMARY_SYNTH, source, micro_row)
 
     budget_pkg = None
-    budget_meta = {'status': 'BUDGETJAKT_EJ_KÖRD'}
+    budget_meta = {'status': 'BUDGETMOTOR2K_EJ_KÖRD'}
     budget_diag = pd.DataFrame()
     try:
         selected_rows_now = int(selected_app.get('frame_after', 10**12) or 10**12)
         selected_budget_status = str(selected_app.get('v31_budget_status', ''))
-        # V46 är referens. Om den redan är spelbar används den. Om den säger
-        # INGET_2K_BAND_HITTAT eller hamnar över 2500 kör vi budgetjakten på
-        # samma kandidatpool.
+        # V46 är nu bara referens. Om den inte är spelbar kör vi en separat
+        # Budgetmotor 2K som startar profilförst och använder struktur som trim.
         if selected_rows_now > 2500 or 'INGET_2K' in selected_budget_status.upper():
-            budget_pkg, budget_meta, budget_diag = _v46_budget_hunt_current(
+            budget_pkg, budget_meta, budget_diag = _budgetmotor2k_profile_first_current(
                 mod, ns, all_budget_candidates, htot, vtot, ftot, hist_payout,
                 frame_rows, frame, int(antal_matcher),
-                target_rows=2200, min_rows=1700, max_rows=2500, min_hit_floor=27,
+                target_rows=2200, min_rows=1850, max_rows=2500, min_hit_floor=27,
             )
             if isinstance(budget_pkg, dict) and int(budget_pkg.get('frame_after', 10**12) or 10**12) <= 2500:
-                selected_app = _normalize_v46_package_for_app(budget_pkg, 'V46_BUDGET_HUNT', 'BUDGETJAKT', {'Micro rescue aktiv': 'Nej', 'Micro beslut': 'V46 över 2500/inget 2k-band; budgetjakt vald.'})
-                selected_app['package_type'] = 'Slutmotor V46 + budgetjakt'
-                source = 'BUDGETJAKT'
+                selected_app = _normalize_v46_package_for_app(budget_pkg, 'BUDGETMOTOR_2K', 'BUDGETMOTOR2K', {'Micro rescue aktiv': 'Nej', 'Micro beslut': 'V46 över 2500/inget 2k-band; Budgetmotor 2K vald.'})
+                selected_app['package_type'] = 'Budgetmotor 2K – profilförst'
+                source = 'BUDGETMOTOR2K'
     except Exception as _budget_e:
-        budget_meta = {'status': 'BUDGETJAKT_FEL', 'error': str(_budget_e)}
+        budget_meta = {'status': 'BUDGETMOTOR2K_FEL', 'error': str(_budget_e)}
 
     # Diagnostik: visa både kandidatpool, råpaket, syntetiska microvarianter och budgetjakt.
     diag_rows = []
@@ -9068,7 +9374,7 @@ def _run_v46_final_motor_current(sim_df, specs, frame_rows, frame, filter_vec, a
     if isinstance(budget_diag, pd.DataFrame) and not budget_diag.empty:
         for _, _br in budget_diag.iterrows():
             rr = _br.to_dict()
-            rr['Vald'] = 'JA' if (source == 'BUDGETJAKT' and str(rr.get('Budgetstatus','')).upper() == 'JA') else ''
+            rr['Vald'] = 'JA' if (source in ['BUDGETJAKT','BUDGETMOTOR2K'] and str(rr.get('Budgetstatus','')).upper() in ['JA','UNDER']) else ''
             rr['Gruppkandidater'] = ''
             diag_rows.append(rr)
     if isinstance(budget_meta, dict) and str(budget_meta.get('status','')) not in ['', 'BUDGETJAKT_EJ_KÖRD']:
@@ -9081,15 +9387,15 @@ def _run_v46_final_motor_current(sim_df, specs, frame_rows, frame, filter_vec, a
             'Valideringsträff': f"{int(budget_meta.get('best_val', 0) or 0)}/{int(vtot)}" if budget_meta.get('best_val') is not None and int(vtot)>0 else '-',
             'Paketrader': int(budget_meta.get('rows', budget_meta.get('best_rows', 0)) or 0),
             'Filter totalt': int(budget_meta.get('best_filters', 0) or 0),
-            'Budgetstatus': 'JA' if str(budget_meta.get('status')) == 'BUDGETJAKT_VALD' else 'NEJ',
-            'Vald': 'JA' if source == 'BUDGETJAKT' else '',
+            'Budgetstatus': 'JA' if str(budget_meta.get('status')) in ['BUDGETJAKT_VALD','BUDGETMOTOR2K_VALD'] else 'NEJ',
+            'Vald': 'JA' if source in ['BUDGETJAKT','BUDGETMOTOR2K'] else '',
             'Gruppkandidater': '',
         })
     diag = pd.DataFrame(diag_rows)
 
     meta = {
         'package_engine': 'v46_exact_colab_port',
-        'selected_variant': 'V46_BUDGET_HUNT' if source == 'BUDGETJAKT' else V46_COLAB_PRIMARY_SYNTH,
+        'selected_variant': 'BUDGETMOTOR_2K' if source == 'BUDGETMOTOR2K' else ('V46_BUDGET_HUNT' if source == 'BUDGETJAKT' else V46_COLAB_PRIMARY_SYNTH),
         'selected_source': source,
         'micro_rescue_active': str(micro_row.get('Micro rescue aktiv', '')).lower() in ['ja','true','1'],
         'micro_reason': str(micro_row.get('Micro beslut', '')),
@@ -9435,8 +9741,8 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
         st.caption("Testar Pareto-bästa paket på radmassan efter dina manuella teckengrupper. De manuella teckengrupperna visas separat och drar inte ner paketens historiska filterträff. Paketmotorn bygger nivåtrappa per filter, testar även kombinationslyft av småfilter, visar progressklocka/ETA, eftertrimmar valt paket och visar hårda grupppaket som egen pakettyp.")
 
-        st.markdown("**🎯 Slutmotor V46 + BUDGETJAKT 2k + KANDIDATDIAGNOS**")
-        st.caption("Först körs exakt Colab V46: B52200_TRUE, B52200_BS29_TIGHT, B52200_OLD29_CV, REF_SUPER och MICRO_TIGHT_CLOSE. Om valt V46-paket hamnar över 2 500 rader eller får INGET_2K_BAND_HITTAT startar extra budgetjakt. Denna version visar dessutom kandidatpoolen: SPECS I APPEN, V46 RÅKANDIDATER, variantfilter, transform och BUDGETJAKT TOTAL POOL. Syftet är att avslöja om FAT/poäng/värde/skräll saknas eller väljs bort. Detta är inte V47/EFFECT5.")
+        st.markdown("**🎯 Budgetmotor 2K – profilförst (sista chansen)**")
+        st.caption("Först körs V46 som referens. Om V46 hamnar över 2 500 rader eller får INGET_2K_BAND_HITTAT startar Budgetmotor 2K. Den använder samma kandidatpool, men börjar med profilfilter/FAT/värde/favorit-skräll och använder struktur som trim. Målet är 1 850–2 500 rader, helst nära 2 200.")
         v46_warns = []
         if int(antal_matcher) != 13:
             v46_warns.append("Slutmotorn är låst/testad för 13 matcher.")
@@ -9446,12 +9752,12 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             v46_warns.append("V46-testen kördes med utdelningsintervall 100 000–2 500 000 kr.")
         if v46_warns:
             st.warning(" ".join(v46_warns))
-        run_v46_final = st.button("🎯 Beräkna V46 + budgetjakt + kandidatdiagnos", use_container_width=True, key="v12_run_v46_final_motor")
+        run_v46_final = st.button("🎯 Beräkna Budgetmotor 2K", use_container_width=True, key="v12_run_v46_final_motor")
         if run_v46_final:
             for _k in ['v12_recommended_packages', 'v12_recommended_candidate_audit', 'v12_recommended_meta', 'v12_applied_package_meta', 'v12_applied_package_snapshot']:
                 st.session_state.pop(_k, None)
             try:
-                with st.spinner("Kör Colab V46 och startar budgetjakt om V46 hamnar över 2 500 rader..."):
+                with st.spinner("Kör V46 som referens och Budgetmotor 2K om V46 hamnar över 2 500 rader..."):
                     final_pkg, final_meta, final_diag = _run_v46_final_motor_current(
                         v_m, specs, manual_frame_rows, frame, filter_vec, int(antal_matcher),
                         global_db=_streck_hist_db,
@@ -9474,7 +9780,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 st.success(f"V46 + budgetjakt klar: {final_meta.get('selected_variant')} via {final_meta.get('selected_source')} · {int(final_pkg.get('frame_after', 0)):,} rader · {int(final_pkg.get('hist_hit', 0))}/{int(final_pkg.get('hist_total', 0))} intern paketträff.".replace(',', ' '))
                 _bh_status = str(final_meta.get('budget_hunt_status', ''))
                 if _bh_status and _bh_status != 'BUDGETJAKT_EJ_KÖRD':
-                    st.info(f"Budgetjakt status: {_bh_status}. Om den hittade spelbart paket ska tabellen innehålla V46_BUDGET_HUNT/BUDGETJAKT-rader.")
+                    st.info(f"Budgetmotor status: {_bh_status}. Om den hittade spelbart paket ska tabellen innehålla BUDGETMOTOR_2K/BUDGETMOTOR2K-rader.")
                 if final_meta.get('micro_rescue_active'):
                     st.info("Micro-rescue aktiverades: " + str(final_meta.get('micro_reason', '')))
                 else:
@@ -9487,7 +9793,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         final_diag_show = st.session_state.get('v12_final_motor_diag')
         final_meta_show = st.session_state.get('v12_final_motor_meta') or {}
         if isinstance(final_diag_show, pd.DataFrame) and not final_diag_show.empty:
-            st.caption("Diagnostabellen ska i denna version visa BUDGETJAKT-rader om V46 hamnade över 2 500 rader eller fick INGET_2K_BAND_HITTAT.")
+            st.caption("Diagnostabellen ska visa BUDGETMOTOR2K-rader om V46 hamnade över 2 500 rader eller fick INGET_2K_BAND_HITTAT.")
             st.dataframe(final_diag_show, use_container_width=True, hide_index=True)
             if final_meta_show:
                 st.caption(str(final_meta_show.get('micro_reason', '')))
