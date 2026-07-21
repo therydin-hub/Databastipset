@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0cu – Exakt Colab V46-port"
+APP_VERSION = "v12.0cv – V46 Colab micro datumfix"
 
 
 st.markdown("""
@@ -8268,7 +8268,7 @@ def _apply_recommended_package_to_session(package, specs, filter_hist_target_pct
 # v12.0cu – EXAKT COLAB V46-PORT
 # =============================================================================
 # Viktigt: denna sektion ska inte vara en ny motor.
-# Den använder samma V46-modul som Colabfilen: tipset_final_motor_v46.py.
+# Den använder samma V46-modul som Colabfilen: motorn.py.
 # Den kör samma råvarianter som V46-finalen:
 #   B52200_TRUE, B52200_BS29_TIGHT, B52200_OLD29_CV, REF_SUPER
 # Därefter används Colabfunktionens egen _v46_make_micro_detail för att skapa
@@ -8285,14 +8285,14 @@ def _v46_engine_module_path():
         base = Path(__file__).resolve().parent
     except Exception:
         base = Path.cwd()
-    return base / 'tipset_final_motor_v46.py'
+    return base / 'motorn.py'
 
 
 @st.cache_resource(show_spinner=False)
 def _load_v46_engine_module_cached(path_str):
     path = Path(path_str)
     if not path.exists():
-        raise FileNotFoundError(f"Hittar inte V46-Colabmotorn: {path.name}. Lägg tipset_final_motor_v46.py i samma mapp som app.py.")
+        raise FileNotFoundError(f"Hittar inte V46-Colabmotorn: {path.name}. Lägg motorn.py i samma mapp som app.py.")
     spec = importlib.util.spec_from_file_location('tipset_final_motor_v46_exact_colab', str(path))
     if spec is None or spec.loader is None:
         raise RuntimeError('Kunde inte ladda V46-Colabmotorn som Python-modul.')
@@ -8345,6 +8345,7 @@ def _v46_exact_detail_row(mod, variant_id, pkg=None, error=''):
         pass
     if not isinstance(pkg, dict):
         return {
+            'Datum': 'AKTUELL_KUPONG',
             'Variant': variant_id,
             'Variantnamn': label,
             'Status': 'Fel' if error else 'Saknas',
@@ -8360,6 +8361,7 @@ def _v46_exact_detail_row(mod, variant_id, pkg=None, error=''):
     except Exception:
         counts = {}
     return {
+        'Datum': 'AKTUELL_KUPONG',
         'Variant': variant_id,
         'Variantnamn': label,
         'Status': 'OK',
@@ -8444,7 +8446,18 @@ def _select_v46_colab_primary_from_detail(detail_micro, built):
         raise RuntimeError('V46-Colab skapade ingen detailtabell.')
     rr = detail_micro[detail_micro['Variant'].astype(str).eq(V46_COLAB_PRIMARY_SYNTH)].copy()
     if rr.empty:
-        raise RuntimeError(f'V46-Colab skapade inte {V46_COLAB_PRIMARY_SYNTH}.')
+        # Ska normalt inte hända. För livekupong måste rådetail innehålla Datum,
+        # annars skapar V46:s Colab-funktion inga MICRO-rader. Falla tillbaka
+        # till baspaketet i stället för att krascha, men märk tydligt i metadata.
+        if 'B52200_TRUE' not in built or not isinstance(built.get('B52200_TRUE'), dict):
+            raise RuntimeError(f'V46-Colab skapade inte {V46_COLAB_PRIMARY_SYNTH} och B52200_TRUE saknas.')
+        row = {
+            'Variant': V46_COLAB_PRIMARY_SYNTH,
+            'Micro källa': 'B52200_TRUE',
+            'Micro rescue aktiv': 'Nej',
+            'Micro beslut': 'MICRO-rad saknades; fallback till B52200_TRUE',
+        }
+        return built.get('B52200_TRUE'), row, 'B52200_TRUE'
     row = rr.iloc[0].to_dict()
     source = str(row.get('Micro källa', '') or 'B52200_TRUE')
     if source not in built or not isinstance(built.get(source), dict):
