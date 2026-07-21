@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0df – Mönstermotor sortering + grundramsradantal"
+APP_VERSION = "v12.0dh – Mönstermotor grundramsadapt"
 
 
 st.markdown("""
@@ -8475,13 +8475,75 @@ def _pm2k_feature_values(feature, hist_pairs, frame_rows, filter_vec, antal_matc
     return hist_vals, frame_vals
 
 
-def _pm2k_candidate_intervals_for_feature(feature, hist_vals, frame_vals, frame_total, min_hit_floor=27, max_rules_per_feature=6):
+def _pm2k_candidate_intervals_for_feature(feature, hist_vals, frame_vals, frame_total, min_hit_floor=27, max_rules_per_feature=6, frame_adapt=False):
     clean = [float(v) for v in hist_vals if not pd.isna(v)]
     if not clean or not frame_vals:
         return []
     htot = len(clean)
     arr = sorted(clean)
+    frame_clean = []
+    try:
+        frame_clean = [float(v) for v in frame_vals if not pd.isna(v)]
+    except Exception:
+        frame_clean = []
     rules = []
+
+    def _maybe_frame_adapt_interval(lo2, hi2):
+        """Mjuk grundramsanpassning för dynamiska PM2K-intervall.
+
+        Historiken sätter originalintervallet, men om intervallet ligger nära en
+        kant i veckans manuella grundram breddas det försiktigt. Syftet är inte
+        att rädda facit i efterhand, utan att undvika att PM2K väljer filter som
+        bara kapar en grundramsdriven ytterkant, t.ex. strecksumma första 6 när
+        ramen redan har flera spikar/halvor i toppdelen.
+        """
+        if not frame_adapt or len(frame_clean) < 20:
+            return lo2, hi2, False, ''
+        try:
+            name = str(feature.get('name', ''))
+            group = str(feature.get('group', ''))
+            fmin = float(min(frame_clean)); fmax = float(max(frame_clean))
+            if fmax <= fmin:
+                return lo2, hi2, False, ''
+            fspan = max(1.0, fmax - fmin)
+            q25 = float(np.quantile(frame_clean, 0.25))
+            q75 = float(np.quantile(frame_clean, 0.75))
+            old_lo, old_hi = lo2, hi2
+            is_score_like = any(x in (name + ' ' + group).lower() for x in ['poäng', 'värde', 'skräll', 'favorit', 'strecksumma', 'balans'])
+            is_structure_like = 'struktur' in group.lower() or 'sekvens' in name.lower()
+            if not (is_score_like or is_structure_like):
+                return lo2, hi2, False, ''
+
+            # Större marginal på strecksumma/poäng, mindre på rena antal/struktur.
+            if 'strecksumma' in name.lower():
+                margin = max(6.0, round(0.04 * fspan, 3))
+            elif is_score_like:
+                margin = max(2.0, round(0.04 * fspan, 3))
+            else:
+                margin = max(1.0, round(0.03 * fspan, 3))
+
+            upper_cut = float(hi2) < fmax and (float(hi2) >= q75 or (fmax - float(hi2)) <= 0.35 * fspan)
+            lower_cut = float(lo2) > fmin and (float(lo2) <= q25 or (float(lo2) - fmin) <= 0.35 * fspan)
+            if upper_cut:
+                hi2 = min(fmax, float(hi2) + margin)
+            if lower_cut:
+                lo2 = max(fmin, float(lo2) - margin)
+
+            # Bevara heltalskänsla där featurevärdena är heltal.
+            if all(abs(float(v) - round(float(v))) < 1e-9 for v in frame_clean[:200]):
+                lo2 = int(np.floor(float(lo2)))
+                hi2 = int(np.ceil(float(hi2)))
+            else:
+                lo2 = round(float(lo2), 3)
+                hi2 = round(float(hi2), 3)
+
+            if lo2 != old_lo or hi2 != old_hi:
+                note = f'Grundramsanpassad från {old_lo}–{old_hi} till {lo2}–{hi2}'
+                return lo2, hi2, True, note
+        except Exception:
+            pass
+        return lo2, hi2, False, ''
+
     # Skapa fönster som täcker 30/29/28/27 av 30, och låt de mest reducerande vinna.
     for hit_target in range(htot, max(0, int(min_hit_floor)-1), -1):
         if hit_target <= 0 or hit_target > htot:
@@ -8494,6 +8556,8 @@ def _pm2k_candidate_intervals_for_feature(feature, hist_vals, frame_vals, frame_
                 lo2, hi2 = int(round(lo)), int(round(hi))
             else:
                 lo2, hi2 = round(lo, 3), round(hi, 3)
+            original_lo2, original_hi2 = lo2, hi2
+            lo2, hi2, frame_adapted, adapt_note = _maybe_frame_adapt_interval(lo2, hi2)
             hist_hit = sum(1 for v in clean if lo2 <= float(v) <= hi2)
             if hist_hit < int(min_hit_floor):
                 continue
@@ -8521,9 +8585,13 @@ def _pm2k_candidate_intervals_for_feature(feature, hist_vals, frame_vals, frame_
                 'frame_after_single': int(keep),
                 'single_reduction_pct': float(red),
                 'width': float(width),
+                'original_lo': original_lo2,
+                'original_hi': original_hi2,
+                'frame_adapted': bool(frame_adapted),
+                'adapt_note': adapt_note,
                 'desc': feature.get('desc',''),
                 'risk': feature.get('risk','Normal'),
-                'key': 'PM2K::' + str(abs(hash((feature.get('name',''), lo2, hi2))) % 10**12),
+                'key': 'PM2K::' + str(abs(hash((feature.get('name',''), lo2, hi2, bool(frame_adapted)))) % 10**12),
             })
     # Dedupe per exakt intervall.
     best = {}
@@ -8538,7 +8606,7 @@ def _pm2k_candidate_intervals_for_feature(feature, hist_vals, frame_vals, frame_
     return rules[:int(max_rules_per_feature)]
 
 
-def _pm2k_build_rule_pool(v_m, frame_rows, filter_vec, antal_matcher=13, min_hit_floor=27):
+def _pm2k_build_rule_pool(v_m, frame_rows, filter_vec, antal_matcher=13, min_hit_floor=27, frame_adapt=False):
     features = _pm2k_make_feature_defs(filter_vec, antal_matcher)
     hist_pairs = _pm2k_hist_pairs(v_m, antal_matcher)
     frame_total = len(frame_rows or [])
@@ -8546,7 +8614,7 @@ def _pm2k_build_rule_pool(v_m, frame_rows, filter_vec, antal_matcher=13, min_hit
     feature_diag = []
     for feat in features:
         hv, fv = _pm2k_feature_values(feat, hist_pairs, frame_rows, filter_vec, antal_matcher)
-        rules = _pm2k_candidate_intervals_for_feature(feat, hv, fv, frame_total, min_hit_floor=min_hit_floor, max_rules_per_feature=5)
+        rules = _pm2k_candidate_intervals_for_feature(feat, hv, fv, frame_total, min_hit_floor=min_hit_floor, max_rules_per_feature=5, frame_adapt=bool(frame_adapt))
         all_rules.extend(rules)
         if rules:
             best = rules[0]
@@ -8556,6 +8624,8 @@ def _pm2k_build_rule_pool(v_m, frame_rows, filter_vec, antal_matcher=13, min_hit
                 'Träff': f"{best['hist_hit']}/{best['hist_total']}",
                 'Kvar rader': int(best['frame_after_single']),
                 'Reducerar %': round(float(best['single_reduction_pct']), 1),
+                'Justerad': 'Ja' if best.get('frame_adapted') else 'Nej',
+                'Original': f"{best.get('original_lo')}–{best.get('original_hi')}" if best.get('frame_adapted') else '',
                 'Beskrivning': feat.get('desc',''),
             })
     # Prioritera egna profil/poängregler i poolen men behåll struktur som möjligt stöd.
@@ -8593,7 +8663,7 @@ def _pm2k_rule_masks(rules, v_m, frame_rows, filter_vec, antal_matcher=13):
     return out
 
 
-def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_rows=2200, min_rows=1850, max_rows=2500, min_hit_floor=27, top_n=3, progress_cb=None):
+def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_rows=2200, min_rows=1850, max_rows=2500, min_hit_floor=27, top_n=3, frame_adapt=False, progress_cb=None):
     """Sök dynamiska mönsterpaket och returnera toppalternativ.
 
     v12.0dd: funktionen returnerar fortfarande bästa paket som `chosen`, men
@@ -8608,7 +8678,7 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
             progress_cb(3, 'Startar Mönstermotor 2K...')
     except Exception:
         pass
-    rules, feat_diag = _pm2k_build_rule_pool(v_m, frame_rows, filter_vec, antal_matcher, min_hit_floor=min_hit_floor)
+    rules, feat_diag = _pm2k_build_rule_pool(v_m, frame_rows, filter_vec, antal_matcher, min_hit_floor=min_hit_floor, frame_adapt=bool(frame_adapt))
     try:
         if progress_cb:
             progress_cb(18, f'Skapade {len(rules)} dynamiska regler. Förbereder kandidatpool...')
@@ -8641,6 +8711,12 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
     floors = list(range(htot, max(0, int(min_hit_floor)-1), -1))
     all_under = []
     all_near = []
+    # v12.0dg: samla bästa paket per faktisk träffnivå (30/30, 29/30, 28/30, 27/30).
+    # Tidigare sparades i praktiken bara bästa paket per sökgolv. När maxrader höjdes
+    # kunde ett hårdpressat 28/30-paket inom gränsen försvinna eftersom 30/30-paketet
+    # dominerade sökgolvet. Maxrader ska bara vara en visningsspärr, inte stoppa
+    # insamlingen av billigare paket inom valda gränser.
+    best_under_by_hit = {}
 
     def _state_summary(state, floor, status):
         rows_left = int(state['frame_mask'].sum())
@@ -8660,6 +8736,27 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
 
     def _rule_signature(state):
         return tuple(sorted((str(r.get('name','')), str(r.get('lo')), str(r.get('hi'))) for r in (state.get('rules') or [])))
+
+    def _remember_under_candidate(state, floor):
+        try:
+            rows_left = int(state['frame_mask'].sum())
+            if not (int(min_rows) <= rows_left <= int(max_rows)):
+                return
+            summ = _state_summary(state, floor, 'UNDER_MAX')
+            hh = int(summ.get('hit', 0))
+            # Inom samma faktiska träffnivå vill vi ha lägst radantal = bäst reducering.
+            rank = (
+                int(summ.get('rows', 10**9)),
+                int(summ.get('filters', 10**9)),
+                -int(summ.get('profile_filters', 0)),
+                int(summ.get('structure_filters', 10**9)),
+                abs(int(summ.get('rows', 10**9)) - int(target_rows)),
+            )
+            old = best_under_by_hit.get(hh)
+            if old is None or rank < old[0]:
+                best_under_by_hit[hh] = (rank, state, summ)
+        except Exception:
+            return
 
     for floor_i, floor in enumerate(floors):
         try:
@@ -8716,6 +8813,7 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
                     if int(min_rows) <= rows_left <= int(max_rows):
                         if best_under is None or val < best_under[0]:
                             best_under = (val, ns)
+                        _remember_under_candidate(ns, floor)
                     if rows_left >= int(min_rows):
                         any_val = (max(0, rows_left-int(max_rows)), -hh, rows_left, len(ns['rules']), -pc, sc, abs(rows_left-int(target_rows)))
                         if best_any is None or any_val < best_any[0]:
@@ -8733,9 +8831,10 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
                 hh = int(s['hist_mask'].sum())
                 pc = int(s.get('profile_count',0)); sc = int(s.get('structure_count',0))
                 in_band = 0 if int(min_rows) <= rows_left <= int(max_rows) else 1
-                # v12.0df: maxrader är bara ett tak. Rangordna spelbara paket efter
-                # högsta historikträff och därefter lägst radantal (=bäst reducering).
-                return (in_band, max(0, rows_left-int(max_rows)), -hh, rows_left, len(s['rules']), -pc, sc, abs(rows_left-int(target_rows)))
+                # v12.0dg: på varje träffgolv ska beamet leta fram bästa reducering
+                # för just den nivån. Annars dominerar 30/30-stater även när vi söker
+                # 28/30 och billiga paket kan försvinna när maxrader höjs.
+                return (in_band, max(0, rows_left-int(max_rows)), rows_left, abs(hh-int(floor)), len(s['rules']), -pc, sc, -hh, abs(rows_left-int(target_rows)))
             nxt.sort(key=state_rank)
             beam = nxt[:beam_width]
             # Fortsätt söka även efter första träff, så topp 3 kan bli bättre.
@@ -8776,7 +8875,13 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
                 best[sig] = (score, state, summ)
         return list(best.values())
 
-    under = _dedupe_options(all_under)
+    # v12.0dg: bygg toppalternativ från både sökgolvets vinnare och bästa paket
+    # per faktisk träffnivå. Därmed syns t.ex. ett 1 861-raders 28/30-paket även
+    # när maxgränsen är 5 000 och 30/30/29/30 också finns inom gränsen.
+    under_seed = []
+    under_seed.extend(all_under)
+    under_seed.extend(list(best_under_by_hit.values()))
+    under = _dedupe_options(under_seed)
     under.sort(key=lambda x: (-int(x[2].get('hit', 0)), int(x[2].get('rows', 10**9)), int(x[2].get('filters', 10**9)), -int(x[2].get('profile_filters', 0)), int(x[2].get('structure_filters', 10**9))))
     if under:
         top = under[:max(1, int(top_n or 3))]
@@ -8810,6 +8915,7 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
             'target_rows': int(target_rows),
             'min_rows': int(min_rows),
             'max_rows': int(max_rows),
+            'frame_adapt': bool(frame_adapt),
         }
         try:
             if progress_cb:
@@ -8822,7 +8928,7 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
     near = _dedupe_options(all_near)
     near.sort(key=lambda x: x[0])
     best_summary = near[0][2] if near else None
-    meta = {'status':'MÖNSTERMOTOR2K_INGET_UNDER_MAX','candidate_count':len(cand),'feature_rule_count':len(rules), 'target_rows': int(target_rows), 'min_rows': int(min_rows), 'max_rows': int(max_rows)}
+    meta = {'status':'MÖNSTERMOTOR2K_INGET_UNDER_MAX','candidate_count':len(cand),'feature_rule_count':len(rules), 'target_rows': int(target_rows), 'min_rows': int(min_rows), 'max_rows': int(max_rows), 'frame_adapt': bool(frame_adapt)}
     if best_summary:
         meta.update({'best_rows': int(best_summary.get('rows',0)), 'best_hit': f"{best_summary.get('hit')}/{best_summary.get('total')}", 'best_filters': int(best_summary.get('filters',0))})
     try:
@@ -8875,6 +8981,8 @@ def _pm2k_rules_to_rows(chosen, base_rows=None, filter_vec=None, antal_matcher=1
             'Grupp': r.get('group',''),
             'Namn': r.get('name',''),
             'Intervall': f"{r.get('lo')}–{r.get('hi')}",
+            'Original': f"{r.get('original_lo')}–{r.get('original_hi')}" if r.get('frame_adapted') else '',
+            'Justerad': 'Ja' if r.get('frame_adapted') else 'Nej',
             'Träff ensam': f"{r.get('hist_hit')}/{r.get('hist_total')}",
             'Kvar ensam': int(r.get('frame_after_single',0)),
             'Reducerar ensam %': round(float(r.get('single_reduction_pct',0.0)), 1),
@@ -8951,6 +9059,8 @@ def _pm2k_correction_df(corr_row, chosen, filter_vec):
             'Filter': f'Mönstermotor2K – {i:02d} {r.get("name", "")}',
             'Kategori': r.get('group','Mönstermotor2K'),
             'Intervall': f'{lo}–{hi}',
+            'Original': f"{r.get('original_lo')}–{r.get('original_hi')}" if r.get('frame_adapted') else '',
+            'Justerad': 'Ja' if r.get('frame_adapted') else 'Nej',
             'Värde rätt rad': '' if val is None else round(float(val), 3),
             'Träff': 'Ja' if ok else 'Nej',
             'Typ': 'Dynamisk regel',
@@ -9472,7 +9582,7 @@ def _v46_budget_hunt_current(mod, ns, candidates, htot, vtot, ftot, hist_payout,
             meta['rows'] = int(br)
             return pkg, meta, pd.DataFrame(diag_rows)
 
-    meta = {'status': 'BUDGETJAKT_INGET_UNDER_2500', 'candidate_count': int(len(cands)), 'target_rows': int(target_rows), 'max_rows': int(max_rows)}
+    meta = {'status': 'BUDGETJAKT_INGET_UNDER_2500', 'candidate_count': int(len(cands)), 'target_rows': int(target_rows), 'max_rows': int(max_rows), 'frame_adapt': bool(frame_adapt)}
     if best_any is not None:
         bh, bv, br = state_counts(best_any)
         meta.update({'best_rows': int(br), 'best_hit': int(bh), 'best_val': int(bv), 'best_filters': int(len(best_any.get('chosen', ())))})
@@ -9780,7 +9890,7 @@ def _budgetmotor2k_profile_first_current(mod, ns, candidates, htot, vtot, ftot, 
                 meta.update({'status': 'BUDGETMOTOR2K_VALD', 'rows': int(br), 'hit': int(bh), 'val': int(bv), 'filters': int(len(chosen))})
                 return pkg, meta, pd.DataFrame(diag_rows)
 
-    meta = {'status': 'BUDGETMOTOR2K_INGET_UNDER_2500', 'candidate_count': int(len(cands)), 'profile_candidates': int(len(profile_cands)), 'structure_candidates': int(len(structure_cands)), 'target_rows': int(target_rows), 'max_rows': int(max_rows)}
+    meta = {'status': 'BUDGETMOTOR2K_INGET_UNDER_2500', 'candidate_count': int(len(cands)), 'profile_candidates': int(len(profile_cands)), 'structure_candidates': int(len(structure_cands)), 'target_rows': int(target_rows), 'max_rows': int(max_rows), 'frame_adapt': bool(frame_adapt)}
     if best_any is not None:
         bh, bv, br = counts(best_any)
         meta.update({'best_rows': int(br), 'best_hit': int(bh), 'best_val': int(bv), 'best_filters': int(len(best_any.get('chosen', ()))), 'best_profile_filters': int(profile_count(best_any)), 'best_structure_filters': int(structure_count(best_any))})
@@ -10504,14 +10614,21 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
 
         st.divider()
         st.markdown("**🧬 Mönstermotor 2K – valbar filtermotor**")
-        st.caption("Skapar egna regler för poäng, värde, skräll, favorit, zon och struktur. Maxrader är bara ett tak: topp 3 sorteras efter högsta träffsäkerhet och därefter lägst radantal/bäst reducering.")
-        c_pm_a, c_pm_b, c_pm_c = st.columns(3)
+        st.caption("Skapar egna regler för poäng, värde, skräll, favorit, zon och struktur. Maxrader är bara ett tak: topp 3 sorteras efter högsta träffsäkerhet och därefter lägst radantal/bäst reducering. Grundramsanpassning kan mjuka upp regler som ligger för nära veckans ram.")
+        c_pm_a, c_pm_b, c_pm_c, c_pm_d = st.columns([1, 1, 1, 1])
         with c_pm_a:
             pm_target_rows = st.number_input("Mål rader (diagnos)", min_value=1000, max_value=6000, value=int(st.session_state.get('v12_pm2k_target_rows', 2200)), step=50, key='v12_pm2k_target_rows')
         with c_pm_b:
             pm_min_rows = st.number_input("Min spelbara rader", min_value=500, max_value=5000, value=int(st.session_state.get('v12_pm2k_min_rows', 1850)), step=50, key='v12_pm2k_min_rows')
         with c_pm_c:
             pm_max_rows = st.number_input("Max spelbara rader", min_value=1000, max_value=8000, value=int(st.session_state.get('v12_pm2k_max_rows', 2500)), step=50, key='v12_pm2k_max_rows')
+        with c_pm_d:
+            pm_frame_adapt = st.checkbox(
+                "Anpassa mot grundram",
+                value=bool(st.session_state.get('v12_pm2k_frame_adapt', True)),
+                key='v12_pm2k_frame_adapt',
+                help="Mjukar upp dynamiska mönsterintervall som ligger nära grundramens ytterkanter, t.ex. strecksumma första 6 när ramen redan är toppstyrd av spikar/halvor.",
+            )
         run_pm2k = st.button("🧬 Beräkna Mönstermotor 2K", use_container_width=True, key="v12_run_pm2k_diag")
         if run_pm2k:
             try:
@@ -10533,6 +10650,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 pm_chosen, pm_meta, pm_diag, pm_feat_diag = _pm2k_search_package(
                     v_m, manual_frame_rows, filter_vec, int(antal_matcher),
                     target_rows=int(pm_target_rows), min_rows=int(pm_min_rows), max_rows=int(pm_max_rows), min_hit_floor=27, top_n=3,
+                    frame_adapt=bool(pm_frame_adapt),
                     progress_cb=_pm_progress,
                 )
                 pm_progress.progress(100, text=f"Mönstermotor 2K klar på {_fmt_elapsed(time.time() - pm_start)}")
