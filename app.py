@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0dc – Mönstermotor 2K valbar"
+APP_VERSION = "v12.0dd – Mönstermotor 2K aktiv topp 3"
 
 
 st.markdown("""
@@ -8267,13 +8267,11 @@ def _apply_recommended_package_to_session(package, specs, filter_hist_target_pct
 
 
 # =============================================================================
-# v12.0db – MÖNSTERMOTOR 2K DIAGNOS
+# v12.0dd – MÖNSTERMOTOR 2K AKTIV / TOPP 3
 # =============================================================================
-# Prototyp/diagnos: skapar egna dynamiska regler från 30 liknande rätta rader.
-# Den använder inte bara befintliga filterintervall, utan bygger egna features
-# från streck/procent, favorit/skräll, zoner och sammansatta poäng. I denna
-# version appliceras den inte i Filtercentralen; den visar om konceptet kan nå
-# 2k-bandet innan vi bygger applicering.
+# Skapar egna dynamiska regler från de 30 liknande rätta raderna.
+# Motorn kan nu aktiveras som ett riktigt dynamiskt filterpaket, synas i aktiva
+# filter/rättning och visa topp 3 spelbara alternativ med valbar maxradgräns.
 
 
 def _pm2k_row_str(row):
@@ -8585,8 +8583,15 @@ def _pm2k_rule_masks(rules, v_m, frame_rows, filter_vec, antal_matcher=13):
     return out
 
 
-def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_rows=2200, min_rows=1850, max_rows=2500, min_hit_floor=27, progress_cb=None):
-    frame_total = int(len(frame_rows or []))
+def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_rows=2200, min_rows=1850, max_rows=2500, min_hit_floor=27, top_n=3, progress_cb=None):
+    """Sök dynamiska mönsterpaket och returnera toppalternativ.
+
+    v12.0dd: funktionen returnerar fortfarande bästa paket som `chosen`, men
+    lägger även `_pm2k_alternatives` i paketet och `options` i meta. Detta gör
+    att användaren kan välja bland topp 3 spelbara paket i UI:t.
+    """
+    frame_rows = list(frame_rows or [])
+    frame_total = int(len(frame_rows))
     htot = int(len(v_m))
     try:
         if progress_cb:
@@ -8599,23 +8604,22 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
             progress_cb(18, f'Skapade {len(rules)} dynamiska regler. Förbereder kandidatpool...')
     except Exception:
         pass
-    # Begränsa för snabbhet men behåll bra blandning.
-    # Ta topp per grupp + topp total.
+
     selected = []
     by_group = {}
     for r in rules:
         by_group.setdefault(str(r.get('group','')), []).append(r)
     for g, rs in by_group.items():
-        selected.extend(rs[:35])
-    selected.extend(rules[:90])
-    # Dedupe.
+        selected.extend(rs[:45])
+    selected.extend(rules[:120])
+
     seen = set(); cand = []
     for r in selected:
         k = (r['name'], r['lo'], r['hi'])
         if k in seen:
             continue
         seen.add(k); cand.append(r)
-    cand = cand[:140]
+    cand = cand[:170]
     try:
         if progress_cb:
             progress_cb(28, f'Räknar masker för {len(cand)} kandidater...')
@@ -8625,6 +8629,28 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
 
     diag_rows = []
     floors = list(range(htot, max(0, int(min_hit_floor)-1), -1))
+    all_under = []
+    all_near = []
+
+    def _state_summary(state, floor, status):
+        rows_left = int(state['frame_mask'].sum())
+        hh = int(state['hist_mask'].sum())
+        pc = int(state.get('profile_count',0)); sc = int(state.get('structure_count',0))
+        return {
+            'floor': int(floor),
+            'rows': rows_left,
+            'hit': hh,
+            'total': int(htot),
+            'filters': len(state.get('rules',[]) or []),
+            'profile_filters': pc,
+            'structure_filters': sc,
+            'status': status,
+            'score': (abs(rows_left-int(target_rows)), -hh, -pc, sc, len(state.get('rules',[]) or [])),
+        }
+
+    def _rule_signature(state):
+        return tuple(sorted((str(r.get('name','')), str(r.get('lo')), str(r.get('hi'))) for r in (state.get('rules') or [])))
+
     for floor_i, floor in enumerate(floors):
         try:
             if progress_cb:
@@ -8641,13 +8667,12 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
         }]
         best_under = None
         best_any = None
-        max_depth = 12
-        beam_width = 160
+        max_depth = 14
+        beam_width = 240
         for depth in range(max_depth):
             nxt = []
             for state in beam:
                 cur_rows = int(state['frame_mask'].sum())
-                # Stanna om det redan ligger för lågt; fler filter hjälper inte.
                 if cur_rows < int(min_rows):
                     continue
                 for rule in cand:
@@ -8666,8 +8691,8 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
                     is_struct = 'struktur' in grp
                     pc = int(state['profile_count']) + (0 if is_struct else 1)
                     sc = int(state['structure_count']) + (1 if is_struct else 0)
-                    # Hindra struktur från att bli ryggrad i denna mönstermotor.
-                    if sc > max(3, pc):
+                    # Struktur får vara stöd, men inte äta upp paketet.
+                    if sc > max(4, pc + 1):
                         continue
                     ns = {
                         'rules': state['rules'] + [rule],
@@ -8677,12 +8702,12 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
                         'profile_count': pc,
                         'structure_count': sc,
                     }
-                    val = (abs(rows_left-int(target_rows)), -hh, len(ns['rules']), sc)
+                    val = (abs(rows_left-int(target_rows)), -hh, -pc, sc, len(ns['rules']))
                     if int(min_rows) <= rows_left <= int(max_rows):
                         if best_under is None or val < best_under[0]:
                             best_under = (val, ns)
                     if rows_left >= int(min_rows):
-                        any_val = (max(0, rows_left-int(max_rows)), abs(rows_left-int(target_rows)), -hh, len(ns['rules']), sc)
+                        any_val = (max(0, rows_left-int(max_rows)), abs(rows_left-int(target_rows)), -hh, -pc, sc, len(ns['rules']))
                         if best_any is None or any_val < best_any[0]:
                             best_any = (any_val, ns)
                     nxt.append(ns)
@@ -8701,59 +8726,138 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
                 return (in_band, max(0, rows_left-int(max_rows)), abs(rows_left-int(target_rows)), -hh, -pc, sc, len(s['rules']))
             nxt.sort(key=state_rank)
             beam = nxt[:beam_width]
-            if best_under is not None:
-                # Fortsätt ett varv kan hitta närmare mål, men inte för länge.
-                if depth >= 5:
-                    break
-        chosen = best_under[1] if best_under is not None else (best_any[1] if best_any is not None else None)
-        if chosen is not None:
-            rows_left = int(chosen['frame_mask'].sum())
-            hh = int(chosen['hist_mask'].sum())
+            # Fortsätt söka även efter första träff, så topp 3 kan bli bättre.
+            if best_under is not None and depth >= 8:
+                break
+
+        chosen_for_diag = best_under[1] if best_under is not None else (best_any[1] if best_any is not None else None)
+        if chosen_for_diag is not None:
+            rows_left = int(chosen_for_diag['frame_mask'].sum())
+            hh = int(chosen_for_diag['hist_mask'].sum())
+            status = 'UNDER_MAX' if int(min_rows) <= rows_left <= int(max_rows) else 'ÖVER_BUDGET'
             diag_rows.append({
                 'Variant': f'MÖNSTERMOTOR2K {floor}/{htot}',
                 'Typ': 'Mönstermotor2K',
-                'Status': 'UNDER_2500' if rows_left <= int(max_rows) and rows_left >= int(min_rows) else 'ÖVER_BUDGET',
-                'Orsak': f'egna dynamiska regler · kandidater={len(cand)} · feature-regler={len(rules)} · profil={int(chosen.get("profile_count",0))} · struktur={int(chosen.get("structure_count",0))}',
+                'Status': status,
+                'Orsak': f'egna dynamiska regler · kandidater={len(cand)} · feature-regler={len(rules)} · profil={int(chosen_for_diag.get("profile_count",0))} · struktur={int(chosen_for_diag.get("structure_count",0))}',
                 'Paketträff': f'{hh}/{htot}',
                 'Paketrader': rows_left,
-                'Filter totalt': len(chosen['rules']),
-                'Budgetstatus': 'JA' if rows_left <= int(max_rows) and rows_left >= int(min_rows) else 'NEJ',
+                'Filter totalt': len(chosen_for_diag['rules']),
+                'Budgetstatus': 'JA' if status == 'UNDER_MAX' else 'NEJ',
             })
-            if rows_left <= int(max_rows) and rows_left >= int(min_rows):
-                try:
-                    if progress_cb:
-                        progress_cb(100, f'Mönstermotor klar: {rows_left} rader · {hh}/{htot}.')
-                except Exception:
-                    pass
-                return chosen, {'status':'MÖNSTERMOTOR2K_VALD','rows':rows_left,'hit':hh,'total':htot,'candidate_count':len(cand),'feature_rule_count':len(rules)}, pd.DataFrame(diag_rows), feat_diag
+            if best_under is not None:
+                all_under.append((best_under[0], chosen_for_diag, _state_summary(chosen_for_diag, floor, 'UNDER_MAX')))
+            elif best_any is not None:
+                all_near.append((best_any[0], chosen_for_diag, _state_summary(chosen_for_diag, floor, 'ÖVER_BUDGET')))
         else:
             diag_rows.append({
                 'Variant': f'MÖNSTERMOTOR2K {floor}/{htot}', 'Typ': 'Mönstermotor2K', 'Status': 'INGEN_KANDIDAT',
                 'Orsak': f'kandidater={len(cand)} · feature-regler={len(rules)}', 'Paketträff': f'0/{htot}', 'Paketrader': 0, 'Filter totalt': 0, 'Budgetstatus':'NEJ'
             })
-    # inget under budget
-    best_row = None
-    try:
-        nonzero = [r for r in diag_rows if int(r.get('Paketrader',0) or 0) > 0]
-        best_row = min(nonzero, key=lambda r: int(r.get('Paketrader',10**12))) if nonzero else None
-    except Exception:
-        best_row = None
-    meta = {'status':'MÖNSTERMOTOR2K_INGET_UNDER_2500','candidate_count':len(cand),'feature_rule_count':len(rules)}
-    if best_row:
-        meta.update({'best_rows': int(best_row.get('Paketrader',0)), 'best_hit': str(best_row.get('Paketträff',''))})
+
+    def _dedupe_options(items):
+        best = {}
+        for score, state, summ in items:
+            sig = _rule_signature(state)
+            old = best.get(sig)
+            if old is None or score < old[0]:
+                best[sig] = (score, state, summ)
+        return list(best.values())
+
+    under = _dedupe_options(all_under)
+    under.sort(key=lambda x: x[0])
+    if under:
+        top = under[:max(1, int(top_n or 3))]
+        option_states = []
+        option_summaries = []
+        for i, (_, state, summ) in enumerate(top, 1):
+            s2 = dict(state)
+            s2['_pm2k_option_summary'] = dict(summ, option=i)
+            option_states.append(s2)
+            option_summaries.append(dict(summ, option=i))
+            diag_rows.append({
+                'Variant': f'MÖNSTERMOTOR2K TOPP {i}',
+                'Typ': 'Mönstermotor2K',
+                'Status': 'SPELBAR',
+                'Orsak': f'toppalternativ {i} · profil={summ.get("profile_filters")} · struktur={summ.get("structure_filters")}',
+                'Paketträff': f'{summ.get("hit")}/{summ.get("total")}',
+                'Paketrader': int(summ.get('rows', 0)),
+                'Filter totalt': int(summ.get('filters', 0)),
+                'Budgetstatus': 'JA',
+            })
+        chosen = option_states[0]
+        chosen['_pm2k_alternatives'] = option_states
+        meta = {
+            'status': 'MÖNSTERMOTOR2K_VALD',
+            'rows': int(option_summaries[0]['rows']),
+            'hit': int(option_summaries[0]['hit']),
+            'total': int(htot),
+            'candidate_count': len(cand),
+            'feature_rule_count': len(rules),
+            'options': option_summaries,
+            'target_rows': int(target_rows),
+            'min_rows': int(min_rows),
+            'max_rows': int(max_rows),
+        }
+        try:
+            if progress_cb:
+                progress_cb(100, f'Mönstermotor klar: {len(option_states)} spelbara alternativ. Bäst: {meta["rows"]} rader · {meta["hit"]}/{htot}.')
+        except Exception:
+            pass
+        return chosen, meta, pd.DataFrame(diag_rows), feat_diag
+
+    # Inget under budget: returnera diagnos med bästa nära.
+    near = _dedupe_options(all_near)
+    near.sort(key=lambda x: x[0])
+    best_summary = near[0][2] if near else None
+    meta = {'status':'MÖNSTERMOTOR2K_INGET_UNDER_MAX','candidate_count':len(cand),'feature_rule_count':len(rules), 'target_rows': int(target_rows), 'min_rows': int(min_rows), 'max_rows': int(max_rows)}
+    if best_summary:
+        meta.update({'best_rows': int(best_summary.get('rows',0)), 'best_hit': f"{best_summary.get('hit')}/{best_summary.get('total')}", 'best_filters': int(best_summary.get('filters',0))})
     try:
         if progress_cb:
-            progress_cb(100, 'Mönstermotor klar: inget paket under 2 500.')
+            progress_cb(100, f'Mönstermotor klar: inget paket under {int(max_rows)}.')
     except Exception:
         pass
     return None, meta, pd.DataFrame(diag_rows), feat_diag
 
+def _pm2k_rule_value(rule, row, filter_vec):
+    try:
+        fn = rule.get('feature', {}).get('fn')
+        if fn is None:
+            return None
+        return float(fn(row, filter_vec))
+    except Exception:
+        return None
 
-def _pm2k_rules_to_rows(chosen):
+
+def _pm2k_rule_passes(rule, row, filter_vec):
+    try:
+        val = _pm2k_rule_value(rule, row, filter_vec)
+        if val is None:
+            return False
+        return bool(float(rule.get('lo')) <= float(val) <= float(rule.get('hi')))
+    except Exception:
+        return False
+
+
+def _pm2k_rules_to_rows(chosen, base_rows=None, filter_vec=None, antal_matcher=13):
     rows = []
     if not isinstance(chosen, dict):
         return pd.DataFrame(rows)
+    current_rows = list(base_rows or []) if base_rows is not None else None
     for i, r in enumerate(chosen.get('rules', []) or [], 1):
+        before_n = len(current_rows) if current_rows is not None else None
+        after_n = None
+        step_red = None
+        if current_rows is not None and filter_vec is not None:
+            try:
+                next_rows = [row for row in current_rows if _pm2k_rule_passes(r, row, filter_vec)]
+                after_n = len(next_rows)
+                if before_n and before_n > 0:
+                    step_red = 100.0 - 100.0 * after_n / before_n
+                current_rows = next_rows
+            except Exception:
+                pass
         rows.append({
             'Regel': f'MÖNSTERREGEL – {i:02d}',
             'Grupp': r.get('group',''),
@@ -8762,10 +8866,84 @@ def _pm2k_rules_to_rows(chosen):
             'Träff ensam': f"{r.get('hist_hit')}/{r.get('hist_total')}",
             'Kvar ensam': int(r.get('frame_after_single',0)),
             'Reducerar ensam %': round(float(r.get('single_reduction_pct',0.0)), 1),
+            'Före steg': '' if before_n is None else int(before_n),
+            'Efter steg': '' if after_n is None else int(after_n),
+            'Stegreducering %': '' if step_red is None else round(float(step_red), 1),
             'Beskrivning': r.get('desc',''),
         })
     return pd.DataFrame(rows)
 
+
+def _pm2k_options_to_df(options):
+    rows = []
+    for i, opt in enumerate(options or [], 1):
+        summ = opt.get('_pm2k_option_summary') if isinstance(opt, dict) else None
+        if not isinstance(summ, dict):
+            continue
+        rows.append({
+            'Alternativ': i,
+            'Rader': int(summ.get('rows', 0)),
+            'Träff': f"{summ.get('hit')}/{summ.get('total')}",
+            'Filter': int(summ.get('filters', 0)),
+            'Profilfilter': int(summ.get('profile_filters', 0)),
+            'Strukturfilter': int(summ.get('structure_filters', 0)),
+            'Status': summ.get('status', ''),
+        })
+    return pd.DataFrame(rows)
+
+
+def _pm2k_meta_from_chosen(chosen, fallback_meta=None):
+    base = dict(fallback_meta or {}) if isinstance(fallback_meta, dict) else {}
+    if isinstance(chosen, dict):
+        summ = chosen.get('_pm2k_option_summary') or {}
+        if isinstance(summ, dict) and summ:
+            base.update({
+                'status': 'MÖNSTERMOTOR2K_VALD',
+                'rows': int(summ.get('rows', base.get('rows', 0) or 0)),
+                'hit': int(summ.get('hit', base.get('hit', 0) or 0)),
+                'total': int(summ.get('total', base.get('total', 0) or 0)),
+                'filters': int(summ.get('filters', len(chosen.get('rules', []) or []))),
+                'profile_filters': int(summ.get('profile_filters', 0)),
+                'structure_filters': int(summ.get('structure_filters', 0)),
+            })
+        else:
+            base.update({'status':'MÖNSTERMOTOR2K_VALD', 'filters': len(chosen.get('rules', []) or [])})
+    return base
+
+
+def _pm2k_hist_pass_count(chosen, v_m, antal_matcher=13):
+    if not isinstance(chosen, dict) or not (chosen.get('rules') or []):
+        return (0, int(len(v_m)) if hasattr(v_m, '__len__') else 0)
+    pairs = _pm2k_hist_pairs(v_m, antal_matcher)
+    passed = 0
+    for row, pv in pairs:
+        ok = True
+        for rule in chosen.get('rules') or []:
+            if not _pm2k_rule_passes(rule, row, pv):
+                ok = False
+                break
+        if ok:
+            passed += 1
+    return int(passed), int(len(pairs))
+
+
+def _pm2k_correction_df(corr_row, chosen, filter_vec):
+    rows = []
+    if not isinstance(chosen, dict) or not (chosen.get('rules') or []):
+        return pd.DataFrame(rows)
+    for i, r in enumerate(chosen.get('rules') or [], 1):
+        val = _pm2k_rule_value(r, corr_row, filter_vec)
+        lo, hi = r.get('lo'), r.get('hi')
+        ok = False if val is None else bool(float(lo) <= float(val) <= float(hi))
+        rows.append({
+            'Filter': f'Mönstermotor2K – {i:02d} {r.get("name", "")}',
+            'Kategori': r.get('group','Mönstermotor2K'),
+            'Intervall': f'{lo}–{hi}',
+            'Värde rätt rad': '' if val is None else round(float(val), 3),
+            'Träff': 'Ja' if ok else 'Nej',
+            'Typ': 'Dynamisk regel',
+        })
+    return pd.DataFrame(rows)
 
 def _pm2k_apply_chosen_to_rows(rows, chosen, filter_vec, antal_matcher=13):
     """Applicerar valda Mönstermotor2K-regler på en radlista.
@@ -9974,7 +10152,7 @@ st.markdown(f"""
   <div class='v12-step'>Ren omstart</div>
   <div class='v12-title'>🎯 Tipset AI — Helgardering-lik filtercentral</div>
   <div class='v12-muted'>En grundram. Ett filter per rad. Av / Tvingat / Grupp. Statistik på varje filter när du öppnar info.</div>
-  <div><span class='v12-pill'>{APP_VERSION}</span><span class='v12-pill'>Manuell filtercentral</span><span class='v12-pill'>Pareto-paket</span></div>
+  <div><span class='v12-pill'>{APP_VERSION}</span><span class='v12-pill'>Manuell filtercentral</span><span class='v12-pill'>Mönstermotor2K</span></div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -10281,11 +10459,18 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     st.caption("När du ändrar träffmål i en filterkategori får filtren i kategorin nya startintervall. Struktur kan t.ex. sättas till 100% medan Värde & svårighet kan ligga på 95%.")
 
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
-        st.caption("Mönstermotor 2K är nu huvudspåret. Den skapar egna dynamiska regler från de 30 liknande facitraderna och kan aktiveras direkt i nästa filtrering. Den gamla V46/Budgetmotor-sektionen är borttagen från huvudflödet.")
+        st.caption("Mönstermotor 2K är huvudspåret: den skapar egna dynamiska regler från de 30 liknande facitraderna och kan aktiveras som ett riktigt filterpaket i nästa filtrering/rättning.")
 
         st.divider()
         st.markdown("**🧬 Mönstermotor 2K – valbar filtermotor**")
-        st.caption("Skapar egna dynamiska regler från de 30 liknande rätta raderna: egna poäng, värde, skräll, favorit, zon och strukturmönster. Om paketet hamnar i 1 850–2 500 rader kan du aktivera det som extra filter i nästa körning.")
+        st.caption("Skapar egna regler för poäng, värde, skräll, favorit, zon och struktur. Du kan själv sätta högsta tillåtna radantal och välja bland de 3 bästa spelbara alternativen.")
+        c_pm_a, c_pm_b, c_pm_c = st.columns(3)
+        with c_pm_a:
+            pm_target_rows = st.number_input("Mål rader", min_value=1000, max_value=6000, value=int(st.session_state.get('v12_pm2k_target_rows', 2200)), step=50, key='v12_pm2k_target_rows')
+        with c_pm_b:
+            pm_min_rows = st.number_input("Min spelbara rader", min_value=500, max_value=5000, value=int(st.session_state.get('v12_pm2k_min_rows', 1850)), step=50, key='v12_pm2k_min_rows')
+        with c_pm_c:
+            pm_max_rows = st.number_input("Max spelbara rader", min_value=1000, max_value=8000, value=int(st.session_state.get('v12_pm2k_max_rows', 2500)), step=50, key='v12_pm2k_max_rows')
         run_pm2k = st.button("🧬 Beräkna Mönstermotor 2K", use_container_width=True, key="v12_run_pm2k_diag")
         if run_pm2k:
             try:
@@ -10306,7 +10491,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                         pass
                 pm_chosen, pm_meta, pm_diag, pm_feat_diag = _pm2k_search_package(
                     v_m, manual_frame_rows, filter_vec, int(antal_matcher),
-                    target_rows=2200, min_rows=1850, max_rows=2500, min_hit_floor=27,
+                    target_rows=int(pm_target_rows), min_rows=int(pm_min_rows), max_rows=int(pm_max_rows), min_hit_floor=27, top_n=3,
                     progress_cb=_pm_progress,
                 )
                 pm_progress.progress(100, text=f"Mönstermotor 2K klar på {_fmt_elapsed(time.time() - pm_start)}")
@@ -10314,7 +10499,9 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                 st.session_state['v12_pm2k_diag'] = pm_diag
                 st.session_state['v12_pm2k_feature_diag'] = pm_feat_diag
                 st.session_state['v12_pm2k_chosen'] = pm_chosen
-                st.session_state['v12_pm2k_rules'] = _pm2k_rules_to_rows(pm_chosen)
+                st.session_state['v12_pm2k_options'] = (pm_chosen.get('_pm2k_alternatives') if isinstance(pm_chosen, dict) else []) or ([pm_chosen] if isinstance(pm_chosen, dict) else [])
+                st.session_state['v12_pm2k_option_idx'] = 0
+                st.session_state['v12_pm2k_rules'] = _pm2k_rules_to_rows(pm_chosen, manual_frame_rows, filter_vec, int(antal_matcher))
                 status = str(pm_meta.get('status',''))
                 if status == 'MÖNSTERMOTOR2K_VALD':
                     st.success(f"Mönstermotor hittade paket: {int(pm_meta.get('rows',0)):,} rader · {int(pm_meta.get('hit',0))}/{int(pm_meta.get('total',0))} träff. Du kan aktivera paketet med knappen nedanför.".replace(',', ' '))
@@ -10328,13 +10515,39 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
         pm_rules_show = st.session_state.get('v12_pm2k_rules')
         pm_feat_show = st.session_state.get('v12_pm2k_feature_diag')
         pm_meta_show = st.session_state.get('v12_pm2k_meta') or {}
-        if str(pm_meta_show.get('status','')) == 'MÖNSTERMOTOR2K_VALD' and isinstance(st.session_state.get('v12_pm2k_chosen'), dict):
+        pm_options_show = st.session_state.get('v12_pm2k_options') or []
+        if str(pm_meta_show.get('status','')) == 'MÖNSTERMOTOR2K_VALD' and pm_options_show:
+            opt_df = _pm2k_options_to_df(pm_options_show)
+            if isinstance(opt_df, pd.DataFrame) and not opt_df.empty:
+                st.caption("Topp 3 spelbara Mönstermotor2K-alternativ")
+                st.dataframe(opt_df, use_container_width=True, hide_index=True)
+            def _fmt_pm_opt(i):
+                try:
+                    summ = pm_options_show[int(i)].get('_pm2k_option_summary', {})
+                    return f"Alternativ {int(i)+1}: {int(summ.get('rows',0))} rader · {int(summ.get('hit',0))}/{int(summ.get('total',0))} · {int(summ.get('filters',0))} regler"
+                except Exception:
+                    return f"Alternativ {int(i)+1}"
+            opt_idx = st.radio(
+                "Välj Mönstermotor2K-alternativ att aktivera",
+                options=list(range(len(pm_options_show))),
+                format_func=_fmt_pm_opt,
+                horizontal=False,
+                key='v12_pm2k_option_idx',
+            )
+            try:
+                selected_pm_option = pm_options_show[int(opt_idx)]
+                st.session_state['v12_pm2k_chosen'] = selected_pm_option
+                st.session_state['v12_pm2k_meta'] = _pm2k_meta_from_chosen(selected_pm_option, pm_meta_show)
+                st.session_state['v12_pm2k_rules'] = _pm2k_rules_to_rows(selected_pm_option, manual_frame_rows, filter_vec, int(antal_matcher))
+                pm_meta_show = st.session_state.get('v12_pm2k_meta') or pm_meta_show
+            except Exception:
+                selected_pm_option = st.session_state.get('v12_pm2k_chosen')
             c_use_pm, c_clear_pm = st.columns([2, 1])
             with c_use_pm:
-                if st.button('✅ Använd Mönstermotor2K i nästa filtrering', use_container_width=True, key='v12_use_pm2k_as_filter'):
+                if st.button('✅ Använd valt Mönstermotor2K-paket i nästa filtrering', use_container_width=True, key='v12_use_pm2k_as_filter'):
                     st.session_state['v12_pm2k_active'] = True
                     st.session_state['v12_last_result_stale'] = True
-                    st.success(_pm2k_active_label(pm_meta_show))
+                    st.success(_pm2k_active_label(st.session_state.get('v12_pm2k_meta') or pm_meta_show))
             with c_clear_pm:
                 if st.button('Stäng av Mönstermotor2K', use_container_width=True, key='v12_clear_pm2k_as_filter'):
                     st.session_state['v12_pm2k_active'] = False
@@ -10342,6 +10555,10 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     st.info('Mönstermotor2K är avstängd.')
         if bool(st.session_state.get('v12_pm2k_active')):
             st.success(_pm2k_active_label(st.session_state.get('v12_pm2k_meta') or {}))
+
+        # Uppdatera lokala visningsobjekt efter att användaren bytt toppalternativ.
+        pm_rules_show = st.session_state.get('v12_pm2k_rules')
+        pm_meta_show = st.session_state.get('v12_pm2k_meta') or pm_meta_show
 
         if isinstance(pm_diag_show, pd.DataFrame) and not pm_diag_show.empty:
             st.caption("Mönstermotor 2K – sökresultat per träffgolv")
@@ -10891,16 +11108,23 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     else:
         st.info("Inga aktiva filter ännu. Välj Tvingat eller Grupp på filterraderna innan du kör filtrering.")
 
-    active_count = sum(1 for v in settings.values() if v['mode'] != 'Av')
+    active_count_base = sum(1 for v in settings.values() if v['mode'] != 'Av')
     forced_count = sum(1 for v in settings.values() if v['mode'] == 'Tvingat')
-    group_count = active_count - forced_count
+    group_count = active_count_base - forced_count
+    pm2k_active_metrics = bool(st.session_state.get('v12_pm2k_active')) and isinstance(st.session_state.get('v12_pm2k_chosen'), dict)
+    pm2k_rule_count = len((st.session_state.get('v12_pm2k_chosen') or {}).get('rules', []) or []) if pm2k_active_metrics else 0
+    active_count = active_count_base + pm2k_rule_count
     hpkg, htot = _hist_package_passes(v_m, specs, settings, group_reqs)
+    hist_metric_txt = f"{hpkg}/{htot}"
+    if pm2k_active_metrics:
+        pmh, pmt = _pm2k_hist_pass_count(st.session_state.get('v12_pm2k_chosen'), v_m, int(antal_matcher))
+        hist_metric_txt = f"{pmh}/{pmt}" if active_count_base == 0 else f"{hpkg}/{htot} + M2K {pmh}/{pmt}"
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Aktiva filter", active_count)
     m2.metric("Tvingade", forced_count)
-    m3.metric("Gruppfilter", group_count)
-    m4.metric("Samlad historikträff", f"{hpkg}/{htot}")
+    m3.metric("Grupp/Mönster", group_count + pm2k_rule_count)
+    m4.metric("Samlad historikträff", hist_metric_txt)
 
     applied_meta = st.session_state.get('v12_applied_package_meta')
     if applied_meta and active_count:
@@ -11267,6 +11491,14 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
 
                 st.markdown("**Filterträff/miss på rätt rad**")
                 filter_corr_df = build_filter_correction_df(corr_row, specs, res.get('settings', settings), res.get('group_reqs', group_reqs))
+                pm_corr_df = pd.DataFrame()
+                if bool(st.session_state.get('v12_pm2k_active')):
+                    pm_corr_df = _pm2k_correction_df(corr_row, st.session_state.get('v12_pm2k_chosen'), filter_vec)
+                if not pm_corr_df.empty:
+                    if filter_corr_df.empty:
+                        filter_corr_df = pm_corr_df
+                    else:
+                        filter_corr_df = pd.concat([filter_corr_df, pm_corr_df], ignore_index=True, sort=False)
                 if filter_corr_df.empty:
                     st.info("Inga aktiva filter att rätta mot.")
                 else:
