@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0cx – V46 + tydlig budgetjakt 2k"
+APP_VERSION = "v12.0cz – Kandidatdiagnos filteruniversum"
 
 
 st.markdown("""
@@ -8556,6 +8556,10 @@ def _v46_budget_hunt_current(mod, ns, candidates, htot, vtot, ftot, hist_payout,
         return int(st['hist_bits'].bit_count()), (int(st['val_bits'].bit_count()) if int(vtot) > 0 else 0), int(st['frame_bits'].bit_count())
 
     def state_quality(st, hfloor, vfloor):
+        # Budgetjaktens mål är INTE högsta möjliga 30/30-paket. När ett
+        # träffgolv provas (t.ex. 29/30) är alla paket >= golvet giltiga, men
+        # sorteringen måste prioritera spelbart radantal först. Annars väljs
+        # alltid 30/30 på 4k-5k rader och lägre träffgolv används aldrig.
         hh, vv, rr = state_counts(st)
         in_band = 1 if int(min_rows) <= rr <= int(max_rows) else 0
         under = 1 if rr <= int(max_rows) else 0
@@ -8565,17 +8569,21 @@ def _v46_budget_hunt_current(mod, ns, candidates, htot, vtot, ftot, hist_payout,
         prof = sum(1 for c in chosen if is_profile(c))
         fat = sum(1 for c in chosen if is_fat(c))
         edge = sum(1 for c in chosen if is_edge(c))
+        structure = sum(1 for c in chosen if is_structure(c))
         payout = sum(float(c.get('payout_direction_pct', c.get('payout_lift_pct', 0.0)) or 0.0) for c in chosen)
+        # Fashit 1: nå budgetbandet. Fashit 2: om inte budget nås, kom så nära
+        # under/över som möjligt. Först därefter rankas träff/validering.
         return (
-            hh,
-            vv,
             in_band,
             under,
             -abs(rr - int(target_rows)),
             -over_pen,
             -under_pen,
+            hh,
+            vv,
             prof + edge + fat,
             payout,
+            -structure,
             -len(chosen),
         )
 
@@ -8632,9 +8640,12 @@ def _v46_budget_hunt_current(mod, ns, candidates, htot, vtot, ftot, hist_payout,
     diag_rows = []
     best_any = None
     for hfloor in range(int(htot), int(min_hit_floor)-1, -1):
-        # Samma nivåer som tidigare syntes i din diagnos: 30/30=>34/35, 27/30=>31/35.
+        # Budgetjakt ska kunna offra träff stegvis. Därför får även
+        # valideringsgolvet följa med ned. Gammal formel låste 29/30 nästan
+        # lika hårt som 30/30 och gjorde sökningen tandlös.
         if int(vtot) > 0:
-            vfloor = min(int(vtot), max(0, int(hfloor) + max(0, int(vtot)-int(htot)-1)))
+            miss = max(0, int(htot) - int(hfloor))
+            vfloor = max(0, int(vtot) - (2 + 2 * miss))
         else:
             vfloor = 0
         initial = {'hist_bits': full_hist_bits(), 'val_bits': full_val_bits(), 'frame_bits': full_frame_bits(), 'used_keys': frozenset(), 'chosen': tuple(), 'steps': tuple()}
@@ -8736,6 +8747,157 @@ def _v46_budget_hunt_current(mod, ns, candidates, htot, vtot, ftot, hist_payout,
     return None, meta, pd.DataFrame(diag_rows)
 
 
+
+# === v12.0cz: Kandidatdiagnos för filteruniversum ===
+def _cz_norm_category(x):
+    try:
+        s = str(x or '').strip()
+    except Exception:
+        s = ''
+    return s if s else 'Okänd'
+
+
+def _cz_category_order():
+    return ['Struktur', 'Värde & svårighet', 'FAT', 'FAT-sekvenser', 'Favorit & skräll', 'Super-Makro', 'Okänd']
+
+
+def _cz_category_counts(items, specs_mode=False):
+    counts = {c: 0 for c in _cz_category_order()}
+    total = 0
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        cat = _cz_norm_category(it.get('category' if not specs_mode else 'category'))
+        if cat not in counts:
+            counts[cat] = 0
+        counts[cat] += 1
+        total += 1
+    counts['Totalt'] = total
+    return counts
+
+
+def _cz_counts_text(counts):
+    parts = []
+    for cat in _cz_category_order():
+        if cat in counts:
+            parts.append(f"{cat}={int(counts.get(cat, 0) or 0)}")
+    parts.append(f"Totalt={int(counts.get('Totalt', 0) or 0)}")
+    return ' · '.join(parts)
+
+
+def _cz_universe_summary_row(label, items, status='Diagnos', detail='', specs_mode=False):
+    counts = _cz_category_counts(items, specs_mode=specs_mode)
+    non_structure = int(counts.get('Värde & svårighet', 0) or 0) + int(counts.get('FAT', 0) or 0) + int(counts.get('FAT-sekvenser', 0) or 0) + int(counts.get('Favorit & skräll', 0) or 0) + int(counts.get('Super-Makro', 0) or 0)
+    if int(counts.get('Totalt', 0) or 0) > 0 and non_structure <= 0:
+        status = 'VARNING_BARA_STRUKTUR'
+    return {
+        'Variant': f'KANDIDATPOOL – {label}',
+        'Typ': 'Kandidatdiagnos',
+        'Status': status,
+        'Orsak': (_cz_counts_text(counts) + (f" · {detail}" if detail else '')),
+        'Paketträff': '-',
+        'Valideringsträff': '-',
+        'Paketrader': '',
+        'Filter totalt': int(counts.get('Totalt', 0) or 0),
+        'Budgetstatus': '',
+        'Vald': '',
+        'Gruppkandidater': '',
+    }
+
+
+def _cz_candidate_metric(c, key, default=0.0):
+    try:
+        v = c.get(key, default)
+        if v is None or (hasattr(pd, 'isna') and pd.isna(v)):
+            return default
+        return float(v)
+    except Exception:
+        return default
+
+
+def _cz_candidate_int(c, key, default=0):
+    try:
+        v = c.get(key, default)
+        if v is None or (hasattr(pd, 'isna') and pd.isna(v)):
+            return default
+        return int(float(v))
+    except Exception:
+        return default
+
+
+def _cz_top_candidate_rows(label, items, htot=0, vtot=0, top_per_cat=3):
+    rows = []
+    by_cat = {}
+    for c in items or []:
+        if not isinstance(c, dict):
+            continue
+        by_cat.setdefault(_cz_norm_category(c.get('category')), []).append(c)
+    for cat in _cz_category_order():
+        cand_list = by_cat.get(cat, [])
+        if not cand_list:
+            continue
+        # Viktigt: detta är fristående kandidatstyrka, inte paketval.
+        # Sortera på egen reducering först, sedan historik/validering.
+        cand_list = sorted(
+            cand_list,
+            key=lambda c: (
+                _cz_candidate_metric(c, 'red_pct', 0.0),
+                _cz_candidate_int(c, 'hist_hit', 0),
+                _cz_candidate_metric(c, 'val_pct', 0.0),
+                -_cz_candidate_int(c, 'frame_keep', 10**12),
+            ),
+            reverse=True,
+        )[:int(max(1, top_per_cat))]
+        for i, c in enumerate(cand_list, 1):
+            hh = _cz_candidate_int(c, 'hist_hit', 0)
+            ht = _cz_candidate_int(c, 'hist_total', htot or 0) or int(htot or 0)
+            vh = _cz_candidate_int(c, 'val_hit', -1)
+            val_txt = f"{vh}/{int(vtot)}" if vh >= 0 and int(vtot or 0) > 0 else f"{_cz_candidate_metric(c, 'val_pct', 0.0):.1f}%"
+            rows.append({
+                'Variant': f'TOPPKANDIDAT – {label} – {cat} #{i}',
+                'Typ': 'Kandidatdiagnos',
+                'Status': 'Fristående filterkandidat',
+                'Orsak': (
+                    f"{c.get('name','')} · intervall {c.get('interval_txt', c.get('interval','-'))} · "
+                    f"egen reducering {_cz_candidate_metric(c, 'red_pct', 0.0):.1f}% · "
+                    f"kvar {_cz_candidate_int(c, 'frame_keep', 0)} rader · "
+                    f"träff {hh}/{ht if ht else '?'} · val {val_txt} · key={c.get('key','')} · källa={c.get('budget_hunt_source_variant', c.get('variant',''))}"
+                ),
+                'Paketträff': f"{hh}/{ht}" if ht else '-',
+                'Valideringsträff': val_txt,
+                'Paketrader': _cz_candidate_int(c, 'frame_keep', 0),
+                'Filter totalt': 1,
+                'Budgetstatus': '',
+                'Vald': '',
+                'Gruppkandidater': '',
+            })
+    return rows
+
+
+def _cz_selected_filter_rows(pkg, label='VALT PAKET'):
+    rows = []
+    if not isinstance(pkg, dict):
+        return rows
+    filters = pkg.get('filters', []) or []
+    rows.append(_cz_universe_summary_row(label, [c for c in filters if isinstance(c, dict)], status='Valt paket', detail='kategoriuppdelning av valda filter'))
+    for i, c in enumerate(filters, 1):
+        if not isinstance(c, dict):
+            continue
+        rows.append({
+            'Variant': f'VALT FILTER – {i:02d}',
+            'Typ': 'Kandidatdiagnos',
+            'Status': _cz_norm_category(c.get('category')),
+            'Orsak': f"{c.get('name','')} · {c.get('interval_txt', c.get('interval','-'))} · stegreducering={c.get('step_red_pct','')} · egen red={c.get('red_pct','')} · källa={c.get('budget_hunt_source_variant', c.get('variant',''))}",
+            'Paketträff': '',
+            'Valideringsträff': '',
+            'Paketrader': '',
+            'Filter totalt': 1,
+            'Budgetstatus': '',
+            'Vald': '',
+            'Gruppkandidater': '',
+        })
+    return rows
+
 def _run_v46_final_motor_current(sim_df, specs, frame_rows, frame, filter_vec, antal_matcher, global_db=None, top_n=30, pay_min=100000, pay_max=2500000, filter_hist_target_pct=95):
     """Kör samma V46-Colabflöde för aktuell kupong/grundram, men utan facittest."""
     if int(antal_matcher) != 13:
@@ -8786,19 +8948,45 @@ def _run_v46_final_motor_current(sim_df, specs, frame_rows, frame, filter_vec, a
     if not candidates:
         raise RuntimeError('V46-Colab kunde inte bygga några giltiga kandidater.')
 
+    cz_diag_rows = []
+    try:
+        cz_diag_rows.append(_cz_universe_summary_row('SPECS I APPEN', specs, detail='alla filter som appen skapade före V46', specs_mode=True))
+        cz_diag_rows.extend(_cz_top_candidate_rows('SPECS I APPEN', [], htot, vtot, top_per_cat=0))
+        cz_diag_rows.append(_cz_universe_summary_row('V46 RÅKANDIDATER', candidates, detail='efter _build_dynamic_candidates_v9 + enrich'))
+        cz_diag_rows.extend(_cz_top_candidate_rows('V46 RÅKANDIDATER', candidates, htot, vtot, top_per_cat=3))
+    except Exception as _cz_e:
+        cz_diag_rows.append({'Variant': 'KANDIDATPOOL – DIAGNOSFEL', 'Typ': 'Kandidatdiagnos', 'Status': 'FEL', 'Orsak': str(_cz_e)})
+
     built = {}
     errors = {}
     group_counts = {}
     raw_rows = []
-    # Samlad kandidatpool för sista budgetjakten. Detta är samma kandidater
-    # som V46 redan bygger/transfomerar, inte en ny filtermotor.
+    # Samlad kandidatpool för sista budgetjakten. Nu tar vi med både
+    # råkandidaterna från V46-kandidatbygget och de variantspecifika
+    # transformerade kandidaterna. Tidigare användes i praktiken för smal pool,
+    # vilket gjorde att budgetjakten fastnade i samma 30/30-strukturpaket.
     all_budget_candidates = []
+    try:
+        for _bc in list(candidates or []):
+            if isinstance(_bc, dict):
+                _b2 = dict(_bc)
+                _b2['budget_hunt_source_variant'] = 'RAW_DYNAMIC'
+                all_budget_candidates.append(_b2)
+    except Exception:
+        pass
     for variant_id in V46_COLAB_LOCKED_VARIANTS:
         try:
             vargs = mod._v15_variant_args(args, variant_id)
             cand0 = mod._v15_filter_candidates_for_variant(candidates, vargs, htot)
             cand_v, group_cands = mod._v15_transform_candidates(cand0, htot, vtot, ftot, hist_payout, vargs, variant_id)
             group_counts[variant_id] = int(len(group_cands))
+            try:
+                cz_diag_rows.append(_cz_universe_summary_row(f'{variant_id} EFTER VARIANTFILTER', cand0, detail='efter _v15_filter_candidates_for_variant'))
+                cz_diag_rows.append(_cz_universe_summary_row(f'{variant_id} EFTER TRANSFORM', cand_v, detail='efter _v15_transform_candidates'))
+                if group_cands:
+                    cz_diag_rows.append(_cz_universe_summary_row(f'{variant_id} GRUPPKANDIDATER', group_cands, detail='hårda gruppkandidater från transform'))
+            except Exception:
+                pass
             try:
                 for _bc in list(cand_v or []) + list(group_cands or []):
                     if isinstance(_bc, dict):
@@ -8827,6 +9015,12 @@ def _run_v46_final_motor_current(sim_df, specs, frame_rows, frame, filter_vec, a
     except Exception as e:
         raise RuntimeError(f'V46-Colab micro-detail misslyckades: {e}')
 
+    try:
+        cz_diag_rows.append(_cz_universe_summary_row('BUDGETJAKT TOTAL POOL', all_budget_candidates, detail='råkandidater + variantspecifika kandidater + gruppkandidater'))
+        cz_diag_rows.extend(_cz_top_candidate_rows('BUDGETJAKT TOTAL POOL', all_budget_candidates, htot, vtot, top_per_cat=4))
+    except Exception:
+        pass
+
     selected_pkg, micro_row, source = _select_v46_colab_primary_from_detail(detail_micro, built)
     selected_app = _normalize_v46_package_for_app(selected_pkg, V46_COLAB_PRIMARY_SYNTH, source, micro_row)
 
@@ -8852,8 +9046,13 @@ def _run_v46_final_motor_current(sim_df, specs, frame_rows, frame, filter_vec, a
     except Exception as _budget_e:
         budget_meta = {'status': 'BUDGETJAKT_FEL', 'error': str(_budget_e)}
 
-    # Diagnostik: visa både råpaket, syntetiska microvarianter och budgetjakt.
+    # Diagnostik: visa både kandidatpool, råpaket, syntetiska microvarianter och budgetjakt.
     diag_rows = []
+    try:
+        diag_rows.extend(cz_diag_rows)
+        diag_rows.extend(_cz_selected_filter_rows(selected_app, 'VALT PAKET EFTER V46/BUDGET'))
+    except Exception as _cz_e:
+        diag_rows.append({'Variant': 'KANDIDATPOOL – SAMMANSTÄLLNINGSFEL', 'Typ': 'Kandidatdiagnos', 'Status': 'FEL', 'Orsak': str(_cz_e)})
     for r in raw_rows:
         rr = dict(r)
         rr['Typ'] = 'Råpaket'
@@ -9236,8 +9435,8 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
         st.caption("Testar Pareto-bästa paket på radmassan efter dina manuella teckengrupper. De manuella teckengrupperna visas separat och drar inte ner paketens historiska filterträff. Paketmotorn bygger nivåtrappa per filter, testar även kombinationslyft av småfilter, visar progressklocka/ETA, eftertrimmar valt paket och visar hårda grupppaket som egen pakettyp.")
 
-        st.markdown("**🎯 Slutmotor V46 + BUDGETJAKT 2k**")
-        st.caption("Först körs exakt Colab V46: B52200_TRUE, B52200_BS29_TIGHT, B52200_OLD29_CV, REF_SUPER och MICRO_TIGHT_CLOSE. Om valt V46-paket hamnar över 2 500 rader eller får INGET_2K_BAND_HITTAT startar extra budgetjakt på samma V46-kandidatpool. Detta är inte V47/EFFECT5.")
+        st.markdown("**🎯 Slutmotor V46 + BUDGETJAKT 2k + KANDIDATDIAGNOS**")
+        st.caption("Först körs exakt Colab V46: B52200_TRUE, B52200_BS29_TIGHT, B52200_OLD29_CV, REF_SUPER och MICRO_TIGHT_CLOSE. Om valt V46-paket hamnar över 2 500 rader eller får INGET_2K_BAND_HITTAT startar extra budgetjakt. Denna version visar dessutom kandidatpoolen: SPECS I APPEN, V46 RÅKANDIDATER, variantfilter, transform och BUDGETJAKT TOTAL POOL. Syftet är att avslöja om FAT/poäng/värde/skräll saknas eller väljs bort. Detta är inte V47/EFFECT5.")
         v46_warns = []
         if int(antal_matcher) != 13:
             v46_warns.append("Slutmotorn är låst/testad för 13 matcher.")
@@ -9247,7 +9446,7 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
             v46_warns.append("V46-testen kördes med utdelningsintervall 100 000–2 500 000 kr.")
         if v46_warns:
             st.warning(" ".join(v46_warns))
-        run_v46_final = st.button("🎯 Beräkna V46 + budgetjakt 2k", use_container_width=True, key="v12_run_v46_final_motor")
+        run_v46_final = st.button("🎯 Beräkna V46 + budgetjakt + kandidatdiagnos", use_container_width=True, key="v12_run_v46_final_motor")
         if run_v46_final:
             for _k in ['v12_recommended_packages', 'v12_recommended_candidate_audit', 'v12_recommended_meta', 'v12_applied_package_meta', 'v12_applied_package_snapshot']:
                 st.session_state.pop(_k, None)
