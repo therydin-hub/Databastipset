@@ -8721,14 +8721,14 @@ def _pm2k_rule_masks(rules, v_m, frame_rows, filter_vec, antal_matcher=13):
 # V3.3b EdgeSafety blev för dyr/svag (6/10, 3223 rader) och används inte som huvudspår.
 ANTAL_MATCHER = 13
 TOP_N_SIMILAR = 30
-ROBUST_TOP_N = 120
-GLOBAL_TOP_N = 9999
+ROBUST_TOP_N = 80  # v12.0do snabbläge: mindre robustkontroll för Streamlit
+GLOBAL_TOP_N = 180  # v12.0do snabbläge: undvik tung global scanning i Streamlit
 BAND_MAX_ROWS = 4000
 TARGET_ROWS = 2500
-BEAM_WIDTH = 100
-MAX_DEPTH = 9
-MAX_CANDIDATES = 110
-MIN_SINGLE_REDUCTION_PCT = 5.0
+BEAM_WIDTH = 32  # v12.0do snabbläge
+MAX_DEPTH = 6  # v12.0do snabbläge
+MAX_CANDIDATES = 58  # v12.0do snabbläge
+MIN_SINGLE_REDUCTION_PCT = 10.0  # v12.0do snabbläge: snabbare livekörning
 GOLDRANK_ENABLED = True
 ROBUST_V2_ENABLED = True
 ROBUST_V2_NEAR_FLOOR = 90.0
@@ -10267,8 +10267,8 @@ def _collect_pm2k_band_packages(ns: Dict, v_m: pd.DataFrame, frame_rows: List[st
         by_group.setdefault(str(r.get('group', '')), []).append(r)
     for _, rs in by_group.items():
         rs.sort(key=lambda r: (float(r.get('_goldrank_score', 0.0) or 0.0), _goldrank_rule_hit(r), float(r.get('single_reduction_pct', 0.0) or 0.0)), reverse=True)
-        selected.extend(rs[:22])
-    selected.extend(rules[:90])
+        selected.extend(rs[:10])  # v12.0do snabbläge
+    selected.extend(rules[:45])  # v12.0do snabbläge
 
     seen = set()
     cand = []
@@ -12814,14 +12814,14 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     st.caption("När du ändrar träffmål i en filterkategori får filtren i kategorin nya startintervall. Struktur kan t.ex. sättas till 100% medan Värde & svårighet kan ligga på 95%.")
 
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
-        st.caption("PM2K Robust v3.3 är kvällens kandidatmotor: SuperInventor-regler + Package Survival. V3.3b/AutoProfile används inte som huvudspår.")
+        st.caption("PM2K Robust v3.3 SNABBLÄGE är kvällens kandidatmotor: mindre kandidatpool för att Streamlit ska hinna klart före spelstopp. V3.3b/AutoProfile används inte.")
 
         st.divider()
         st.markdown("**🧬 PM2K Robust v3.3 – valbar kandidatmotor**")
-        st.caption("Skapar breda SuperInventor-regler och väljer paket med Package Survival. Rekommenderad snabbinställning i kväll: mål 2 500, min 1, max 4 000, Anpassa mot grundram På.")
+        st.caption("Snabbläge: färre kandidater, beam 32, maxdjup 6, min egen reducering 10%. Rekommenderat i kväll: mål 2 800, min 1, max 4 000, Anpassa mot grundram På.")
         c_pm_a, c_pm_b, c_pm_c, c_pm_d = st.columns([1, 1, 1, 1])
         with c_pm_a:
-            pm_target_rows = st.number_input("Mål rader (diagnos)", min_value=1000, max_value=6000, value=int(st.session_state.get('v12_pm2k_target_rows', 2500)), step=50, key='v12_pm2k_target_rows')
+            pm_target_rows = st.number_input("Mål rader (diagnos)", min_value=1000, max_value=6000, value=int(st.session_state.get('v12_pm2k_target_rows', 2800)), step=50, key='v12_pm2k_target_rows')
         with c_pm_b:
             pm_min_rows = st.number_input("Min spelbara rader", min_value=1, max_value=5000, value=int(st.session_state.get('v12_pm2k_min_rows', 1)), step=50, key='v12_pm2k_min_rows')
         with c_pm_c:
