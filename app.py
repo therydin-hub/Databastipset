@@ -9948,8 +9948,10 @@ def run_all_grinds() -> None:
     _build_combined_filtergrind_report(summary_paths, out_dir)
 
 
-if __name__ == '__main__':
-    run_all_grinds()
+# Streamlit Cloud kör app.py med __name__ == '__main__'.
+# Denna Colab-testfunktion får därför ALDRIG autostartas i appen.
+# if __name__ == '__main__':
+#     run_all_grinds()
 
 def _rule_signature(state: Dict) -> Tuple:
     return tuple(sorted((str(r.get('name', '')), str(r.get('lo')), str(r.get('hi'))) for r in (state.get('rules') or [])))
