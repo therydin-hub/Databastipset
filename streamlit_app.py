@@ -199,6 +199,33 @@ def _initialize_direct_frame(match_count: int, spelform: str) -> None:
     _clear_recommended_package_state()
 
 
+def _toggle_direct_frame_sign(
+    match_index: int,
+    sign: str,
+    match_count: int,
+    spelform: str,
+) -> None:
+    """Växlar ett tecken direkt i den sparade grundramen."""
+    frame = _normalize_frame(
+        st.session_state.get("v12_saved_frame"),
+        match_count,
+    )
+    if not 0 <= match_index < len(frame):
+        return
+
+    current = list(frame[match_index])
+    if sign in current:
+        # En match får aldrig lämnas utan tecken.
+        if len(current) <= 1:
+            return
+        current.remove(sign)
+    else:
+        current.append(sign)
+
+    frame[match_index] = _normalize_signs(current)
+    _save_direct_frame(frame, spelform)
+
+
 def _clear_api_coupon_state(*, keep_error: bool = False) -> None:
     keys = (
         "ss_main_payload",
@@ -223,108 +250,108 @@ def _render_coupon_css() -> None:
     _ORIGINAL_MARKDOWN(
         """
         <style>
+        /* Lite mer arbetsyta, utan att påverka sidomenyn. */
+        section.main > div.block-container {
+            max-width: 1580px;
+        }
+
         .ss-api-title {
             font-weight: 800;
             font-size: .94rem;
             margin-bottom: .12rem;
         }
-
-        .ss-coupon-topline {
-            display: flex;
-            flex-wrap: wrap;
-            align-items: center;
-            gap: 5px;
-            margin: .18rem 0 .42rem 0;
-        }
-        .ss-pill {
+        .ss-api-status {
             display: inline-flex;
             align-items: center;
-            min-height: 23px;
-            padding: 2px 8px;
+            min-height: 25px;
+            margin-top: 7px;
+            padding: 3px 9px;
             border-radius: 999px;
-            border: 1px solid rgba(145, 164, 179, .28);
-            background: rgba(72, 94, 107, .25);
+            border: 1px solid rgba(67, 201, 170, .42);
+            background: rgba(67, 201, 170, .12);
+            color: #43c9aa;
             font-size: .70rem;
-            font-weight: 750;
+            font-weight: 800;
         }
-        .ss-pill-good {
-            border-color: rgba(68, 210, 171, .45);
-            background: rgba(41, 145, 112, .18);
+        .ss-coupon-meta {
+            margin: .28rem 0 .38rem .15rem;
+            color: rgba(220, 229, 236, .62);
+            font-size: .68rem;
         }
-        .ss-pill-warn {
-            border-color: rgba(230, 176, 68, .45);
-            background: rgba(176, 124, 25, .18);
+        .ss-coupon-meta strong {
+            color: rgba(238, 244, 248, .88);
+            font-weight: 760;
         }
 
-        /* Kolumnrubriker, som i den godkända mockupen */
+        /* Gemensam tabellrubrik */
         .ss-table-head-wrap {
-            margin: .02rem 0 .22rem 0;
+            margin: 0 0 .16rem 0;
         }
         .ss-head-main {
+            padding-left: .50rem;
+            color: rgba(238, 244, 248, .90);
             font-size: .72rem;
             font-weight: 760;
-            opacity: .86;
-            padding-left: .35rem;
             white-space: nowrap;
         }
         .ss-head-group {
+            color: rgba(238, 244, 248, .90);
             font-size: .70rem;
             font-weight: 760;
             text-align: center;
-            opacity: .86;
         }
         .ss-head-sub {
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 4px;
-            margin-top: 1px;
-            font-size: .62rem;
-            font-weight: 500;
-            opacity: .58;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 5px;
+            margin-top: 2px;
+            color: rgba(220, 229, 236, .52);
+            font-size: .61rem;
             text-align: center;
         }
 
-        /* En enda låg rad per match */
-        div[data-testid="stVerticalBlockBorderWrapper"]:has(.ss-table-row-marker) {
-            border-radius: 7px !important;
-            border-color: rgba(145, 164, 179, .21) !important;
-            background: rgba(37, 49, 60, .72) !important;
-            padding: .14rem .42rem !important;
-            margin-bottom: .16rem !important;
+        /*
+        Varje match är ett vanligt st.columns-block, inte en Streamlit-container.
+        Det gör raden betydligt lägre och närmare den godkända förhandsbilden.
+        */
+        div[data-testid="stHorizontalBlock"]:has(.ss-table-row-marker) {
+            min-height: 47px !important;
+            margin: 0 0 .18rem 0 !important;
+            padding: .20rem .48rem !important;
+            gap: .58rem !important;
+            align-items: center !important;
+            border: 1px solid rgba(145, 164, 179, .20);
+            border-radius: 7px;
+            background: rgba(42, 54, 65, .72);
         }
-        div[data-testid="stVerticalBlockBorderWrapper"]:has(.ss-table-row-marker)
+        div[data-testid="stHorizontalBlock"]:has(.ss-table-row-marker)
         div[data-testid="stVerticalBlock"] {
             gap: 0 !important;
         }
-        div[data-testid="stVerticalBlockBorderWrapper"]:has(.ss-table-row-marker)
-        div[data-testid="stHorizontalBlock"] {
-            gap: .55rem !important;
-            align-items: center !important;
-            min-height: 42px !important;
-        }
-        div[data-testid="stVerticalBlockBorderWrapper"]:has(.ss-table-row-marker)
+        div[data-testid="stHorizontalBlock"]:has(.ss-table-row-marker)
         [data-testid="stMarkdownContainer"] p {
             margin: 0 !important;
         }
-
         .ss-table-row-marker {
             display: none;
         }
+
         .ss-match-cell {
-            min-width: 0;
             display: grid;
-            grid-template-columns: 24px minmax(0, 1fr);
-            column-gap: 8px;
+            grid-template-columns: 27px minmax(0, 1fr);
+            column-gap: 9px;
             align-items: center;
+            min-width: 0;
         }
         .ss-match-number {
             display: flex;
             align-items: center;
             justify-content: center;
-            width: 24px;
-            height: 24px;
+            width: 27px;
+            height: 27px;
             border-radius: 7px;
-            background: rgba(69, 87, 100, .54);
+            background: rgba(74, 91, 104, .58);
+            color: rgba(246, 249, 251, .96);
             font-size: .72rem;
             font-weight: 850;
         }
@@ -332,96 +359,100 @@ def _render_coupon_css() -> None:
             min-width: 0;
         }
         .ss-match-title {
-            font-size: .78rem;
-            line-height: 1.08;
-            font-weight: 820;
-            white-space: nowrap;
             overflow: hidden;
+            color: rgba(246, 249, 251, .96);
+            font-size: .78rem;
+            font-weight: 820;
+            line-height: 1.05;
             text-overflow: ellipsis;
+            white-space: nowrap;
         }
         .ss-match-time {
-            margin-top: 2px;
-            font-size: .63rem;
+            margin-top: 3px;
+            color: rgba(220, 229, 236, .52);
+            font-size: .62rem;
             line-height: 1;
-            opacity: .58;
             white-space: nowrap;
         }
         .ss-source-fallback {
             display: inline-block;
             margin-left: 5px;
             padding: 0 5px;
+            border: 1px solid rgba(230, 176, 68, .45);
             border-radius: 999px;
-            font-size: .54rem;
+            background: rgba(176, 124, 25, .22);
+            font-size: .53rem;
             font-weight: 800;
             vertical-align: 1px;
-            background: rgba(176, 124, 25, .24);
-            border: 1px solid rgba(230, 176, 68, .45);
         }
 
         .ss-triple {
             display: grid;
             grid-template-columns: repeat(3, minmax(0, 1fr));
-            gap: 4px;
+            gap: 5px;
             align-items: center;
-            text-align: center;
-            font-size: .72rem;
+            color: rgba(241, 246, 249, .94);
+            font-size: .71rem;
+            font-weight: 650;
             line-height: 1;
-            font-weight: 730;
+            text-align: center;
         }
         .ss-triple span {
             white-space: nowrap;
         }
 
-        /* 1/X/2-knapparna */
-        div[data-testid="stVerticalBlockBorderWrapper"]:has(.ss-table-row-marker)
-        [data-testid="stSegmentedControl"] {
-            width: 100%;
+        /*
+        Egna st.button-knappar. Primär = valt tecken, sekundär = ej valt.
+        Vi skriver över appens röda accent bara inne i kupongraderna.
+        */
+        div[data-testid="stHorizontalBlock"]:has(.ss-table-row-marker)
+        div[data-testid="stButton"] {
+            margin: 0 !important;
         }
-        div[data-testid="stVerticalBlockBorderWrapper"]:has(.ss-table-row-marker)
-        [data-testid="stSegmentedControl"] > div {
-            width: 100%;
-            display: grid !important;
-            grid-template-columns: repeat(3, minmax(34px, 1fr));
-            gap: 5px !important;
-        }
-        div[data-testid="stVerticalBlockBorderWrapper"]:has(.ss-table-row-marker)
-        [data-testid="stSegmentedControl"] button {
-            min-height: 31px !important;
-            height: 31px !important;
-            padding: 0 .25rem !important;
+        div[data-testid="stHorizontalBlock"]:has(.ss-table-row-marker)
+        div[data-testid="stButton"] button,
+        div[data-testid="stHorizontalBlock"]:has(.ss-table-row-marker)
+        button[kind="secondary"],
+        div[data-testid="stHorizontalBlock"]:has(.ss-table-row-marker)
+        [data-testid="stBaseButton-secondary"] {
+            min-height: 32px !important;
+            height: 32px !important;
+            padding: 0 .20rem !important;
+            border: 1px solid rgba(145, 164, 179, .23) !important;
             border-radius: 5px !important;
+            background: rgba(62, 75, 87, .62) !important;
+            color: rgba(225, 233, 239, .62) !important;
             font-size: .76rem !important;
             font-weight: 850 !important;
-            border: 1px solid rgba(145, 164, 179, .22) !important;
-            background: rgba(63, 76, 89, .58) !important;
-            color: rgba(238, 243, 247, .64) !important;
+            box-shadow: none !important;
         }
-        div[data-testid="stVerticalBlockBorderWrapper"]:has(.ss-table-row-marker)
-        [data-testid="stSegmentedControl"] button[aria-pressed="true"] {
-            background: #43c9aa !important;
+        div[data-testid="stHorizontalBlock"]:has(.ss-table-row-marker)
+        button[kind="primary"],
+        div[data-testid="stHorizontalBlock"]:has(.ss-table-row-marker)
+        [data-testid="stBaseButton-primary"] {
             border-color: #43c9aa !important;
+            background: #43c9aa !important;
             color: #071b17 !important;
         }
-
-        /* Reserv: kryssrutor om segmented_control saknas */
-        div[data-testid="stVerticalBlockBorderWrapper"]:has(.ss-table-row-marker)
-        [data-testid="stCheckbox"] {
-            margin: 0 !important;
+        div[data-testid="stHorizontalBlock"]:has(.ss-table-row-marker)
+        div[data-testid="stButton"] button:hover {
+            border-color: #43c9aa !important;
         }
 
         .ss-summary-card {
-            min-height: 58px;
-            padding: 8px 10px;
-            border-radius: 7px;
+            min-height: 60px;
+            padding: 9px 11px;
             border: 1px solid rgba(145, 164, 179, .20);
-            background: rgba(31, 43, 53, .52);
+            border-radius: 7px;
+            background: rgba(31, 43, 53, .56);
         }
         .ss-summary-label {
+            margin-bottom: 4px;
+            color: rgba(220, 229, 236, .58);
             font-size: .64rem;
-            opacity: .62;
-            margin-bottom: 3px;
         }
         .ss-summary-value {
+            color: rgba(246, 249, 251, .96);
             font-size: .82rem;
             font-weight: 850;
             white-space: nowrap;
@@ -434,9 +465,11 @@ def _render_coupon_css() -> None:
             .ss-match-title {
                 white-space: normal;
             }
-            div[data-testid="stVerticalBlockBorderWrapper"]:has(.ss-table-row-marker)
-            div[data-testid="stHorizontalBlock"] {
-                flex-wrap: wrap !important;
+            div[data-testid="stHorizontalBlock"]:has(.ss-table-row-marker) {
+                min-width: 970px;
+            }
+            .ss-table-scroll-note {
+                display: block;
             }
         }
         </style>
@@ -446,28 +479,27 @@ def _render_coupon_css() -> None:
 
 
 def _render_table_header() -> None:
-    with st.container():
-        cols = _ORIGINAL_COLUMNS([2.65, 1.55, 1.55, 1.55, 1.55])
-        with cols[0]:
+    cols = _ORIGINAL_COLUMNS([2.70, 1.35, 1.35, 1.35, 1.55])
+    with cols[0]:
+        _ORIGINAL_MARKDOWN(
+            '<div class="ss-table-head-wrap">'
+            '<div class="ss-head-main">Match</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+    for col, label in zip(
+        cols[1:],
+        ("Streck", "Odds", "Startodds", "Grundram"),
+    ):
+        with col:
             _ORIGINAL_MARKDOWN(
                 '<div class="ss-table-head-wrap">'
-                '<div class="ss-head-main">Match</div>'
-                '</div>',
+                f'<div class="ss-head-group">{html.escape(label)}</div>'
+                '<div class="ss-head-sub">'
+                '<span>1</span><span>X</span><span>2</span>'
+                '</div></div>',
                 unsafe_allow_html=True,
             )
-        for col, label in zip(
-            cols[1:],
-            ("Streck", "Odds", "Startodds", "Grundram"),
-        ):
-            with col:
-                _ORIGINAL_MARKDOWN(
-                    '<div class="ss-table-head-wrap">'
-                    f'<div class="ss-head-group">{html.escape(label)}</div>'
-                    '<div class="ss-head-sub">'
-                    '<span>1</span><span>X</span><span>2</span>'
-                    '</div></div>',
-                    unsafe_allow_html=True,
-                )
 
 
 def _render_match_cell(row: Any, fallback_used: bool) -> None:
@@ -483,7 +515,8 @@ def _render_match_cell(row: Any, fallback_used: bool) -> None:
         '<div class="ss-match-copy">'
         f'<div class="ss-match-title">{html.escape(str(row.description))}'
         f'{fallback_badge}</div>'
-        f'<div class="ss-match-time">{html.escape(_format_match_time(row.event_start))}</div>'
+        f'<div class="ss-match-time">'
+        f'{html.escape(_format_match_time(row.event_start))}</div>'
         '</div></div>',
         unsafe_allow_html=True,
     )
@@ -493,44 +526,44 @@ def _render_triple(values: Sequence[str]) -> None:
     safe = [html.escape(str(value)) for value in values]
     _ORIGINAL_MARKDOWN(
         '<div class="ss-triple">'
-        f'<span>{safe[0]}</span><span>{safe[1]}</span><span>{safe[2]}</span>'
+        f'<span>{safe[0]}</span>'
+        f'<span>{safe[1]}</span>'
+        f'<span>{safe[2]}</span>'
         '</div>',
         unsafe_allow_html=True,
     )
 
 
-def _render_sign_selector(
+def _render_sign_buttons(
+    row_index: int,
     row: Any,
-    defaults: Sequence[str],
+    selected_signs: Sequence[str],
     token: int,
+    match_count: int,
     spelform: str,
-) -> list[str]:
-    key_base = f"ss_frame_pick_{token}_{spelform}_{int(row.event_number)}"
-
-    if hasattr(st, "segmented_control"):
-        try:
-            selected = st.segmented_control(
-                f"Grundram match {int(row.event_number)}",
-                options=["1", "X", "2"],
-                default=list(defaults),
-                selection_mode="multi",
-                key=key_base,
-                label_visibility="collapsed",
+) -> None:
+    button_cols = _ORIGINAL_COLUMNS(3)
+    for col, sign in zip(button_cols, ("1", "X", "2")):
+        with col:
+            is_selected = sign in selected_signs
+            _ORIGINAL_BUTTON(
+                sign,
+                key=(
+                    f"ss_frame_button_{token}_{spelform}_"
+                    f"{int(row.event_number)}_{sign}"
+                ),
+                type="primary" if is_selected else "secondary",
+                use_container_width=True,
+                on_click=_toggle_direct_frame_sign,
+                args=(row_index, sign, match_count, spelform),
+                help=(
+                    f"Ta bort {sign} från match {int(row.event_number)}"
+                    if is_selected and len(selected_signs) > 1
+                    else f"Lägg till {sign} i match {int(row.event_number)}"
+                    if not is_selected
+                    else "Minst ett tecken måste vara valt"
+                ),
             )
-            return _normalize_signs(selected)
-        except TypeError:
-            pass
-
-    cols = _ORIGINAL_COLUMNS(3)
-    selected: list[str] = []
-    for col, sign in zip(cols, ("1", "X", "2")):
-        if col.checkbox(
-            sign,
-            value=(sign in defaults),
-            key=f"{key_base}_{sign}",
-        ):
-            selected.append(sign)
-    return selected
 
 
 def _render_summary_cards(
@@ -557,7 +590,7 @@ def _render_summary_cards(
         ),
         (
             "Kupong",
-            f"{match_count}/{match_count} matcher",
+            f"✓ {match_count}/{match_count} matcher",
             " ss-summary-good",
         ),
     )
@@ -579,7 +612,7 @@ def _render_match_editor(
     spelform: str,
 ) -> list[list[str]]:
     match_count = len(rows)
-    saved = _normalize_frame(
+    frame = _normalize_frame(
         st.session_state.get("v12_saved_frame"),
         match_count,
     )
@@ -587,7 +620,6 @@ def _render_match_editor(
 
     _render_table_header()
 
-    frame: list[list[str]] = []
     for index, row in enumerate(rows):
         fallback_used = bool(
             allow_fallback
@@ -599,25 +631,27 @@ def _render_match_editor(
         odds = _format_odds(row.current_odds)
         start_odds = _format_odds(row.start_odds)
 
-        with st.container(border=True):
-            cols = _ORIGINAL_COLUMNS([2.65, 1.55, 1.55, 1.55, 1.55])
-            with cols[0]:
-                _render_match_cell(row, fallback_used)
-            with cols[1]:
-                _render_triple(streck)
-            with cols[2]:
-                _render_triple(odds)
-            with cols[3]:
-                _render_triple(start_odds)
-            with cols[4]:
-                signs = _render_sign_selector(
-                    row,
-                    saved[index],
-                    token,
-                    spelform,
-                )
-        frame.append(signs)
+        cols = _ORIGINAL_COLUMNS([2.70, 1.35, 1.35, 1.35, 1.55])
+        with cols[0]:
+            _render_match_cell(row, fallback_used)
+        with cols[1]:
+            _render_triple(streck)
+        with cols[2]:
+            _render_triple(odds)
+        with cols[3]:
+            _render_triple(start_odds)
+        with cols[4]:
+            _render_sign_buttons(
+                index,
+                row,
+                frame[index],
+                token,
+                match_count,
+                spelform,
+            )
 
+    # Callbacken sparar vid klick. Detta säkerställer även rätt metadata
+    # när kupongen precis har hämtats.
     _save_direct_frame(frame, spelform)
 
     missing = [
@@ -676,8 +710,16 @@ def _render_api_coupon_input(
             )
             _ORIGINAL_CAPTION(
                 "Startoddsvärdet används i bakgrunden. "
-                "Välj grundramens 1/X/2 direkt på matchraderna."
+                "Streck, odds och startodds visas här."
             )
+            existing_rows = st.session_state.get("ss_main_rows")
+            existing_product = st.session_state.get("ss_main_product")
+            if existing_rows and existing_product == current_spelform:
+                _ORIGINAL_MARKDOWN(
+                    '<div class="ss-api-status">✓ Kupong hämtad '
+                    f'{len(existing_rows)}/{expected_matches}</div>',
+                    unsafe_allow_html=True,
+                )
         with action_col:
             fetch_clicked = _ORIGINAL_BUTTON(
                 "Hämta aktuell kupong",
@@ -766,25 +808,20 @@ def _render_api_coupon_input(
             for source in sources
         )
 
-        pills = [
-            f'<span class="ss-pill">{html.escape(current_spelform)}</span>',
-            f'<span class="ss-pill">Omgång {html.escape(metadata.get("draw_number") or "–")}</span>',
-            f'<span class="ss-pill">{len(rows)}/{expected_matches} matcher</span>',
-            f'<span class="ss-pill ss-pill-good">Startodds {start_count}/{len(rows)}</span>',
+        meta_parts = [
+            f'<strong>{html.escape(current_spelform)}</strong>',
+            f'Omgång {html.escape(metadata.get("draw_number") or "–")}',
+            f'Startodds {start_count}/{len(rows)}',
         ]
         if stop_text:
-            pills.append(
-                f'<span class="ss-pill">Spelstopp {html.escape(stop_text)}</span>'
-            )
+            meta_parts.append(f'Spelstopp {html.escape(stop_text)}')
         if fallback_count:
-            pills.append(
-                f'<span class="ss-pill ss-pill-warn">Fallback {fallback_count}</span>'
-            )
+            meta_parts.append(f'Fallback {fallback_count}')
 
         _ORIGINAL_MARKDOWN(
-            '<div class="ss-coupon-topline">'
-            + "".join(pills)
-            + "</div>",
+            '<div class="ss-coupon-meta">'
+            + ' &nbsp;·&nbsp; '.join(meta_parts)
+            + '</div>',
             unsafe_allow_html=True,
         )
 
