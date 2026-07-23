@@ -17,10 +17,9 @@ import argparse
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
 
 st.set_page_config(page_title="Tipset AI-Analys", layout="wide", page_icon="🎯")
-APP_VERSION = "v12.0dm – PM2K Robust v3.3 kandidat"
+APP_VERSION = "v12.0dl – PM2K effektivt grundramsspann"
 
 
 st.markdown("""
@@ -8711,1581 +8710,107 @@ def _pm2k_rule_masks(rules, v_m, frame_rows, filter_vec, antal_matcher=13):
     return out
 
 
+def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_rows=2200, min_rows=1850, max_rows=2500, min_hit_floor=27, top_n=3, frame_adapt=False, progress_cb=None):
+    """Sök dynamiska mönsterpaket och returnera toppalternativ.
 
-
-# =============================================================================
-# v12.0dm – PM2K Robust v3.3 kandidatmotor
-# =============================================================================
-# Låst praktiskt spår efter Colab-validering:
-# V3.3 Package Survival slog V3.1 på svår seed959 (7/10 vs 5/10) och höll 7/10 på seed1060.
-# V3.3b EdgeSafety blev för dyr/svag (6/10, 3223 rader) och används inte som huvudspår.
-ANTAL_MATCHER = 13
-TOP_N_SIMILAR = 30
-ROBUST_TOP_N = 80  # v12.0do snabbläge: mindre robustkontroll för Streamlit
-GLOBAL_TOP_N = 180  # v12.0do snabbläge: undvik tung global scanning i Streamlit
-BAND_MAX_ROWS = 4000
-TARGET_ROWS = 2500
-BEAM_WIDTH = 32  # v12.0do snabbläge
-MAX_DEPTH = 6  # v12.0do snabbläge
-MAX_CANDIDATES = 58  # v12.0do snabbläge
-MIN_SINGLE_REDUCTION_PCT = 10.0  # v12.0do snabbläge: snabbare livekörning
-GOLDRANK_ENABLED = True
-ROBUST_V2_ENABLED = True
-ROBUST_V2_NEAR_FLOOR = 90.0
-ROBUST_V2_GLOBAL_FLOOR = 90.0
-ROBUST_V2_STRICT_30_FLOOR = 94.0
-ROBUST_V2_STRICT_27_FLOOR = 95.0
-ROBUST_V2_HARD_SINGLE_REDUCTION = 35.0
-ROBUST_V3_ENABLED = True
-ROBUST_V3_MARGIN_ENABLED = True
-ROBUST_V3_MARGIN_MAX_COUNT_HI = 13
-ROBUST_V3_MARGIN_MAX_WIDTH = 4
-ROBUST_V3_EDGE_PENALTY = 18.0
-ROBUST_V3_DANGER_PENALTY = 55.0
-RADPRESS_GOOD_LOW = 2200
-RADPRESS_GOOD_HIGH = 2900
-RADPRESS_TARGET = 2500
-SURVIVAL_ENABLED = True
-SURVIVAL_MINROB_FLOOR = 88.0
-SURVIVAL_STRONG_FLOOR = 92.0
-SURVIVAL_CHUNK_FLOOR = 78.0
-SURVIVAL_WILSON_FLOOR = 82.0
-SURVIVAL_PREFER_ROWS_LOW = 2200
-SURVIVAL_PREFER_ROWS_HIGH = 3000
-SURVIVAL_HARD_OVER_ROWS = 3300
-SURVIVAL_VERY_HARD_OVER_ROWS = 3700
-SURVIVAL_EDGE_HEAVY_PENALTY = 2.8
-SURVIVAL_DANGER_HEAVY_PENALTY = 4.0
-GOLDRANK_CORE = {
-    'Super FAT: FAT-summa totalt',
-    'Super poäng: strecksumma i öppnaste 4',
-    'Super poäng: snittstreck i öppnaste 4',
-    'Super favstyrka: favoriter sitter i sista 6',
-    'Super favstyrka: favoriter faller i öppnaste 3',
-    'Super favstyrka: favoriter faller i öppnaste 4',
-    'Super favstyrka: favoriter sitter i öppnaste 4',
-    'Super favstyrka: favoriter sitter i sista 7',
-    'Super favstyrka: favoriter sitter i sista 5',
-    'Super favstyrka: favoriter faller i sista 6',
-    'Super favstyrka: favoriter faller i sista 5',
-    'Super värde: tecken 15–35% i sista 6',
-    'Super värde: tecken 15–35% i sista 7',
-    'Super värde: tecken 15–35% i öppnaste 5',
-    'Super värde: tecken 15–35% i sista 5',
-    'Super värde: tecken 15–35% i öppnaste 3',
-    'Super poäng: snittstreck i sista 6',
-    'Super poäng: snittstreck i sista 7',
-    'Super poäng: strecksumma i sista 6',
-    'Super poäng: strecksumma i sista 7',
-    'Egen zonpoäng: strecksumma sista 7',
-    'Egen struktur: antal 1',
-    'Super struktur: 1 i hela raden',
-    'Egen sekvens: antal teckenbyten',
-    'Super sekvens: teckenbyten viktat med skrällar',
-    'Super FAT: antal tredjetecken totalt',
-    'Super poäng: strecksumma i favoriter 50+',
-}
-GOLDRANK_HARD_ELITE = {
-    'Super värde: tecken 20–45% i första 6',
-    'Super favstyrka: favoriter sitter i första 4',
-    'Super FAT: favorittecken i första 4',
-    'Super värde: tecken 15–35% i första 4',
-}
-GOLDRANK_BLOCK_EXACT = {
-    'Super värde: 100-minus summa',
-    'Super formel: total skrällkostnad',
-    'Super skräll: log surprise summa',
-    'Super poäng: snittstreck i hela raden',
-    'Super rank: rankpoäng summa',
-}
-GOLDRANK_PENALTY_EXACT = {
-    'Egen poäng: strecksumma vald rad',
-    'Super poäng: strecksumma i hela raden',
-    'Egen zonpoäng: strecksumma första 6',
-    'Super poäng: strecksumma i första 6',
-    'Super poäng: snittstreck i första 6',
-    'Super favstyrka: favoriter sitter i topp 6 favoriter',
-    'Super favstyrka: favoriter faller i topp 6 favoriter',
-    'Super favstyrka: favoriter faller i topp 7 favoriter',
-    'Super favstyrka: favoriter faller i topp 8 favoriter',
-    'Super poäng: snittstreck i topp 5 favoriter',
-    'Super poäng: strecksumma i topp 5 favoriter',
-    'Super poäng: snittstreck i topp 8 favoriter',
-}
-
-_pm2k_superinventor_installed = False
-
-def _pm2k_install_superinventor_once():
-    global _pm2k_superinventor_installed
-    if bool(_pm2k_superinventor_installed):
-        return
-    try:
-        _install_pm2k_superinventor(globals())
-        _pm2k_superinventor_installed = True
-    except Exception as e:
-        # Appen ska inte krascha om superfeatures faller; då körs original-PM2K.
-        _pm2k_superinventor_installed = False
-        try:
-            st.warning(f"PM2K SuperInventor kunde inte aktiveras: {e}")
-        except Exception:
-            pass
-
-def _install_pm2k_superinventor(ns: Dict) -> None:
-    """Monkey-patchar appens PM2K feature-generator i Colab-testet.
-
-    Syfte:
-    - behåll original-PM2K:s dynamiska filter
-    - lägg till många fler förklarbara mönsterfamiljer
-    - undvik exakta slumpregler på enskilda matchnummer som enda logik
-    - låt befintlig PM2K-sökning avgöra vilka regler som faktiskt reducerar och samarbetar
-
-    Detta är en testbänk. Om detta ger bättre Colab-resultat flyttas samma logik
-    in i appens enda huvudmotor senare.
+    v12.0dd: funktionen returnerar fortfarande bästa paket som `chosen`, men
+    lägger även `_pm2k_alternatives` i paketet och `options` i meta. Detta gör
+    att användaren kan välja bland topp 3 spelbara paket i UI:t.
     """
-    old_make = ns.get('_pm2k_make_feature_defs')
-    if old_make is None:
-        return
-
-    row_str = ns.get('_pm2k_row_str')
-    sel_pcts = ns.get('_pm2k_selected_pcts')
-    fav_idxs = ns.get('_pm2k_fav_idxs')
-    sign_idx = ns.get('_pm2k_sign_idx')
-    longest_run = ns.get('_pm2k_longest_run')
-    changes_fn = ns.get('_pm2k_changes')
-    get_fat_fn = ns.get('get_fat')
-    get_rank_points_fn = ns.get('get_rank_points')
-    get_100_minus_fn = ns.get('get_100_minus_sum')
-    get_log_surprise_fn = ns.get('get_log_surprise_sum')
-    get_abc_counts_fn = ns.get('get_abc_counts')
-
-    def super_make_feature_defs(filter_vec, antal_matcher=13):
-        n = int(antal_matcher or 13)
-        defs = []
-        seen = set()
-
-        def add(name, group, fn, desc='', risk='Normal'):
-            key = (str(name), str(group))
-            if key in seen:
-                return
-            seen.add(key)
-            defs.append({'name': str(name), 'group': str(group), 'fn': fn, 'desc': str(desc), 'risk': str(risk)})
-
-        # 1) Behåll alla originalfeatures.
-        try:
-            for f in old_make(filter_vec, antal_matcher):
-                add(f.get('name',''), f.get('group',''), f.get('fn'), f.get('desc',''), f.get('risk','Normal'))
-        except Exception:
-            pass
-
-        def srow(row):
-            return row_str(row) if row_str else str(row or '').strip().upper()
-
-        def vals(row, pv):
-            try:
-                return list(sel_pcts(row, pv, n)) if sel_pcts else []
-            except Exception:
-                return []
-
-        def idx_sign(ch):
-            try:
-                return int(sign_idx(ch)) if sign_idx else {'1':0,'X':1,'2':2}.get(str(ch).upper(), 0)
-            except Exception:
-                return {'1':0,'X':1,'2':2}.get(str(ch).upper(), 0)
-
-        def pct_at(pv, m, sign):
-            try:
-                return float((pv or [])[int(m)*3 + idx_sign(sign)])
-            except Exception:
-                return 0.0
-
-        def fav_rank_tuple(pv, m):
-            try:
-                tri = [float((pv or [])[m*3]), float((pv or [])[m*3+1]), float((pv or [])[m*3+2])]
-            except Exception:
-                tri = [0.0, 0.0, 0.0]
-            order = sorted([(tri[0],0), (tri[1],1), (tri[2],2)], reverse=True)
-            return order, tri
-
-        def selected_rank(row, pv, m):
-            s = srow(row)
-            if m >= len(s):
-                return 3
-            si = idx_sign(s[m])
-            order, _ = fav_rank_tuple(pv, m)
-            for rnk, (_, oi) in enumerate(order, start=1):
-                if oi == si:
-                    return rnk
-            return 3
-
-        def group_fixed(start, end):
-            return lambda pv: list(range(max(0, int(start)), min(n, int(end))))
-
-        def group_top_favs(k):
-            def fn(pv):
-                arr = fav_idxs(pv, n) if fav_idxs else []
-                arr = sorted(arr, key=lambda t: t[2], reverse=True)[:int(k)]
-                return [int(t[0]) for t in arr]
-            return fn
-
-        def group_bottom_favs(k):
-            def fn(pv):
-                arr = fav_idxs(pv, n) if fav_idxs else []
-                arr = sorted(arr, key=lambda t: t[2])[:int(k)]
-                return [int(t[0]) for t in arr]
-            return fn
-
-        def group_fav_threshold(lo=None, hi=None):
-            def fn(pv):
-                arr = fav_idxs(pv, n) if fav_idxs else []
-                out = []
-                for i, mi, fpct, tri in arr:
-                    if lo is not None and float(fpct) < float(lo):
-                        continue
-                    if hi is not None and float(fpct) > float(hi):
-                        continue
-                    out.append(int(i))
-                return out
-            return fn
-
-        def gidx(row, pv, gfn):
-            try:
-                return [i for i in gfn(pv) if 0 <= int(i) < n]
-            except Exception:
-                return []
-
-        def count_sign_in_group(row, pv, gfn, sign):
-            s = srow(row); idxs = gidx(row, pv, gfn)
-            return sum(1 for i in idxs if i < len(s) and s[i] == sign)
-
-        def selected_pcts_group(row, pv, gfn):
-            s = srow(row); out = []
-            for i in gidx(row, pv, gfn):
-                if i < len(s):
-                    out.append(pct_at(pv, i, s[i]))
-            return out
-
-        def rank_count_group(row, pv, gfn, rank_value):
-            return sum(1 for i in gidx(row, pv, gfn) if selected_rank(row, pv, i) == int(rank_value))
-
-        def fav_strength_hit(row, pv, gfn):
-            s = srow(row); total = 0.0
-            for i in gidx(row, pv, gfn):
-                if i >= len(s):
-                    continue
-                order, tri = fav_rank_tuple(pv, i)
-                fav_pct, fav_si = order[0]
-                if idx_sign(s[i]) == fav_si:
-                    total += float(fav_pct)
-            return total
-
-        def fav_strength_miss(row, pv, gfn):
-            s = srow(row); total = 0.0
-            for i in gidx(row, pv, gfn):
-                if i >= len(s):
-                    continue
-                order, tri = fav_rank_tuple(pv, i)
-                fav_pct, fav_si = order[0]
-                if idx_sign(s[i]) != fav_si:
-                    total += float(fav_pct)
-            return total
-
-        groups = []
-        # Fasta zoner, flera skalor.
-        fixed_specs = [
-            ('första 3',0,3), ('första 4',0,4), ('första 5',0,5), ('första 6',0,6),
-            ('mitt 4–9',3,min(n,9)), ('mitt 4–10',3,min(n,10)), ('mitt 5–11',4,min(n,11)),
-            ('sista 4',max(0,n-4),n), ('sista 5',max(0,n-5),n), ('sista 6',max(0,n-6),n), ('sista 7',max(0,n-7),n),
-            ('hela raden',0,n),
-        ]
-        for label, a, b in fixed_specs:
-            if b > a:
-                groups.append((label, group_fixed(a,b)))
-        # Dynamiska grupper efter favoritstyrka.
-        for k in [3,4,5,6,7,8,10]:
-            groups.append((f'topp {k} favoriter', group_top_favs(k)))
-        for k in [3,4,5,6]:
-            groups.append((f'öppnaste {k}', group_bottom_favs(k)))
-        for label, lo, hi in [
-            ('starka favoriter 70+',70,None), ('favoriter 60+',60,None), ('favoriter 50+',50,None),
-            ('mellanfavoriter 45–59',45,59.999), ('öppna matcher <45',None,44.999),
-        ]:
-            groups.append((label, group_fav_threshold(lo, hi)))
-
-        # 2) Gruppbaserade egna filter: tecken, FAT-rank, streckprofiler.
-        for glabel, gfn in groups:
-            for sign in ['1','X','2']:
-                add(f'Super struktur: {sign} i {glabel}', 'SuperInventor struktur',
-                    lambda row,pv,gfn=gfn,sign=sign: count_sign_in_group(row,pv,gfn,sign),
-                    f'Antal {sign} i gruppen {glabel}.')
-            for rv, rname in [(1,'favorittecken'), (2,'andratecken'), (3,'tredjetecken')]:
-                add(f'Super FAT: {rname} i {glabel}', 'SuperInventor favorit/skräll',
-                    lambda row,pv,gfn=gfn,rv=rv: rank_count_group(row,pv,gfn,rv),
-                    f'Antal valda {rname} i gruppen {glabel}.')
-            add(f'Super poäng: strecksumma i {glabel}', 'SuperInventor poäng/värde',
-                lambda row,pv,gfn=gfn: sum(selected_pcts_group(row,pv,gfn)),
-                f'Summa streck på valda tecken i gruppen {glabel}.')
-            add(f'Super poäng: snittstreck i {glabel}', 'SuperInventor poäng/värde',
-                lambda row,pv,gfn=gfn: float(np.mean(selected_pcts_group(row,pv,gfn))) if selected_pcts_group(row,pv,gfn) else 0.0,
-                f'Medelstreck på valda tecken i gruppen {glabel}.')
-            for thr in [8,10,15,20]:
-                add(f'Super skräll: under {thr}% i {glabel}', 'SuperInventor skräll',
-                    lambda row,pv,gfn=gfn,thr=thr: sum(1 for x in selected_pcts_group(row,pv,gfn) if x < float(thr)),
-                    f'Antal valda tecken under {thr}% i gruppen {glabel}.')
-            for lo, hi, nm in [(10,25,'10–25'), (15,35,'15–35'), (20,45,'20–45'), (25,50,'25–50')]:
-                add(f'Super värde: tecken {nm}% i {glabel}', 'SuperInventor poäng/värde',
-                    lambda row,pv,gfn=gfn,lo=lo,hi=hi: sum(1 for x in selected_pcts_group(row,pv,gfn) if float(lo) <= x <= float(hi)),
-                    f'Antal valda tecken {nm}% i gruppen {glabel}.')
-            add(f'Super favstyrka: favoriter sitter i {glabel}', 'SuperInventor favorit/skräll',
-                lambda row,pv,gfn=gfn: fav_strength_hit(row,pv,gfn),
-                f'Summa favoritstreck för favoriter som sitter i {glabel}.')
-            add(f'Super favstyrka: favoriter faller i {glabel}', 'SuperInventor favorit/skräll',
-                lambda row,pv,gfn=gfn: fav_strength_miss(row,pv,gfn),
-                f'Summa favoritstreck för favoriter som fälls i {glabel}.')
-
-        # 3) Globala egna poängformler. Enkla men bredare än fasta intervall.
-        add('Super formel: spelbar skrällpoäng', 'SuperInventor poäng/värde',
-            lambda row,pv: sum(3 for x in vals(row,pv) if 10 <= x < 20) + sum(2 for x in vals(row,pv) if 20 <= x < 35) + sum(1 for x in vals(row,pv) if 35 <= x < 50) - sum(4 for x in vals(row,pv) if x < 8),
-            'Premierar spelbara skrällar, straffar extrema lågprocentare.')
-        add('Super formel: favorittryck minus värde', 'SuperInventor poäng/värde',
-            lambda row,pv: sum(2 for x in vals(row,pv) if x >= 60) - sum(1 for x in vals(row,pv) if 15 <= x <= 40),
-            'Favorittryck reducerat med värdetecken.')
-        add('Super formel: låg risk utan död favorit', 'SuperInventor poäng/värde',
-            lambda row,pv: sum(1 for x in vals(row,pv) if x >= 45) - sum(3 for x in vals(row,pv) if x < 10),
-            'Högre vid rimligt trygga rader utan extrema lågstreck.')
-        add('Super formel: total skrällkostnad', 'SuperInventor skräll',
-            lambda row,pv: sum(max(0.0, 50.0 - float(x)) for x in vals(row,pv)),
-            'Summerad skrällkostnad mot 50%-nivån.')
-        add('Super formel: extremrisk', 'SuperInventor skräll',
-            lambda row,pv: sum((10.0 - float(x))**2 for x in vals(row,pv) if x < 10),
-            'Kvadratisk straffpoäng för extrema tecken under 10%.')
-        add('Super formel: balans första/sista streck', 'SuperInventor poäng/värde',
-            lambda row,pv: sum(vals(row,pv)[:min(6,n)]) - sum(vals(row,pv)[min(6,n):]),
-            'Skillnad mellan strecksumma första delen och sista delen.')
-
-        # 4) Återanvänd beprövade appmått, men som dynamiska PM2K-features.
-        if get_fat_fn:
-            add('Super FAT: antal favorittecken totalt', 'SuperInventor favorit/skräll', lambda row,pv: get_fat_fn(srow(row), pv)[0], 'FAT F totalt.')
-            add('Super FAT: antal andratecken totalt', 'SuperInventor favorit/skräll', lambda row,pv: get_fat_fn(srow(row), pv)[1], 'FAT A totalt.')
-            add('Super FAT: antal tredjetecken totalt', 'SuperInventor skräll', lambda row,pv: get_fat_fn(srow(row), pv)[2], 'FAT T totalt.')
-            add('Super FAT: FAT-summa totalt', 'SuperInventor poäng/värde', lambda row,pv: get_fat_fn(srow(row), pv)[3], 'FAT-summa totalt.')
-        if get_rank_points_fn:
-            add('Super rank: rankpoäng summa', 'SuperInventor poäng/värde', lambda row,pv: get_rank_points_fn(srow(row), pv), 'Rankpoäng från appens rankmodell.')
-        if get_100_minus_fn:
-            add('Super värde: 100-minus summa', 'SuperInventor poäng/värde', lambda row,pv: get_100_minus_fn(srow(row), pv), '100-minus summa på valda tecken.')
-        if get_log_surprise_fn:
-            add('Super skräll: log surprise summa', 'SuperInventor skräll', lambda row,pv: get_log_surprise_fn(srow(row), pv), 'Logaritmisk skrällsumma.')
-        if get_abc_counts_fn:
-            add('Super ABC: klass 1 antal', 'SuperInventor poäng/värde', lambda row,pv: get_abc_counts_fn(srow(row), pv, antal_matcher=n)[0], 'Antal ABC klass 1.')
-            add('Super ABC: klass 2 antal', 'SuperInventor poäng/värde', lambda row,pv: get_abc_counts_fn(srow(row), pv, antal_matcher=n)[1], 'Antal ABC klass 2.')
-            add('Super ABC: klass 3 antal', 'SuperInventor skräll', lambda row,pv: get_abc_counts_fn(srow(row), pv, antal_matcher=n)[2], 'Antal ABC klass 3.')
-            add('Super ABC: ABC-summa', 'SuperInventor poäng/värde', lambda row,pv: get_abc_counts_fn(srow(row), pv, antal_matcher=n)[3], 'ABC-summa.')
-
-        # 5) Sekvens + värde: enkla mönster utan exakt positionsöverfit.
-        if longest_run:
-            add('Super sekvens: längsta skrällföljd under 25', 'SuperInventor sekvens',
-                lambda row,pv: _longest_low_pct_run(srow(row), pv, n, 25),
-                'Längsta följd av tecken under 25%.')
-            add('Super sekvens: längsta favoritföljd 50+', 'SuperInventor sekvens',
-                lambda row,pv: _longest_high_pct_run(srow(row), pv, n, 50),
-                'Längsta följd av tecken över 50%.')
-        if changes_fn:
-            add('Super sekvens: teckenbyten viktat med skrällar', 'SuperInventor sekvens',
-                lambda row,pv: changes_fn(srow(row)) + sum(1 for x in vals(row,pv) if x < 20),
-                'Teckenbyten plus lågstreckade val.')
-
-        return defs
-
-    def _longest_low_pct_run(s, pv, n, thr):
-        best = cur = 0
-        for i, ch in enumerate(str(s)[:int(n)]):
-            if pct_at(pv, i, ch) < float(thr):
-                cur += 1; best = max(best, cur)
-            else:
-                cur = 0
-        return int(best)
-
-    def _longest_high_pct_run(s, pv, n, thr):
-        best = cur = 0
-        for i, ch in enumerate(str(s)[:int(n)]):
-            if pct_at(pv, i, ch) >= float(thr):
-                cur += 1; best = max(best, cur)
-            else:
-                cur = 0
-        return int(best)
-
-    ns['_pm2k_make_feature_defs_original'] = old_make
-    ns['_pm2k_make_feature_defs'] = super_make_feature_defs
-    print('SUPERINVENTOR aktiverad: PM2K skapar bredare dynamiska filterfamiljer.')
-
-
-
-
-
-def _year_filter_active() -> bool:
-    return TEST_YEAR_START is not None and TEST_YEAR_END is not None
-
-def _year_label() -> str:
-    if not _year_filter_active():
-        return 'hela filen'
-    if int(TEST_YEAR_START) == int(TEST_YEAR_END):
-        return str(int(TEST_YEAR_START))
-    return f'{int(TEST_YEAR_START)}–{int(TEST_YEAR_END)}'
-
-def _year_tag() -> str:
-    if not _year_filter_active():
-        return 'allfile'
-    if int(TEST_YEAR_START) == int(TEST_YEAR_END):
-        return f'year{int(TEST_YEAR_START)}'
-    return f'year{int(TEST_YEAR_START)}_{int(TEST_YEAR_END)}'
-
-def _select_random_test_items(test_db: pd.DataFrame, seeds: List[int], tests_per_seed: int, min_older_history: int) -> Tuple[List[Dict], Dict]:
-    """Valjer slumpade testomgangar fran utdelningsintervallet.
-
-    Viktigt:
-    - Testomgangen ar fortfarande sjalva facit-kontrollen.
-    - Liknande historik i huvudloopen hamtas bara fran aldre omgangar genom SIMILAR_MODE="kronologiskt".
-    - Urvalet filtrerar bort for gamla testomgangar som inte har nog manga aldre omgangar.
-    """
-    rows = list(test_db.iterrows())
-    eligible = []
-    for pos, (idx, row) in enumerate(rows):
-        older_count = len(rows) - int(pos) - 1
-        if older_count < int(min_older_history):
-            continue
-
-        # Testurval: valfritt år/intervall. None/None = hela filen.
-        # Viktigt: detta filtrerar ENDAST vilka omgångar som testas.
-        # Historiken som motorn får använda är fortfarande alla äldre omgångar enligt SIMILAR_MODE.
-        dt = pd.to_datetime(row.get('Datum', None), errors='coerce') if 'Datum' in row.index else pd.NaT
-        if pd.isna(dt):
-            continue
-        year = int(dt.year)
-        if _year_filter_active():
-            if year < int(TEST_YEAR_START) or year > int(TEST_YEAR_END):
-                continue
-
-        eligible.append({'pos': int(pos), 'idx': idx, 'row': row, 'older_count': int(older_count)})
-
-    if not eligible:
-        return [], {
-            'total_rows': int(len(rows)),
-            'eligible_rows': 0,
-            'min_older_history': int(min_older_history),
-            'unique_selected': 0,
-            'test_year_start': '' if TEST_YEAR_START is None else int(TEST_YEAR_START),
-            'test_year_end': '' if TEST_YEAR_END is None else int(TEST_YEAR_END),
-            'test_year_label': _year_label(),
-        }
-
-    tests = []
-    used_keys = set()
-    for seed in list(seeds):
-        rng = np.random.default_rng(int(seed))
-        order = list(rng.permutation(len(eligible)))
-        taken = 0
-        # Forst forsoker vi ta unika testomgangar over alla seeds.
-        for j in order:
-            item = eligible[int(j)]
-            datum = str(item['row'].get('Datum', item['idx']))[:10]
-            key = f"{datum}|{item['row'].get('Correct_Row','')}"
-            if bool(RANDOM_UNIQUE_TESTS) and key in used_keys:
-                continue
-            used_keys.add(key)
-            tests.append({
-                'seed': int(seed),
-                'seed_ordning': int(taken + 1),
-                'duplicate': 'Nej',
-                **item,
-            })
-            taken += 1
-            if taken >= int(tests_per_seed):
-                break
-        # Random10 ska vara rent: inga dubbletter nar RANDOM_UNIQUE_TESTS=True.
-        # Dubbletter tillats bara om du själv stänger av RANDOM_UNIQUE_TESTS.
-        if taken < int(tests_per_seed) and not bool(RANDOM_UNIQUE_TESTS):
-            for j in order:
-                item = eligible[int(j)]
-                tests.append({
-                    'seed': int(seed),
-                    'seed_ordning': int(taken + 1),
-                    'duplicate': 'Ja',
-                    **item,
-                })
-                taken += 1
-                if taken >= int(tests_per_seed):
-                    break
-
-    return tests[:int(MAX_TESTS)], {
-        'total_rows': int(len(rows)),
-        'eligible_rows': int(len(eligible)),
-        'min_older_history': int(min_older_history),
-        'unique_selected': int(len(used_keys)),
-        'requested_tests': int(MAX_TESTS),
-        'seeds': ','.join(str(int(s)) for s in seeds),
-        'test_year_start': '' if TEST_YEAR_START is None else int(TEST_YEAR_START),
-        'test_year_end': '' if TEST_YEAR_END is None else int(TEST_YEAR_END),
-        'test_year_label': _year_label(),
-    }
-
-
-# =========================================================
-# Checkpoint / autosave
-# =========================================================
-CHECKPOINT_ENABLED = True
-CHECKPOINT_SUFFIX = "CHECKPOINT"
-
-
-def _checkpoint_file_paths(out_dir: Path, prefix: str) -> Dict[str, Path]:
-    return {
-        'summary': out_dir / f'{prefix}_{CHECKPOINT_SUFFIX}_summary.csv',
-        'options': out_dir / f'{prefix}_{CHECKPOINT_SUFFIX}_options.csv',
-        'rules': out_dir / f'{prefix}_{CHECKPOINT_SUFFIX}_rules.csv',
-        'diag': out_dir / f'{prefix}_{CHECKPOINT_SUFFIX}_diag.csv',
-        'report': out_dir / f'{prefix}_{CHECKPOINT_SUFFIX}_status.txt',
-    }
-
-
-def _read_checkpoint_csv(path: Path) -> pd.DataFrame:
-    try:
-        if path.exists() and path.stat().st_size > 0:
-            return pd.read_csv(path)
-    except Exception:
-        pass
-    return pd.DataFrame()
-
-
-def _load_checkpoint(out_dir: Path, prefix: str):
-    """Laddar tidigare checkpoint om den finns i samma Colab-runtime."""
-    paths = _checkpoint_file_paths(out_dir, prefix)
-    summary_df = _read_checkpoint_csv(paths['summary'])
-    options_df = _read_checkpoint_csv(paths['options'])
-    rules_df = _read_checkpoint_csv(paths['rules'])
-    diag_df = _read_checkpoint_csv(paths['diag'])
-
-    summary_rows = summary_df.to_dict('records') if not summary_df.empty else []
-    option_rows = options_df.to_dict('records') if not options_df.empty else []
-    rule_rows = rules_df.to_dict('records') if not rules_df.empty else []
-    diag_all = [diag_df] if not diag_df.empty else []
-
-    completed = set()
-    if not summary_df.empty and 'test_nr' in summary_df.columns:
-        completed = set(pd.to_numeric(summary_df['test_nr'], errors='coerce').dropna().astype(int).tolist())
-
-    if completed:
-        print(f'Checkpoint hittad: {len(completed)} färdiga testfall. Fortsätter från nästa ej körda.')
-        print(f'  {paths["summary"]}')
-    return summary_rows, option_rows, rule_rows, diag_all, completed
-
-
-def _save_checkpoint(summary_rows, option_rows, rule_rows, diag_all, out_dir: Path, prefix: str, note: str = '') -> None:
-    """Sparar delresultat efter varje testfall så avbruten körning kan räddas."""
-    if not CHECKPOINT_ENABLED:
-        return
-    try:
-        paths = _checkpoint_file_paths(out_dir, prefix)
-        summary_df = pd.DataFrame(summary_rows)
-        options_df = pd.DataFrame(option_rows)
-        rules_df = pd.DataFrame(rule_rows)
-        diag_df = pd.concat(diag_all, ignore_index=True) if diag_all else pd.DataFrame()
-
-        summary_df.to_csv(paths['summary'], index=False, encoding='utf-8-sig')
-        options_df.to_csv(paths['options'], index=False, encoding='utf-8-sig')
-        rules_df.to_csv(paths['rules'], index=False, encoding='utf-8-sig')
-        diag_df.to_csv(paths['diag'], index=False, encoding='utf-8-sig')
-
-        ok_df = summary_df[summary_df.get('status', '') == 'OK'].copy() if not summary_df.empty and 'status' in summary_df.columns else pd.DataFrame()
-        done_n = len(summary_df)
-        ok_n = len(ok_df)
-        lines = []
-        lines.append('PM2K ROBUSTPACKAGERANK V3.3 PACKAGE SURVIVAL RANDOM 10 - CHECKPOINT')
-        lines.append('=' * 65)
-        lines.append(f'Senaste status: {note}')
-        lines.append(f'Sparade testfall: {done_n}')
-        lines.append(f'OK-testfall: {ok_n}')
-        if ok_n:
-            if 'bästa_vald_rader' in ok_df.columns:
-                lines.append(f'Median bästa rader: {float(pd.to_numeric(ok_df["bästa_vald_rader"], errors="coerce").median()):.1f}')
-            if 'bästa_vald_nära_pct' in ok_df.columns:
-                lines.append(f'Median nära-träff: {float(pd.to_numeric(ok_df["bästa_vald_nära_pct"], errors="coerce").median()):.1f}%')
-            if 'bästa_vald_global_pct' in ok_df.columns:
-                lines.append(f'Median global-träff: {float(pd.to_numeric(ok_df["bästa_vald_global_pct"], errors="coerce").median()):.1f}%')
-            if 'facit_klarar_bästa_vald' in ok_df.columns:
-                lines.append(f'Facit klarar bästa valda paket: {int((ok_df["facit_klarar_bästa_vald"] == "Ja").sum())}/{ok_n}')
-            if 'alla_filter_sitter_mot_rätt_rad_bästa_vald' in ok_df.columns:
-                lines.append(f'Alla filter sitter mot rätt rad: {int((ok_df["alla_filter_sitter_mot_rätt_rad_bästa_vald"] == "Ja").sum())}/{ok_n}')
-            for h in [30, 29, 28, 27]:
-                col = f'bäst_{h}_alla_filter_sitter_rätt_rad'
-                if col in ok_df.columns:
-                    lines.append(f'Bästa {h}/30-paketet sitter rätt: {int((ok_df[col] == "Ja").sum())}/{ok_n}')
-        lines.append('')
-        lines.append('Checkpoint-filer:')
-        for k in ['summary', 'options', 'rules', 'diag']:
-            lines.append(f'- {paths[k]}')
-        paths['report'].write_text('\n'.join(lines), encoding='utf-8')
-        print(f'  checkpoint sparad: {paths["summary"].name} · testfall={done_n}')
-    except Exception as e:
-        print(f'  VARNING: kunde inte spara checkpoint: {e}')
-
-# =========================================================
-# Huvudkörning
-# =========================================================
-def main():
-    t_all = time.time()
-    print(f'=== PM2K SUPERINVENTOR ROBUSTPACKAGERANK V3 STAR RANDOM 10 ALLFILE FACITFORCED MINHIST30 CHECKPOINT {MIN_SINGLE_REDUCTION_PCT:g}% · 1–4 000 RADER ===')
-    print(f'Ram: {FRAME_PROFILE} · Liknande: {TOP_N_SIMILAR} · Mode: {SIMILAR_MODE} · Utdelning: {PAY_MIN:,}–{PAY_MAX:,}'.replace(',', ' '))
-    print(f'Läge: SUPERINVENTOR + AUDIT-GOLDRANK + ROBUST PAKETRANK · slumpade testomgångar · min egen reducering mot grundram {MIN_SINGLE_REDUCTION_PCT:g}%')
-    print(f'Band: {BAND_MIN_ROWS:,}–{BAND_MAX_ROWS:,} · Grundramsanpassning: {FRAME_ADAPT} · Facitstyrd ram: {FACIT_FORCED_FRAME}'.replace(',', ' '))
-    print(f'Random seeds: {RANDOM_SEEDS} · test per seed: {TESTS_PER_SEED} · urval: {_year_label()} · min äldre historik: {MIN_OLDER_HISTORY_FOR_RANDOM}')
-
-    app_file = _upload_if_needed('app')
-    db_file = _upload_if_needed('db')
-    if app_file is None:
-        raise SystemExit('Hittar ingen appfil. Ladda upp senaste app.py/app_v12...')
-    if db_file is None:
-        raise SystemExit('Hittar ingen databasfil. Ladda upp CSV-databasen.')
-    print(f'Appfil: {app_file}')
-    print(f'Databas: {db_file}')
-
-    ns = _load_app_namespace(app_file)
-    required = ['load_database', '_similar_history_for_backtest', '_ranked_frame_like_widths', 'generate_rows_from_frame', '_pm2k_build_rule_pool']
-    missing = [x for x in required if x not in ns]
-    if missing:
-        raise SystemExit(f'Appfilen saknar funktioner: {missing}')
-
-    _install_pm2k_superinventor(ns)
-
-    db = ns['load_database'](str(db_file), ANTAL_MATCHER)
-    test_db = _prepare_db_for_tests(ns, db)
-    if test_db.empty:
-        raise SystemExit('Inga giltiga testomgångar efter filter.')
-
-    tests, random_meta = _select_random_test_items(
-        test_db,
-        seeds=list(RANDOM_SEEDS),
-        tests_per_seed=int(TESTS_PER_SEED),
-        min_older_history=int(MIN_OLDER_HISTORY_FOR_RANDOM),
-    )
-    if not tests:
-        raise SystemExit('Inga slumpbara testomgångar med tillräcklig äldre historik efter filter.')
-    print(f'Randomurval {_year_label()}: {len(tests)} testfall · eligible {random_meta.get("eligible_rows", 0)}/{random_meta.get("total_rows", 0)} · unika {random_meta.get("unique_selected", 0)}')
-    if int(random_meta.get('unique_selected', 0)) < int(MAX_TESTS):
-        print('VARNING: färre unika testfall än MAX_TESTS. Byt seed eller sänk MIN_OLDER_HISTORY_FOR_RANDOM om detta händer.')
-        print(f"Valbara testfall efter år/utdelning/minhistorik: {random_meta.get('eligible_rows', 0)} av totalt {random_meta.get('total_rows', 0)}")
-    base_frame = _base_frame(FRAME_PROFILE)
-    out_dir = Path('/content') if Path('/content').exists() else Path.cwd()
-    summary_rows, option_rows, rule_rows, diag_all, completed_test_nrs = _load_checkpoint(out_dir, OUTPUT_PREFIX)
-
-    for ti, test_item in enumerate(tests, 1):
-        if int(ti) in completed_test_nrs:
-            print(f'\n[{ti}/{len(tests)}] redan klar i checkpoint - hoppar över')
-            continue
-        t0 = time.time()
-        idx = test_item['idx']
-        test_row = test_item['row']
-        seed = int(test_item.get('seed', 0))
-        seed_rank = int(test_item.get('seed_ordning', 0))
-        datum = str(test_row.get('Datum', idx))[:10]
-        correct = ns['normalize_single_row_text'](test_row.get('Correct_Row', ''))
-        filter_vec = list(test_row.get('Prob_Vector', []) or [])
-        print(f'\n[{ti}/{len(tests)}] seed {seed} #{seed_rank} · {datum} · facit {correct}')
-        try:
-            sim_df = ns['_similar_history_for_backtest'](
-                db,
-                filter_vec,
-                ANTAL_MATCHER,
-                top_n=int(TOP_N_SIMILAR),
-                pay_min=int(PAY_MIN),
-                pay_max=int(PAY_MAX),
-                exclude_index=idx,
-                mode=str(SIMILAR_MODE),
-                test_date=test_row.get('Datum', None),
-            )
-            print(f'  liknande: {len(sim_df)}')
-            wide_df = ns['_similar_history_for_backtest'](
-                db,
-                filter_vec,
-                ANTAL_MATCHER,
-                top_n=int(ROBUST_TOP_N),
-                pay_min=int(PAY_MIN),
-                pay_max=int(PAY_MAX),
-                exclude_index=idx,
-                mode=str(SIMILAR_MODE),
-                test_date=test_row.get('Datum', None),
-            )
-            global_wide_df = ns['_similar_history_for_backtest'](
-                db,
-                filter_vec,
-                ANTAL_MATCHER,
-                top_n=int(GLOBAL_TOP_N),
-                pay_min=int(PAY_MIN),
-                pay_max=int(PAY_MAX),
-                exclude_index=idx,
-                mode=str(SIMILAR_MODE),
-                test_date=test_row.get('Datum', None),
-            )
-            near_df = wide_df.iloc[int(TOP_N_SIMILAR):].copy() if isinstance(wide_df, pd.DataFrame) and len(wide_df) > int(TOP_N_SIMILAR) else pd.DataFrame()
-            global_eval_df = global_wide_df.iloc[int(TOP_N_SIMILAR):].copy() if isinstance(global_wide_df, pd.DataFrame) and len(global_wide_df) > int(TOP_N_SIMILAR) else pd.DataFrame()
-            print(f'  robust nära/global: {len(near_df)}/{len(global_eval_df)}')
-            if len(sim_df) < max(20, min(TOP_N_SIMILAR, 30)):
-                summary_rows.append({
-                    'test_nr': ti,
-                    'random_seed': seed,
-                    'seed_ordning': seed_rank,
-                    'random_pos': test_item.get('pos', ''),
-                    'äldre_omgångar_i_urval': test_item.get('older_count', ''),
-                    'datum': datum,
-                    'status': 'HOPPAD ÖVER',
-                    'orsak': f'För få liknande: {len(sim_df)}',
-                })
-                _save_checkpoint(summary_rows, option_rows, rule_rows, diag_all, out_dir, OUTPUT_PREFIX, note=f'test {ti} hoppad över')
-                continue
-
-            normal_engine_frame = ns['_ranked_frame_like_widths'](base_frame, filter_vec, ANTAL_MATCHER)
-            normal_in_frame = _correct_in_frame(correct, normal_engine_frame)
-            if bool(FACIT_FORCED_FRAME):
-                engine_frame = _force_frame_include_correct(normal_engine_frame, correct, filter_vec)
-                frame_mode = 'FacitForced'
-            else:
-                engine_frame = normal_engine_frame
-                frame_mode = 'Normal'
-            frame_rows, _, ok, msg = ns['generate_rows_from_frame'](engine_frame, max_rows=None)
-            if not ok or not frame_rows:
-                summary_rows.append({
-                    'test_nr': ti,
-                    'random_seed': seed,
-                    'seed_ordning': seed_rank,
-                    'random_pos': test_item.get('pos', ''),
-                    'äldre_omgångar_i_urval': test_item.get('older_count', ''),
-                    'datum': datum,
-                    'status': 'HOPPAD ÖVER',
-                    'orsak': f'Kunde inte skapa ram: {msg}',
-                    'frame_mode': frame_mode,
-                    'facit_forced_frame': 'Ja' if FACIT_FORCED_FRAME else 'Nej',
-                    'normal_facit_i_grundram': 'Ja' if normal_in_frame else 'Nej',
-                })
-                _save_checkpoint(summary_rows, option_rows, rule_rows, diag_all, out_dir, OUTPUT_PREFIX, note=f'test {ti} hoppad över')
-                continue
-            in_frame = _correct_in_frame(correct, engine_frame)
-            if bool(FACIT_FORCED_FRAME):
-                print(f'  grundram: {len(frame_rows)} rader · normal facit i ram: {"Ja" if normal_in_frame else "Nej"} · facitstyrd ram: {"Ja" if in_frame else "Nej"}')
-            else:
-                print(f'  grundram: {len(frame_rows)} rader · facit i ram: {"Ja" if in_frame else "Nej"}')
-
-            packages, meta, diag_df = _collect_pm2k_band_packages(
-                ns,
-                sim_df,
-                frame_rows,
-                filter_vec,
-                min_rows=int(BAND_MIN_ROWS),
-                max_rows=int(BAND_MAX_ROWS),
-                target_rows=int(TARGET_ROWS),
-                min_hit_floor=int(MIN_HIT_FLOOR),
-                frame_adapt=bool(FRAME_ADAPT),
-                max_depth=int(MAX_DEPTH),
-                beam_width=int(BEAM_WIDTH),
-                max_candidates=int(MAX_CANDIDATES),
-                min_single_reduction_pct=float(MIN_SINGLE_REDUCTION_PCT),
-            )
-            robust_meta = _attach_robust_package_scores(
-                ns,
-                packages,
-                near_df,
-                global_eval_df,
-                frame_total=int(len(frame_rows)),
-                min_rows=int(BAND_MIN_ROWS),
-                max_rows=int(BAND_MAX_ROWS),
-                target_rows=int(TARGET_ROWS),
-            ) if packages else {'near_total': len(near_df), 'global_total': len(global_eval_df)}
-            print(f'  pm2k: {meta["packages_found"]} paket i band · feature före/efter grind={meta["feature_rules_before_grind"]}/{meta["feature_rules_after_grind"]} · GoldRank spärr={meta.get("goldrank_blocked_rules",0)} · kandidater={meta["candidate_rules"]} · robust nära/global={robust_meta.get("near_total",0)}/{robust_meta.get("global_total",0)} · {meta["seconds"]}s')
-
-            # Statistik per faktisk träffnivå efter robust omsortering
-            by_hit = {h: [p for p in packages if int(p['hit']) == h] for h in range(TOP_N_SIMILAR, MIN_HIT_FLOOR - 1, -1)}
-            best_by_hit = {}
-            cheapest_by_hit = {}
-            under_1850_by_hit = {}
-            for h, ps in by_hit.items():
-                if ps:
-                    best_by_hit[h] = min(ps, key=lambda p: _v31_select_key(p, 4000))
-                    cheapest_by_hit[h] = min(ps, key=lambda p: (int(p['rows']), -float(p.get('robust_score', 0.0) or 0.0), int(p.get('filters') or 0)))
-                    under_1850_by_hit[h] = [p for p in ps if int(p.get('rows') or 0) < 1850]
-
-            # V3.1 huvudval = SAFE_4000 enligt RadPress-ranking. Övriga tak rapporteras separat.
-            selected = _v31_select_package(packages, 4000) if packages else None
-            pass_selected = None
-            fail_reason = ''
-            if selected is not None:
-                pass_selected, fail_reason = _package_passes_correct(ns, selected, correct, filter_vec)
-            selected_filter_stats = _package_filter_hit_stats(selected)
-            selected_correct_stats = _package_correct_rule_stats(ns, selected, correct, filter_vec)
-
-            summary = {
-                'test_nr': ti,
-                'random_seed': seed,
-                'seed_ordning': seed_rank,
-                'random_pos': test_item.get('pos', ''),
-                'äldre_omgångar_i_urval': test_item.get('older_count', ''),
-                'random_duplicate': test_item.get('duplicate', 'Nej'),
-                'datum': datum,
-                'status': 'OK',
-                'facit': correct,
-                'liknande': int(len(sim_df)),
-                'grundram_rader': int(len(frame_rows)),
-                'frame_mode': frame_mode,
-                'facit_forced_frame': 'Ja' if FACIT_FORCED_FRAME else 'Nej',
-                'normal_facit_i_grundram': 'Ja' if normal_in_frame else 'Nej',
-                'facit_i_grundram': 'Ja' if in_frame else 'Nej',
-                'min_reducering_mot_grundram_pct': float(MIN_SINGLE_REDUCTION_PCT),
-                'feature_regler_före_grind': int(meta.get('feature_rules_before_grind', 0)),
-                'feature_regler_efter_grind': int(meta.get('feature_rules_after_grind', 0)),
-                'paket_i_band_totalt': int(len(packages)),
-                'antal_30_30': int(len(by_hit.get(30, []))),
-                'antal_29_30': int(len(by_hit.get(29, []))),
-                'antal_28_30': int(len(by_hit.get(28, []))),
-                'antal_27_30': int(len(by_hit.get(27, []))),
-                'hittar_30_30': 'Ja' if by_hit.get(30) else 'Nej',
-                'hittar_29_30': 'Ja' if by_hit.get(29) else 'Nej',
-                'hittar_28_30': 'Ja' if by_hit.get(28) else 'Nej',
-                'bästa_vald_träff': f"{selected['hit']}/{selected['total']}" if selected else '',
-                'bästa_vald_rader': int(selected['rows']) if selected else '',
-                'bästa_vald_filter': int(selected['filters']) if selected else '',
-                'alla_filter_i_bästa_vald_30_30': selected_filter_stats.get('alla_filter_30_30', ''),
-                'sämsta_filterträff_bästa_vald': selected_filter_stats.get('min_filter_träff', ''),
-                'antal_filter_30_30_bästa_vald': selected_filter_stats.get('antal_filter_30_30', ''),
-                'filterträffar_bästa_vald': selected_filter_stats.get('filterträffar', ''),
-                'alla_filter_sitter_mot_rätt_rad_bästa_vald': selected_correct_stats.get('alla_filter_sitter_mot_rätt_rad', ''),
-                'antal_filter_som_sitter_mot_rätt_rad_bästa_vald': selected_correct_stats.get('antal_filter_som_sitter_mot_rätt_rad', ''),
-                'antal_filter_som_missar_rätt_rad_bästa_vald': selected_correct_stats.get('antal_filter_som_missar_rätt_rad', ''),
-                'filter_mot_rätt_rad_bästa_vald': selected_correct_stats.get('filter_mot_rätt_rad', ''),
-                'missade_filter_mot_rätt_rad_bästa_vald': selected_correct_stats.get('missade_filter_mot_rätt_rad', ''),
-                'facit_klarar_bästa_vald': 'Ja' if pass_selected else ('Nej' if selected else ''),
-                'missad_regel_bästa_vald': fail_reason if selected else '',
-                'feature_regler': int(meta.get('feature_rules', 0)),
-                'kandidat_regler': int(meta.get('candidate_rules', 0)),
-                'goldrank_spärrade_regler': int(meta.get('goldrank_blocked_rules', 0)),
-                'bästa_vald_goldrank_score': selected.get('goldrank_score', '') if selected else '',
-                'bästa_vald_goldrank_gold_filters': selected.get('goldrank_gold_filters', '') if selected else '',
-                'bästa_vald_robust_score': selected.get('robust_score', '') if selected else '',
-                'bästa_vald_v2_hit_preference': selected.get('v2_hit_preference', '') if selected else '',
-                'bästa_vald_v2_robust_floor_ok': selected.get('v2_robust_floor_ok', '') if selected else '',
-                'bästa_vald_v2_danger_rules': selected.get('v2_danger_rules', '') if selected else '',
-                'bästa_vald_nära_träff': f"{selected.get('robust_near_hit','')}/{selected.get('robust_near_total','')}" if selected else '',
-                'bästa_vald_nära_pct': selected.get('robust_near_pct', '') if selected else '',
-                'bästa_vald_global_träff': f"{selected.get('robust_global_hit','')}/{selected.get('robust_global_total','')}" if selected else '',
-                'bästa_vald_global_pct': selected.get('robust_global_pct', '') if selected else '',
-                'robust_nära_total': int(robust_meta.get('near_total', 0)),
-                'robust_global_total': int(robust_meta.get('global_total', 0)),
-                'sekunder': round(time.time() - t0, 2),
-            }
-            selected_profiles = _add_v31_profile_summary(summary, ns, packages, correct, filter_vec)
-            for h in [30, 29, 28, 27]:
-                p = best_by_hit.get(h)
-                st = _package_filter_hit_stats(p)
-                cs = _package_correct_rule_stats(ns, p, correct, filter_vec) if p else {}
-                summary[f'bäst_{h}_rader'] = int(p['rows']) if p else ''
-                summary[f'bäst_{h}_filter'] = int(p['filters']) if p else ''
-                summary[f'bäst_{h}_alla_filter_30_30'] = st.get('alla_filter_30_30', '') if p else ''
-                summary[f'bäst_{h}_sämsta_filterträff'] = st.get('min_filter_träff', '') if p else ''
-                summary[f'bäst_{h}_alla_filter_sitter_rätt_rad'] = cs.get('alla_filter_sitter_mot_rätt_rad', '') if p else ''
-                summary[f'bäst_{h}_missade_filter_mot_rätt_rad'] = cs.get('missade_filter_mot_rätt_rad', '') if p else ''
-                summary[f'bäst_{h}_robust_score'] = p.get('robust_score', '') if p else ''
-                summary[f'bäst_{h}_nära_pct'] = p.get('robust_near_pct', '') if p else ''
-                summary[f'bäst_{h}_global_pct'] = p.get('robust_global_pct', '') if p else ''
-                cp = cheapest_by_hit.get(h)
-                summary[f'billigaste_{h}_rader'] = int(cp['rows']) if cp else ''
-                summary[f'billigaste_{h}_filter'] = int(cp['filters']) if cp else ''
-                summary[f'billigaste_{h}_robust_score'] = cp.get('robust_score', '') if cp else ''
-                summary[f'billigaste_{h}_nära_pct'] = cp.get('robust_near_pct', '') if cp else ''
-                summary[f'billigaste_{h}_global_pct'] = cp.get('robust_global_pct', '') if cp else ''
-                summary[f'antal_{h}_under_1850'] = int(len(under_1850_by_hit.get(h) or []))
-            summary_rows.append(summary)
-
-            # Exportera toppalternativ per omgång.
-            for rank, pkg in enumerate(packages[:int(TOP_OPTIONS_PER_ROUND)], 1):
-                ok_pkg, reason = _package_passes_correct(ns, pkg, correct, filter_vec)
-                filter_stats = _package_filter_hit_stats(pkg)
-                correct_stats = _package_correct_rule_stats(ns, pkg, correct, filter_vec)
-                option_rows.append({
-                    'test_nr': ti,
-                    'random_seed': seed,
-                    'seed_ordning': seed_rank,
-                    'datum': datum,
-                    'min_reducering_mot_grundram_pct': float(MIN_SINGLE_REDUCTION_PCT),
-                    'rank': rank,
-                    'rader': int(pkg['rows']),
-                    'träff': f"{pkg['hit']}/{pkg['total']}",
-                    'hit_count': int(pkg['hit']),
-                    'filter': int(pkg['filters']),
-                    'profilfilter': int(pkg['profile_filters']),
-                    'strukturfilter': int(pkg['structure_filters']),
-                    'goldrank_score': pkg.get('goldrank_score', ''),
-                    'goldrank_gold_filters': pkg.get('goldrank_gold_filters', ''),
-                    'robust_score': pkg.get('robust_score', ''),
-                    'survival_min_chunk_pct': pkg.get('survival_min_chunk_pct', ''),
-                    'survival_wilson_pct': pkg.get('survival_wilson_pct', ''),
-                    'v33_survival_risk': pkg.get('v33_survival_risk', ''),
-                    'v2_hit_preference': pkg.get('v2_hit_preference', ''),
-                    'v2_robust_floor_ok': pkg.get('v2_robust_floor_ok', ''),
-                    'v2_danger_rules': pkg.get('v2_danger_rules', ''),
-                    'nära_träff': f"{pkg.get('robust_near_hit','')}/{pkg.get('robust_near_total','')}",
-                    'nära_pct': pkg.get('robust_near_pct', ''),
-                    'global_träff': f"{pkg.get('robust_global_hit','')}/{pkg.get('robust_global_total','')}",
-                    'global_pct': pkg.get('robust_global_pct', ''),
-                    'alla_filter_30_30': filter_stats.get('alla_filter_30_30', ''),
-                    'sämsta_filterträff': filter_stats.get('min_filter_träff', ''),
-                    'antal_filter_30_30': filter_stats.get('antal_filter_30_30', ''),
-                    'filterträffar': filter_stats.get('filterträffar', ''),
-                    'frame_mode': frame_mode,
-                    'facit_forced_frame': 'Ja' if FACIT_FORCED_FRAME else 'Nej',
-                    'normal_facit_i_grundram': 'Ja' if normal_in_frame else 'Nej',
-                    'facit_i_grundram': 'Ja' if in_frame else 'Nej',
-                    'alla_filter_sitter_mot_rätt_rad': correct_stats.get('alla_filter_sitter_mot_rätt_rad', ''),
-                    'antal_filter_som_sitter_mot_rätt_rad': correct_stats.get('antal_filter_som_sitter_mot_rätt_rad', ''),
-                    'antal_filter_som_missar_rätt_rad': correct_stats.get('antal_filter_som_missar_rätt_rad', ''),
-                    'filter_mot_rätt_rad': correct_stats.get('filter_mot_rätt_rad', ''),
-                    'missade_filter_mot_rätt_rad': correct_stats.get('missade_filter_mot_rätt_rad', ''),
-                    'facit_klarar_paket': 'Ja' if ok_pkg else 'Nej',
-                    'missad_regel': reason,
-                })
-                for ri, r in enumerate(pkg.get('rules') or [], 1):
-                    rhit = _single_rule_hist_hit(r)
-                    try:
-                        rpass = ns['_pm2k_rule_passes'](r, correct, filter_vec)
-                        rval = ns['_pm2k_rule_value'](r, correct, filter_vec)
-                    except Exception:
-                        rpass = None
-                        rval = ''
-                    rule_rows.append({
-                        'test_nr': ti,
-                        'random_seed': seed,
-                        'seed_ordning': seed_rank,
-                        'datum': datum,
-                        'min_reducering_mot_grundram_pct': float(MIN_SINGLE_REDUCTION_PCT),
-                        'paket_rank': rank,
-                        'regel_nr': ri,
-                        'paket_träff': f"{pkg['hit']}/{pkg['total']}",
-                        'regel_träff_ensam': f"{rhit}/{pkg['total']}" if rhit >= 0 else '',
-                        'regel_har_30_30': 'Ja' if rhit == int(pkg['total']) else 'Nej',
-                        'status_mot_rätt_rad': '✅ Träff' if rpass is True else ('❌ Miss' if rpass is False else ''),
-                        'facit_klarar_regel': 'Ja' if rpass is True else ('Nej' if rpass is False else ''),
-                        'facit_värde': rval,
-                        'paket_rader': int(pkg['rows']),
-                        'kategori': r.get('group', ''),
-                        'egen_reducering_mot_grundram_pct': round(float(r.get('single_reduction_pct', 0.0) or 0.0), 2),
-                        'egen_kvar_rader_mot_grundram': int(r.get('frame_after_single', 0) or 0),
-                        'regel': r.get('name', ''),
-                        'goldrank_score': round(float(r.get('_goldrank_score', 0.0) or 0.0), 2),
-                        'intervall': f"{r.get('lo')}–{r.get('hi')}",
-                    })
-            if isinstance(diag_df, pd.DataFrame) and not diag_df.empty:
-                d = diag_df.copy()
-                d.insert(0, 'datum', datum)
-                d.insert(0, 'seed_ordning', seed_rank)
-                d.insert(0, 'random_seed', seed)
-                d.insert(0, 'min_reducering_mot_grundram_pct', float(MIN_SINGLE_REDUCTION_PCT))
-                d.insert(0, 'test_nr', ti)
-                diag_all.append(d)
-            _save_checkpoint(summary_rows, option_rows, rule_rows, diag_all, out_dir, OUTPUT_PREFIX, note=f'test {ti}/{len(tests)} OK')
-
-        except Exception as e:
-            traceback.print_exc()
-            summary_rows.append({
-                'test_nr': ti,
-                'random_seed': seed,
-                'seed_ordning': seed_rank,
-                'random_pos': test_item.get('pos', ''),
-                'äldre_omgångar_i_urval': test_item.get('older_count', ''),
-                'datum': datum,
-                'status': 'FEL',
-                'orsak': str(e),
-                'sekunder': round(time.time() - t0, 2),
-            })
-            _save_checkpoint(summary_rows, option_rows, rule_rows, diag_all, out_dir, OUTPUT_PREFIX, note=f'test {ti}/{len(tests)} FEL')
-
-    summary_df = pd.DataFrame(summary_rows)
-    options_df = pd.DataFrame(option_rows)
-    rules_df = pd.DataFrame(rule_rows)
-    diag_df = pd.concat(diag_all, ignore_index=True) if diag_all else pd.DataFrame()
-
-    # Sammanfattning över slumpade omgångar.
-    ok_df = summary_df[summary_df.get('status', '') == 'OK'].copy() if not summary_df.empty and 'status' in summary_df.columns else pd.DataFrame()
-    report_lines = []
-    report_lines.append(f'PM2K ROBUSTPACKAGERANK V3.3 PACKAGE SURVIVAL RANDOM 10 ALLFILE FACITFORCED MINHIST30 MIN1 {MIN_SINGLE_REDUCTION_PCT:g}% · 1–4 000 RADER')
-    report_lines.append('=' * 60)
-    report_lines.append(f'Appfil: {app_file.name}')
-    report_lines.append(f'Databas: {db_file.name}')
-    report_lines.append(f'Ram: {FRAME_PROFILE}')
-    report_lines.append(f'Liknande: {TOP_N_SIMILAR}')
-    report_lines.append(f'Utdelningsfilter: {PAY_MIN}–{PAY_MAX}')
-    report_lines.append(f'Band: {BAND_MIN_ROWS}–{BAND_MAX_ROWS}')
-    report_lines.append(f'Mode: {SIMILAR_MODE}')
-    report_lines.append(f'Urval testomgångar: slumpat från {_year_label()} inom utdelningsintervallet')
-    report_lines.append(f'Random seeds: {RANDOM_SEEDS}')
-    report_lines.append(f'Testurval: {_year_label()}')
-    report_lines.append(f'Test per seed: {TESTS_PER_SEED}')
-    report_lines.append(f'Min äldre historik vid urval: {MIN_OLDER_HISTORY_FOR_RANDOM}')
-    report_lines.append(f'Grundramsanpassning: {FRAME_ADAPT}')
-    report_lines.append(f'Facitstyrd grundram: {FACIT_FORCED_FRAME}')
-    report_lines.append('OBS: facitstyrd ram används endast för motorvalidering, inte som realistisk spelprognos.')
-    report_lines.append(f'Min egen reducering mot hel grundram: {MIN_SINGLE_REDUCTION_PCT:g}%')
-    report_lines.append(f'V3.3-prioritet: 28/30 och 29/30 tävlar · V3.1-radpress + Package Survival · jämför SAFE_4000/BALANS_3500/RADPRESS_3000/RADPRESS_2800/CHEAP_1850 · nära/global-golv {ROBUST_V2_NEAR_FLOOR:g}/{ROBUST_V2_GLOBAL_FLOOR:g}%')
-    report_lines.append('')
-    if not ok_df.empty:
-        n = len(ok_df)
-        if 'normal_facit_i_grundram' in ok_df.columns:
-            normal_in = int((ok_df['normal_facit_i_grundram'] == 'Ja').sum())
-            report_lines.append(f'Normal 3-5-5-ram innehöll facit: {normal_in}/{n}')
-        if 'facit_i_grundram' in ok_df.columns:
-            forced_in = int((ok_df['facit_i_grundram'] == 'Ja').sum())
-            report_lines.append(f'Använd backtestram innehöll facit: {forced_in}/{n}')
-        report_lines.append('')
-        for h in [30, 29, 28, 27]:
-            col = f'antal_{h}_30'
-            if col in ok_df.columns:
-                found = int((pd.to_numeric(ok_df[col], errors='coerce').fillna(0) > 0).sum())
-                report_lines.append(f'Hittade minst ett {h}/30-paket inom bandet: {found}/{n}')
-        report_lines.append('')
-        if 'feature_regler_före_grind' in ok_df.columns and 'feature_regler_efter_grind' in ok_df.columns:
-            before_med = float(pd.to_numeric(ok_df['feature_regler_före_grind'], errors='coerce').median())
-            after_med = float(pd.to_numeric(ok_df['feature_regler_efter_grind'], errors='coerce').median())
-            report_lines.append(f'Median feature-regler före/efter grind: {before_med:.1f}/{after_med:.1f}')
-        if 'paket_i_band_totalt' in ok_df.columns:
-            report_lines.append(f'Median antal paket i band: {float(pd.to_numeric(ok_df["paket_i_band_totalt"], errors="coerce").median()):.1f}')
-        if 'bästa_vald_rader' in ok_df.columns:
-            report_lines.append(f'Median rader för bästa valda enligt sortering: {float(pd.to_numeric(ok_df["bästa_vald_rader"], errors="coerce").median()):.1f}')
-            under_selected = int((pd.to_numeric(ok_df["bästa_vald_rader"], errors="coerce").fillna(999999) < 1850).sum())
-            report_lines.append(f'Bästa valda paket under 1 850 rader: {under_selected}/{n}')
-        if 'bästa_vald_nära_pct' in ok_df.columns:
-            report_lines.append(f'Median nära-träff för bästa valda paket: {float(pd.to_numeric(ok_df["bästa_vald_nära_pct"], errors="coerce").median()):.1f}%')
-        if 'bästa_vald_global_pct' in ok_df.columns:
-            report_lines.append(f'Median global-träff för bästa valda paket: {float(pd.to_numeric(ok_df["bästa_vald_global_pct"], errors="coerce").median()):.1f}%')
-        report_lines.append('')
-        report_lines.append('V3.3 parallella profiler:')
-        for key, cap, label in RADPRESS_PROFILES:
-            rcol = f'{key}_rader'
-            pcol = f'{key}_facit_klarar'
-            ncol = f'{key}_nära_pct'
-            gcol = f'{key}_global_pct'
-            if rcol in ok_df.columns:
-                exists = int((ok_df.get(f'{key}_finns') == 'Ja').sum()) if f'{key}_finns' in ok_df.columns else int(pd.to_numeric(ok_df[rcol], errors='coerce').notna().sum())
-                passes = int((ok_df.get(pcol) == 'Ja').sum()) if pcol in ok_df.columns else 0
-                med_rows = float(pd.to_numeric(ok_df[rcol], errors='coerce').median())
-                med_near = float(pd.to_numeric(ok_df.get(ncol), errors='coerce').median()) if ncol in ok_df.columns else float('nan')
-                med_glob = float(pd.to_numeric(ok_df.get(gcol), errors='coerce').median()) if gcol in ok_df.columns else float('nan')
-                report_lines.append(f'- {label}: finns {exists}/{n} · facit {passes}/{n} · medianrader {med_rows:.1f} · nära/global {med_near:.1f}/{med_glob:.1f}%')
-        report_lines.append('')
-        if 'facit_klarar_bästa_vald' in ok_df.columns:
-            pass_count = int((ok_df['facit_klarar_bästa_vald'] == 'Ja').sum())
-            report_lines.append(f'Facit klarar bästa valda paket: {pass_count}/{n}')
-        if 'alla_filter_sitter_mot_rätt_rad_bästa_vald' in ok_df.columns:
-            all_correct_count = int((ok_df['alla_filter_sitter_mot_rätt_rad_bästa_vald'] == 'Ja').sum())
-            report_lines.append(f'Alla filter i bästa valda paket sitter mot rätt rad: {all_correct_count}/{n}')
-        if 'alla_filter_i_bästa_vald_30_30' in ok_df.columns:
-            all30_count = int((ok_df['alla_filter_i_bästa_vald_30_30'] == 'Ja').sum())
-            report_lines.append(f'Alla filter i bästa valda paket har 30/30: {all30_count}/{n}')
-        if {'alla_filter_i_bästa_vald_30_30', 'facit_klarar_bästa_vald'}.issubset(set(ok_df.columns)):
-            both_count = int(((ok_df['alla_filter_i_bästa_vald_30_30'] == 'Ja') & (ok_df['facit_klarar_bästa_vald'] == 'Ja')).sum())
-            report_lines.append(f'Bästa valda har både alla filter 30/30 och facit klarar paketet: {both_count}/{n}')
-        for h in [30, 29, 28, 27]:
-            col = f'bäst_{h}_alla_filter_sitter_rätt_rad'
-            if col in ok_df.columns:
-                c = int((ok_df[col] == 'Ja').sum())
-                report_lines.append(f'Bästa {h}/30-paketet: alla filter sitter mot rätt rad: {c}/{n}')
-        report_lines.append('')
-        report_lines.append('Billigaste paket per träffnivå inom 1–4 000:')
-        for h in [30, 29, 28, 27]:
-            rcol = f'billigaste_{h}_rader'
-            ucol = f'antal_{h}_under_1850'
-            if rcol in ok_df.columns:
-                med_billig = float(pd.to_numeric(ok_df[rcol], errors='coerce').median())
-                under_cnt = int((pd.to_numeric(ok_df.get(ucol), errors='coerce').fillna(0) > 0).sum()) if ucol in ok_df.columns else 0
-                report_lines.append(f'- {h}/30: median billigaste rader {med_billig:.1f} · hittade under 1 850 i {under_cnt}/{n}')
-    else:
-        report_lines.append('Inga OK-testfall.')
-    report_lines.append('')
-    report_lines.append(f'Total körtid: {round(time.time() - t_all, 2)} sekunder')
-
-    out_dir = Path('/content') if Path('/content').exists() else Path.cwd()
-    summary_path = out_dir / f'{OUTPUT_PREFIX}_summary.csv'
-    options_path = out_dir / f'{OUTPUT_PREFIX}_options.csv'
-    rules_path = out_dir / f'{OUTPUT_PREFIX}_rules.csv'
-    diag_path = out_dir / f'{OUTPUT_PREFIX}_diag.csv'
-    report_path = out_dir / f'{OUTPUT_PREFIX}_report.txt'
-
-    summary_df.to_csv(summary_path, index=False, encoding='utf-8-sig')
-    options_df.to_csv(options_path, index=False, encoding='utf-8-sig')
-    rules_df.to_csv(rules_path, index=False, encoding='utf-8-sig')
-    diag_df.to_csv(diag_path, index=False, encoding='utf-8-sig')
-    report_path.write_text('\n'.join(report_lines), encoding='utf-8')
-
-    print('\n' + '\n'.join(report_lines))
-    print('\nSkapade filer:')
-    for p in [summary_path, options_path, rules_path, diag_path, report_path]:
-        print(' -', p)
-
-    # V3.3: ladda inte ner enskilda filer här. En ZIP skapas i slutet för att undvika hängande Colab-downloads.
-
-
-def _safe_int_pct(x) -> str:
-    try:
-        fx = float(x)
-        return str(int(fx)) if fx.is_integer() else str(fx).replace('.', '_')
-    except Exception:
-        return str(x).replace('.', '_')
-
-
-def _build_combined_filtergrind_report(summary_paths: List[Path], out_dir: Path) -> None:
-    frames = []
-    for sp in summary_paths:
-        try:
-            df = pd.read_csv(sp)
-            frames.append(df)
-        except Exception:
-            pass
-    if not frames:
-        return
-    combined = pd.concat(frames, ignore_index=True)
-    seed_tag = '_'.join(str(int(s)) for s in RANDOM_SEEDS)
-    year_tag = _year_tag()
-    mode_tag = 'facitforced' if bool(FACIT_FORCED_FRAME) else 'normalframe'
-    combined_path = out_dir / f'pm2k_robustpackagerank_v33_packagesurvival_random10_{year_tag}_seed{seed_tag}_{mode_tag}_minhist30_min1_COMBINED_summary.csv'
-    combined.to_csv(combined_path, index=False, encoding='utf-8-sig')
-
-    rows = []
-    ok = combined[combined.get('status', '') == 'OK'].copy() if 'status' in combined.columns else combined.copy()
-    if not ok.empty and 'min_reducering_mot_grundram_pct' in ok.columns:
-        for g, gdf in ok.groupby('min_reducering_mot_grundram_pct'):
-            n = len(gdf)
-            row = {
-                'min_reducering_pct': g,
-                'test_omgångar': n,
-                'median_feature_före': float(pd.to_numeric(gdf.get('feature_regler_före_grind'), errors='coerce').median()) if 'feature_regler_före_grind' in gdf else np.nan,
-                'median_feature_efter': float(pd.to_numeric(gdf.get('feature_regler_efter_grind'), errors='coerce').median()) if 'feature_regler_efter_grind' in gdf else np.nan,
-                'median_paket_i_band': float(pd.to_numeric(gdf.get('paket_i_band_totalt'), errors='coerce').median()) if 'paket_i_band_totalt' in gdf else np.nan,
-                'median_bästa_rader': float(pd.to_numeric(gdf.get('bästa_vald_rader'), errors='coerce').median()) if 'bästa_vald_rader' in gdf else np.nan,
-                'median_nära_pct': float(pd.to_numeric(gdf.get('bästa_vald_nära_pct'), errors='coerce').median()) if 'bästa_vald_nära_pct' in gdf else np.nan,
-                'median_global_pct': float(pd.to_numeric(gdf.get('bästa_vald_global_pct'), errors='coerce').median()) if 'bästa_vald_global_pct' in gdf else np.nan,
-                'facit_klarar_bästa': int((gdf.get('facit_klarar_bästa_vald') == 'Ja').sum()) if 'facit_klarar_bästa_vald' in gdf else 0,
-                'alla_filter_sitter_rätt': int((gdf.get('alla_filter_sitter_mot_rätt_rad_bästa_vald') == 'Ja').sum()) if 'alla_filter_sitter_mot_rätt_rad_bästa_vald' in gdf else 0,
-                'alla_filter_30_30': int((gdf.get('alla_filter_i_bästa_vald_30_30') == 'Ja').sum()) if 'alla_filter_i_bästa_vald_30_30' in gdf else 0,
-                'hittar_30_30': int((pd.to_numeric(gdf.get('antal_30_30'), errors='coerce').fillna(0) > 0).sum()) if 'antal_30_30' in gdf else 0,
-                'hittar_29_30': int((pd.to_numeric(gdf.get('antal_29_30'), errors='coerce').fillna(0) > 0).sum()) if 'antal_29_30' in gdf else 0,
-                'hittar_28_30': int((pd.to_numeric(gdf.get('antal_28_30'), errors='coerce').fillna(0) > 0).sum()) if 'antal_28_30' in gdf else 0,
-            }
-            rows.append(row)
-    comp = pd.DataFrame(rows)
-    comp_path = out_dir / f'pm2k_robustpackagerank_v33_packagesurvival_random10_{year_tag}_seed{seed_tag}_{mode_tag}_minhist30_min1_COMPARISON.csv'
-    comp.to_csv(comp_path, index=False, encoding='utf-8-sig')
-
-    lines = []
-    lines.append('PM2K SUPERINVENTOR ROBUSTPACKAGERANK V3.3 PACKAGE SURVIVAL RANDOM 10 FACITFORCED · JÄMFÖRELSE' if bool(FACIT_FORCED_FRAME) else 'PM2K SUPERINVENTOR ROBUSTPACKAGERANK V3.3 RANDOM 10 · JÄMFÖRELSE')
-    lines.append('=' * 65)
-    if not comp.empty:
-        for _, r in comp.sort_values('min_reducering_pct').iterrows():
-            n = int(r.get('test_omgångar', 0) or 0)
-            lines.append(
-                f"{r['min_reducering_pct']:g}% · facit {int(r['facit_klarar_bästa'])}/{n} · "
-                f"alla filter rätt {int(r['alla_filter_sitter_rätt'])}/{n} · "
-                f"medianrader {float(r['median_bästa_rader']):.1f} · "
-                f"nära {float(r.get('median_nära_pct', 0) or 0):.1f}% · "
-                f"global {float(r.get('median_global_pct', 0) or 0):.1f}% · "
-                f"feature efter {float(r['median_feature_efter']):.1f} · "
-                f"paket i band {float(r['median_paket_i_band']):.1f}"
-            )
-    else:
-        lines.append('Ingen jämförelsedata kunde skapas.')
-    combined_report_path = out_dir / f'pm2k_robustpackagerank_v33_packagesurvival_random10_{year_tag}_seed{seed_tag}_{mode_tag}_minhist30_min1_COMBINED_report.txt'
-    combined_report_path.write_text('\n'.join(lines), encoding='utf-8')
-
-    print('\n' + '\n'.join(lines))
-    print('\nSkapade jämförelsefiler:')
-    for p in [combined_path, comp_path, combined_report_path]:
-        print(' -', p)
-
-    # Skapa även en ZIP med alla outputfiler. Det är mer robust än många files.download-anrop.
-    try:
-        import zipfile
-        zip_path = out_dir / f'pm2k_robustpackagerank_v33_packagesurvival_random10_{year_tag}_seed{seed_tag}_{mode_tag}_ALL_OUTPUTS.zip'
-        patterns = [
-            f'pm2k_robustpackagerank_v33_packagesurvival_random10_{year_tag}_seed{seed_tag}_*',
-            f'pm2k_robustpackagerank_v33_packagesurvival_random10_{year_tag}_seed{seed_tag}_min1_*',
-        ]
-        seen = set()
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for pat in patterns:
-                for fp in sorted(out_dir.glob(pat)):
-                    if fp == zip_path or not fp.is_file() or str(fp) in seen:
-                        continue
-                    seen.add(str(fp))
-                    zf.write(fp, arcname=fp.name)
-        print(' -', zip_path)
-    except Exception as e:
-        zip_path = None
-        print(f'VARNING: kunde inte skapa ZIP: {e}')
-
-    if AUTO_DOWNLOAD_IN_COLAB and _is_colab():
-        from google.colab import files  # type: ignore
-        # Ladda bara ner EN zip-fil. Om webbläsaren stoppar den, högerklicka ZIP-filen i Colab-filpanelen och välj Download.
-        if zip_path is not None:
-            try:
-                files.download(str(zip_path))
-            except Exception:
-                pass
-
-
-def run_all_grinds() -> None:
-    global MIN_SINGLE_REDUCTION_PCT, OUTPUT_PREFIX
-    out_dir = Path('/content') if Path('/content').exists() else Path.cwd()
-    summary_paths = []
-    for g in FILTER_GRIND_LEVELS:
-        MIN_SINGLE_REDUCTION_PCT = float(g)
-        pct_name = _safe_int_pct(g)
-        seed_tag = '_'.join(str(int(s)) for s in RANDOM_SEEDS)
-        year_tag = _year_tag()
-        mode_tag = 'facitforced' if bool(FACIT_FORCED_FRAME) else 'normalframe'
-        OUTPUT_PREFIX = f'pm2k_robustpackagerank_v33_packagesurvival_random10_{year_tag}_seed{seed_tag}_{pct_name}pct_min1_4000_{mode_tag}'
-        main()
-        summary_paths.append(out_dir / f'{OUTPUT_PREFIX}_summary.csv')
-    _build_combined_filtergrind_report(summary_paths, out_dir)
-
-
-# Streamlit Cloud kör app.py med __name__ == '__main__'.
-# Denna Colab-testfunktion får därför ALDRIG autostartas i appen.
-# if __name__ == '__main__':
-#     run_all_grinds()
-
-def _rule_signature(state: Dict) -> Tuple:
-    return tuple(sorted((str(r.get('name', '')), str(r.get('lo')), str(r.get('hi'))) for r in (state.get('rules') or [])))
-
-
-
-
-
-
-def _v3_float_or_none(x):
-    try:
-        if x is None or x == '':
-            return None
-        return float(x)
-    except Exception:
-        return None
-
-
-def _v3_is_intish(x) -> bool:
-    v = _v3_float_or_none(x)
-    return v is not None and abs(v - round(v)) < 1e-9
-
-
-def _v3_is_count_like_rule(rule: Dict) -> bool:
-    """V3-marginal används bara för diskreta antalregler, inte summa/snitt-filter."""
-    name = str(rule.get('name', '') or '').lower()
-    lo = _v3_float_or_none(rule.get('lo'))
-    hi = _v3_float_or_none(rule.get('hi'))
-    if lo is None or hi is None:
-        return False
-    if not (_v3_is_intish(lo) and _v3_is_intish(hi)):
-        return False
-    if lo < 0 or hi < 0 or hi > float(ROBUST_V3_MARGIN_MAX_COUNT_HI):
-        return False
-    # Strecksumma, snitt och FAT-summa är kontinuerliga/skalade uttryck även när värdet råkar vara heltal.
-    no_terms = ['strecksumma', 'snittstreck', 'fat-summa', 'summa totalt', '100-minus', 'skrällkostnad', 'log surprise', 'rankpoäng']
-    if any(t in name for t in no_terms):
-        return False
-    yes_terms = ['antal', 'favoriter sitter', 'favoriter faller', 'tecken ', 'under 15%', 'under 10%', '15–35%', '15-35%', '20–45%', '20-45%', 'små + mellan', 'skrällbalans']
-    return any(t in name for t in yes_terms)
-
-
-def _v3_widen_rule_interval(rule: Dict) -> Dict:
-    """Breddar smala antalintervall ett steg för att minska kantmissar.
-
-    Exempel: 0-3 blir 0-4, 1-3 blir 0-4, 0-0 blir 0-1.
-    Detta används bara i backtestaren för att se om paketmotorn blir mindre spröd.
-    """
-    if not bool(ROBUST_V3_ENABLED) or not bool(ROBUST_V3_MARGIN_ENABLED):
-        return rule
-    if not _v3_is_count_like_rule(rule):
-        return rule
-    lo0 = _v3_float_or_none(rule.get('lo'))
-    hi0 = _v3_float_or_none(rule.get('hi'))
-    if lo0 is None or hi0 is None:
-        return rule
-    width = hi0 - lo0
-    red = float(rule.get('single_reduction_pct', 0.0) or 0.0)
-    # Bara smala eller hårt reducerande diskreta filter får säkerhetsmarginal.
-    if width > float(ROBUST_V3_MARGIN_MAX_WIDTH) and red < 25.0:
-        return rule
-    r = dict(rule)
-    r['v3_original_lo'] = rule.get('lo')
-    r['v3_original_hi'] = rule.get('hi')
-    r['v3_margin_added'] = 'Ja'
-    new_lo = max(0, int(round(lo0)) - 1)
-    new_hi = min(int(ROBUST_V3_MARGIN_MAX_COUNT_HI), int(round(hi0)) + 1)
-    # Om det är exakt 0-0 räcker 0-1; det blir inte extremt brett.
-    r['lo'] = int(new_lo)
-    r['hi'] = int(new_hi)
-    return r
-
-
-def _v3_rule_edge_risk(rule: Dict) -> float:
-    """Högre tal = mer spröd regel i paketvalet."""
-    name = str(rule.get('name', '') or '').lower()
-    lo = _v3_float_or_none(rule.get('lo'))
-    hi = _v3_float_or_none(rule.get('hi'))
-    red = float(rule.get('single_reduction_pct', 0.0) or 0.0)
-    risk = 0.0
-    if _v3_is_count_like_rule(rule) and lo is not None and hi is not None:
-        width = hi - lo
-        if width <= 0:
-            risk += 4.0
-        elif width <= 1:
-            risk += 3.0
-        elif width <= 2:
-            risk += 2.0
-        elif width <= 3:
-            risk += 1.0
-        if lo == 0 and hi <= 1:
-            risk += 2.0
-        if lo >= 1 and lo <= 2 and width <= 3:
-            risk += 1.0
-    # Regeltyper som gav kantmissar i facitforced-testet.
-    terms = [
-        'öppnaste 3', 'topp 3 favoriter', 'topp 4 favoriter', 'topp 5 favoriter',
-        'små + mellan', 'skrällbalans', 'under 15% i mitt', 'värdetecken mittzon',
-    ]
-    if any(t in name for t in terms):
-        risk += 1.5
-    if red >= float(ROBUST_V2_HARD_SINGLE_REDUCTION):
-        risk += 2.0
-    elif red >= 25.0:
-        risk += 1.0
-    if str(rule.get('v3_margin_added', 'Nej')) == 'Ja':
-        # Marginal minskar risken lite, men ursprungligt smalt filter ska inte bli helt riskfritt.
-        risk -= 0.75
-    return max(0.0, float(risk))
-
-def _v2_rule_is_blocked(rule: Dict) -> bool:
-    """Regler som audit/backtest visade kan vara giftiga i paket.
-
-    Vi blockerar inte hela filterfamiljer blint, men vissa hårda mittzons-skrällregler
-    har skapat missar trots hög historisk träff. Dessa får inte styra v2-paket.
-    """
-    name = str(rule.get('name', '') or '')
-    nl = name.lower()
-    red = float(rule.get('single_reduction_pct', 0.0) or 0.0)
-    if 'super skräll: under 15%' in nl and ('mitt 4' in nl or 'mitt 5' in nl or 'mittzon' in nl):
-        return True
-    if 'värdetecken mittzon' in nl and red >= float(ROBUST_V2_HARD_SINGLE_REDUCTION):
-        return True
-    if 'egen zonpoäng: värdetecken mittzon' in nl and red >= float(ROBUST_V2_HARD_SINGLE_REDUCTION):
-        return True
-    return False
-
-
-def _v2_rule_is_dangerous(rule: Dict) -> bool:
-    name = str(rule.get('name', '') or '')
-    nl = name.lower()
-    red = float(rule.get('single_reduction_pct', 0.0) or 0.0)
-    if _v2_rule_is_blocked(rule):
-        return True
-    danger_terms = [
-        '100-minus', 'total skrällkostnad', 'log surprise', 'rankpoäng summa',
-        'snittstreck i hela raden', 'strecksumma i hela raden',
-        'under 15% i mitt', 'värdetecken mittzon',
-        'topp 6 favoriter', 'topp 8 favoriter',
-    ]
-    if any(t in nl for t in danger_terms):
-        return True
-    # Ensamt mycket hårda filter är tillåtna bara om de redan är audit-guld/elit.
-    if red >= float(ROBUST_V2_HARD_SINGLE_REDUCTION) and name not in GOLDRANK_CORE and name not in GOLDRANK_HARD_ELITE:
-        return True
-    return False
-
-
-def _v2_hit_preference(hit: int, near_pct: float, global_pct: float) -> int:
-    """Lägre är bättre. V3 låter 28/30 och 29/30 tävla jämbördigt."""
-    h = int(hit)
-    n = float(near_pct or 0.0)
-    g = float(global_pct or 0.0)
-    mn = min(n, g)
-    if h in (28, 29):
-        return 0 if mn >= float(ROBUST_V2_NEAR_FLOOR) else 2
-    if h >= 30:
-        # 30/30 får inte automatiskt vinna; det måste vara extra robust brett.
-        return 1 if mn >= float(ROBUST_V2_STRICT_30_FLOOR) else 4
-    if h == 27:
-        # 27/30 är reserv och måste vara väldigt robust för att gå före svaga alternativ.
-        return 3 if mn >= float(ROBUST_V2_STRICT_27_FLOOR) else 6
-    return 9
-
-
-def _goldrank_rule_score(rule: Dict) -> float:
-    """Audit-informerad poäng per enskilt filter."""
-    name = str(rule.get('name', '') or '')
-    group = str(rule.get('group', '') or '')
-    red = float(rule.get('single_reduction_pct', 0.0) or 0.0)
-    if not GOLDRANK_ENABLED:
-        return 0.0
-    if bool(ROBUST_V2_ENABLED) and _v2_rule_is_blocked(rule):
-        return -999.0
-    if name in GOLDRANK_BLOCK_EXACT:
-        return -999.0
-    score = 0.0
-    if name in GOLDRANK_CORE:
-        score += 120.0
-    if name in GOLDRANK_HARD_ELITE:
-        score += 105.0
-    if name in GOLDRANK_PENALTY_EXACT:
-        score -= 75.0
-
-    # Generell familjevikt från audit.
-    gl = group.lower()
-    nl = name.lower()
-    if 'struktur' in gl:
-        score += 22.0
-    if 'fat' in nl:
-        score += 20.0
-    if 'sista' in nl:
-        score += 12.0
-    if 'öppnaste 3' in nl or 'öppnaste 4' in nl:
-        score += 12.0
-    if '15–35%' in name or '15-35%' in name:
-        score += 10.0
-    if '20–45%' in name or '20-45%' in name:
-        score += 8.0
-
-    # Farliga mönster enligt audit: bra reducering men dålig robusthet.
-    danger_terms = [
-        '100-minus', 'total skrällkostnad', 'log surprise', 'rankpoäng summa',
-        'snittstreck i hela raden', 'strecksumma i hela raden',
-        'under 15% i mitt', 'värdetecken mittzon',
-        'topp 6 favoriter', 'topp 8 favoriter',
-    ]
-    if any(t in nl for t in danger_terms):
-        score -= 65.0
-    if bool(ROBUST_V2_ENABLED) and _v2_rule_is_dangerous(rule):
-        score -= 55.0
-    if 'superinventor skräll' in gl:
-        score -= 25.0
-
-    # Reducering: 10-35% är idealiskt. 35%+ kan vara bra, men kräver att familjen redan fått plus.
-    if 5.0 <= red < 10.0:
-        score += 14.0
-    elif 10.0 <= red < 20.0:
-        score += 22.0
-    elif 20.0 <= red < 35.0:
-        score += 26.0
-    elif red >= 35.0:
-        score += 12.0
-        if score < 75.0:
-            score -= 35.0
-    else:
-        score -= 15.0
-    return float(score)
-
-
-def _goldrank_rule_hit(rule: Dict) -> int:
-    try:
-        if '_hist_mask' in rule:
-            return int(np.asarray(rule['_hist_mask'], dtype=bool).sum())
-        if 'hist_hit' in rule:
-            return int(rule.get('hist_hit') or 0)
-        if 'hit' in rule:
-            return int(rule.get('hit') or 0)
-    except Exception:
-        pass
-    return 0
-
-def _state_to_package(state: Dict, htot: int, target_rows: int) -> Dict:
-    rows_left = int(np.asarray(state['frame_mask'], dtype=bool).sum())
-    hit = int(np.asarray(state['hist_mask'], dtype=bool).sum())
-    pc = int(state.get('profile_count', 0))
-    sc = int(state.get('structure_count', 0))
-    return {
-        'hit': hit,
-        'total': int(htot),
-        'rows': rows_left,
-        'filters': len(state.get('rules') or []),
-        'profile_filters': pc,
-        'structure_filters': sc,
-        'target_diff': abs(rows_left - int(target_rows)),
-        'rules': list(state.get('rules') or []),
-        'goldrank_score': round(float(state.get('goldrank_score', 0.0) or 0.0), 2),
-        'goldrank_gold_filters': int(state.get('goldrank_gold_filters', 0) or 0),
-        '_state': state,
-    }
-
-
-def _collect_pm2k_band_packages(ns: Dict, v_m: pd.DataFrame, frame_rows: List[str], filter_vec: List[float], *,
-                                min_rows: int, max_rows: int, target_rows: int, min_hit_floor: int,
-                                frame_adapt: bool, max_depth: int, beam_width: int,
-                                max_candidates: int,
-                                min_single_reduction_pct: float = 0.0) -> Tuple[List[Dict], Dict, pd.DataFrame]:
-    """Liknar appens Mönstermotor2K, men samlar många paket inom valt radband.
-
-    Det är fortfarande en beam-sökning, inte matematisk totalexhaustiv sökning.
-    För praktiskt test är den mer användbar än att bara returnera topp 3.
-    """
-    t0 = time.time()
-    htot = int(len(v_m))
+    frame_rows = list(frame_rows or [])
     frame_total = int(len(frame_rows))
-    rules, feat_diag = ns['_pm2k_build_rule_pool'](
-        v_m, frame_rows, filter_vec, ANTAL_MATCHER,
-        min_hit_floor=int(min_hit_floor),
-        frame_adapt=bool(frame_adapt),
-    )
-    rules_before_grind = int(len(rules))
-    # V3: bredda smala antalintervall innan masker räknas fram. Det minskar kantmissar.
-    if bool(ROBUST_V3_ENABLED) and bool(ROBUST_V3_MARGIN_ENABLED):
-        widened = []
-        for _rr in rules:
-            widened.append(_v3_widen_rule_interval(_rr))
-        rules = widened
-    rules_after_v3_margin = int(len(rules))
-    min_red = float(min_single_reduction_pct or 0.0)
-    if min_red > 0:
-        rules = [r for r in rules if float(r.get('single_reduction_pct', 0.0) or 0.0) >= min_red]
-    rules_after_grind = int(len(rules))
-    if isinstance(feat_diag, pd.DataFrame) and not feat_diag.empty and 'Reducerar %' in feat_diag.columns and min_red > 0:
-        try:
-            feat_diag = feat_diag[pd.to_numeric(feat_diag['Reducerar %'], errors='coerce').fillna(-1) >= min_red].copy()
-        except Exception:
-            pass
+    htot = int(len(v_m))
+    try:
+        if progress_cb:
+            progress_cb(3, 'Startar Mönstermotor 2K...')
+    except Exception:
+        pass
+    rules, feat_diag = _pm2k_build_rule_pool(v_m, frame_rows, filter_vec, antal_matcher, min_hit_floor=min_hit_floor, frame_adapt=bool(frame_adapt))
+    try:
+        if progress_cb:
+            progress_cb(18, f'Skapade {len(rules)} dynamiska regler. Förbereder kandidatpool...')
+    except Exception:
+        pass
 
-    goldrank_blocked = 0
-    if GOLDRANK_ENABLED:
-        for _r in rules:
-            _r['_goldrank_score'] = _goldrank_rule_score(_r)
-            _r['_goldrank_tier'] = 'gold' if float(_r.get('_goldrank_score', 0.0) or 0.0) >= 100.0 else ('bad' if float(_r.get('_goldrank_score', 0.0) or 0.0) < -200.0 else 'normal')
-        before_goldrank = len(rules)
-        rules = [r for r in rules if float(r.get('_goldrank_score', 0.0) or 0.0) > -200.0]
-        goldrank_blocked = before_goldrank - len(rules)
-        rules.sort(key=lambda r: (float(r.get('_goldrank_score', 0.0) or 0.0), _goldrank_rule_hit(r), float(r.get('single_reduction_pct', 0.0) or 0.0)), reverse=True)
-
-    # Samma kandidatprincip som appen, men audit-rankad innan urval.
     selected = []
-    by_group: Dict[str, List[Dict]] = {}
+    by_group = {}
     for r in rules:
-        by_group.setdefault(str(r.get('group', '')), []).append(r)
-    for _, rs in by_group.items():
-        rs.sort(key=lambda r: (float(r.get('_goldrank_score', 0.0) or 0.0), _goldrank_rule_hit(r), float(r.get('single_reduction_pct', 0.0) or 0.0)), reverse=True)
-        selected.extend(rs[:10])  # v12.0do snabbläge
-    selected.extend(rules[:45])  # v12.0do snabbläge
+        by_group.setdefault(str(r.get('group','')), []).append(r)
+    for g, rs in by_group.items():
+        selected.extend(rs[:45])
+    selected.extend(rules[:120])
 
-    seen = set()
-    cand = []
+    seen = set(); cand = []
     for r in selected:
-        k = (r.get('name'), r.get('lo'), r.get('hi'))
+        k = (r['name'], r['lo'], r['hi'])
         if k in seen:
             continue
-        seen.add(k)
-        cand.append(r)
-    cand = cand[:int(max_candidates)]
-    cand = ns['_pm2k_rule_masks'](cand, v_m, frame_rows, filter_vec, ANTAL_MATCHER)
+        seen.add(k); cand.append(r)
+    cand = cand[:170]
+    try:
+        if progress_cb:
+            progress_cb(28, f'Räknar masker för {len(cand)} kandidater...')
+    except Exception:
+        pass
+    cand = _pm2k_rule_masks(cand, v_m, frame_rows, filter_vec, antal_matcher)
 
-    floors = list(range(htot, max(0, int(min_hit_floor) - 1), -1))
-    found: Dict[Tuple, Dict] = {}
     diag_rows = []
+    floors = list(range(htot, max(0, int(min_hit_floor)-1), -1))
+    all_under = []
+    all_near = []
+    # v12.0dg: samla bästa paket per faktisk träffnivå (30/30, 29/30, 28/30, 27/30).
+    # Tidigare sparades i praktiken bara bästa paket per sökgolv. När maxrader höjdes
+    # kunde ett hårdpressat 28/30-paket inom gränsen försvinna eftersom 30/30-paketet
+    # dominerade sökgolvet. Maxrader ska bara vara en visningsspärr, inte stoppa
+    # insamlingen av billigare paket inom valda gränser.
+    best_under_by_hit = {}
 
-    for floor in floors:
+    def _state_summary(state, floor, status):
+        rows_left = int(state['frame_mask'].sum())
+        hh = int(state['hist_mask'].sum())
+        pc = int(state.get('profile_count',0)); sc = int(state.get('structure_count',0))
+        return {
+            'floor': int(floor),
+            'rows': rows_left,
+            'hit': hh,
+            'total': int(htot),
+            'filters': len(state.get('rules',[]) or []),
+            'profile_filters': pc,
+            'structure_filters': sc,
+            'status': status,
+            'score': (-hh, rows_left, len(state.get('rules',[]) or []), -pc, sc, abs(rows_left-int(target_rows))),
+        }
+
+    def _rule_signature(state):
+        return tuple(sorted((str(r.get('name','')), str(r.get('lo')), str(r.get('hi'))) for r in (state.get('rules') or [])))
+
+    def _remember_under_candidate(state, floor):
+        try:
+            rows_left = int(state['frame_mask'].sum())
+            if not (int(min_rows) <= rows_left <= int(max_rows)):
+                return
+            summ = _state_summary(state, floor, 'UNDER_MAX')
+            hh = int(summ.get('hit', 0))
+            # Inom samma faktiska träffnivå vill vi ha lägst radantal = bäst reducering.
+            rank = (
+                int(summ.get('rows', 10**9)),
+                int(summ.get('filters', 10**9)),
+                -int(summ.get('profile_filters', 0)),
+                int(summ.get('structure_filters', 10**9)),
+                abs(int(summ.get('rows', 10**9)) - int(target_rows)),
+            )
+            old = best_under_by_hit.get(hh)
+            if old is None or rank < old[0]:
+                best_under_by_hit[hh] = (rank, state, summ)
+        except Exception:
+            return
+
+    for floor_i, floor in enumerate(floors):
+        try:
+            if progress_cb:
+                progress_cb(32 + int(55 * floor_i / max(1, len(floors))), f'Söker paket med träffgolv {floor}/{htot}...')
+        except Exception:
+            pass
         beam = [{
             'rules': [],
             'used_features': set(),
@@ -10293,776 +8818,133 @@ def _collect_pm2k_band_packages(ns: Dict, v_m: pd.DataFrame, frame_rows: List[st
             'frame_mask': np.ones(frame_total, dtype=bool),
             'profile_count': 0,
             'structure_count': 0,
-            'goldrank_score': 0.0,
-            'goldrank_gold_filters': 0,
         }]
-        best_rows_for_floor = None
-        best_hit_for_floor = None
-        t_floor = time.time()
-
-        for depth in range(int(max_depth)):
+        best_under = None
+        best_any = None
+        max_depth = 14
+        beam_width = 240
+        for depth in range(max_depth):
             nxt = []
             for state in beam:
-                cur_rows = int(np.asarray(state['frame_mask'], dtype=bool).sum())
+                cur_rows = int(state['frame_mask'].sum())
                 if cur_rows < int(min_rows):
                     continue
                 for rule in cand:
-                    fname = str(rule.get('name', ''))
+                    fname = str(rule.get('name',''))
                     if fname in state['used_features']:
                         continue
                     new_hmask = state['hist_mask'] & rule['_hist_mask']
-                    hit = int(new_hmask.sum())
-                    if hit < int(floor):
+                    hh = int(new_hmask.sum())
+                    if hh < int(floor):
                         continue
                     new_fmask = state['frame_mask'] & rule['_frame_mask']
                     rows_left = int(new_fmask.sum())
                     if rows_left <= 0 or rows_left >= cur_rows:
                         continue
-                    grp = str(rule.get('group', '')).lower()
+                    grp = str(rule.get('group','')).lower()
                     is_struct = 'struktur' in grp
-                    pc = int(state.get('profile_count', 0)) + (0 if is_struct else 1)
-                    sc = int(state.get('structure_count', 0)) + (1 if is_struct else 0)
+                    pc = int(state['profile_count']) + (0 if is_struct else 1)
+                    sc = int(state['structure_count']) + (1 if is_struct else 0)
+                    # Struktur får vara stöd, men inte äta upp paketet.
                     if sc > max(4, pc + 1):
                         continue
-                    rgold = float(rule.get('_goldrank_score', 0.0) or 0.0)
-                    ns_state = {
+                    ns = {
                         'rules': state['rules'] + [rule],
                         'used_features': set(state['used_features']) | {fname},
                         'hist_mask': new_hmask,
                         'frame_mask': new_fmask,
                         'profile_count': pc,
                         'structure_count': sc,
-                        'goldrank_score': float(state.get('goldrank_score', 0.0) or 0.0) + rgold,
-                        'goldrank_gold_filters': int(state.get('goldrank_gold_filters', 0) or 0) + (1 if rgold >= 100.0 else 0),
                     }
+                    val = (-hh, rows_left, len(ns['rules']), -pc, sc, abs(rows_left-int(target_rows)))
                     if int(min_rows) <= rows_left <= int(max_rows):
-                        pkg = _state_to_package(ns_state, htot, target_rows)
-                        sig = _rule_signature(ns_state)
-                        old = found.get(sig)
-                        over_target = max(0, int(pkg['rows']) - int(target_rows))
-                        rank = (-pkg['hit'], over_target, -float(pkg.get('goldrank_score', 0.0) or 0.0), pkg['rows'], pkg['filters'], -pkg['profile_filters'], pkg['structure_filters'])
-                        if old is None or rank < old['_rank']:
-                            pkg['_rank'] = rank
-                            pkg['floor_found'] = int(floor)
-                            found[sig] = pkg
-                        if best_rows_for_floor is None or rows_left < best_rows_for_floor:
-                            best_rows_for_floor = rows_left
-                            best_hit_for_floor = hit
-                    nxt.append(ns_state)
-
+                        if best_under is None or val < best_under[0]:
+                            best_under = (val, ns)
+                        _remember_under_candidate(ns, floor)
+                    if rows_left >= int(min_rows):
+                        any_val = (max(0, rows_left-int(max_rows)), -hh, rows_left, len(ns['rules']), -pc, sc, abs(rows_left-int(target_rows)))
+                        if best_any is None or any_val < best_any[0]:
+                            best_any = (any_val, ns)
+                    nxt.append(ns)
             if not nxt:
                 break
-
-            def _rank_state(s: Dict) -> Tuple:
-                rows_left = int(np.asarray(s['frame_mask'], dtype=bool).sum())
-                hit = int(np.asarray(s['hist_mask'], dtype=bool).sum())
-                pc = int(s.get('profile_count', 0))
-                sc = int(s.get('structure_count', 0))
+            try:
+                if progress_cb and depth % 2 == 0:
+                    progress_cb(32 + int(55 * (floor_i + (depth+1)/max(1, max_depth)) / max(1, len(floors))), f'Träffgolv {floor}/{htot}: djup {depth+1}/{max_depth}, beam {len(nxt)}...')
+            except Exception:
+                pass
+            def state_rank(s):
+                rows_left = int(s['frame_mask'].sum())
+                hh = int(s['hist_mask'].sum())
+                pc = int(s.get('profile_count',0)); sc = int(s.get('structure_count',0))
                 in_band = 0 if int(min_rows) <= rows_left <= int(max_rows) else 1
-                over_target = max(0, rows_left - int(target_rows))
-                return (
-                    in_band,
-                    max(0, rows_left - int(max_rows)),
-                    over_target,
-                    -float(s.get('goldrank_score', 0.0) or 0.0),
-                    rows_left,
-                    abs(hit - int(floor)),
-                    len(s.get('rules') or []),
-                    -pc,
-                    sc,
-                    -hit,
-                    over_target,
-                )
-            nxt.sort(key=_rank_state)
-            beam = nxt[:int(beam_width)]
-
-        diag_rows.append({
-            'träffgolv': f'{floor}/{htot}',
-            'bästa_radantal_i_band': best_rows_for_floor if best_rows_for_floor is not None else '',
-            'bästa_faktisk_träff': f'{best_hit_for_floor}/{htot}' if best_hit_for_floor is not None else '',
-            'sekunder': round(time.time() - t_floor, 2),
-        })
-
-    packages = list(found.values())
-    packages.sort(key=lambda p: (-int(p['hit']), max(0, int(p['rows']) - int(target_rows)), -float(p.get('goldrank_score', 0.0) or 0.0), int(p['rows']), int(p['filters']), -int(p['profile_filters']), int(p['structure_filters'])))
-
-    # Begränsa exporten, men behåll alla sammanfattningar för statistik.
-    meta = {
-        'seconds': round(time.time() - t0, 2),
-        'min_single_reduction_pct': float(min_single_reduction_pct or 0.0),
-        'feature_rules_before_grind': int(rules_before_grind),
-        'feature_rules_after_grind': int(rules_after_grind),
-        'feature_rules_after_v3_margin': int(rules_after_v3_margin),
-        'feature_rules': int(len(rules)),
-        'candidate_rules': int(len(cand)),
-        'goldrank_blocked_rules': int(goldrank_blocked),
-        'packages_found': int(len(packages)),
-        'feature_diag': feat_diag,
-    }
-    return packages, meta, pd.DataFrame(diag_rows)
-
-
-
-
-def _single_rule_hist_hit(rule: Dict) -> int:
-    """Historisk träff för en enskild PM2K-regel, t.ex. 30 av 30."""
-    try:
-        if '_hist_mask' in rule:
-            return int(np.asarray(rule['_hist_mask'], dtype=bool).sum())
-        if 'hist_mask' in rule:
-            return int(np.asarray(rule['hist_mask'], dtype=bool).sum())
-        if 'hist_hit' in rule:
-            return int(rule.get('hist_hit') or 0)
-        if 'hit' in rule:
-            return int(rule.get('hit') or 0)
-    except Exception:
-        pass
-    return -1
-
-
-def _package_filter_hit_stats(pkg: Optional[Dict]) -> Dict:
-    """Samlar filterträff per vald regel i paketet.
-
-    Viktig skillnad:
-    - paketets träff = alla regler tillsammans mot 30 historiska facitrader
-    - filterträff = varje enskild regel separat mot 30 historiska facitrader
-    """
-    if not pkg:
-        return {
-            'alla_filter_30_30': '',
-            'min_filter_hit': '',
-            'min_filter_träff': '',
-            'antal_filter_30_30': '',
-            'filterträffar': '',
-        }
-    total = int(pkg.get('total') or TOP_N_SIMILAR or 30)
-    hits = [_single_rule_hist_hit(r) for r in (pkg.get('rules') or [])]
-    known = [h for h in hits if h >= 0]
-    if not known:
-        return {
-            'alla_filter_30_30': '',
-            'min_filter_hit': '',
-            'min_filter_träff': '',
-            'antal_filter_30_30': '',
-            'filterträffar': '',
-        }
-    return {
-        'alla_filter_30_30': 'Ja' if all(h == total for h in known) else 'Nej',
-        'min_filter_hit': int(min(known)),
-        'min_filter_träff': f'{int(min(known))}/{total}',
-        'antal_filter_30_30': int(sum(1 for h in known if h == total)),
-        'filterträffar': ' | '.join(f'{int(h)}/{total}' for h in hits),
-    }
-
-def _package_passes_correct(ns: Dict, pkg: Dict, correct: str, filter_vec: List[float]) -> Tuple[bool, str]:
-    for i, r in enumerate(pkg.get('rules') or [], 1):
-        try:
-            if not ns['_pm2k_rule_passes'](r, correct, filter_vec):
-                val = ns['_pm2k_rule_value'](r, correct, filter_vec)
-                lo = r.get('lo')
-                hi = r.get('hi')
-                return False, f"Regel {i}: {r.get('name')} · värde={val} · intervall={lo}–{hi}"
-        except Exception as e:
-            return False, f"Regel {i}: fel vid kontroll: {e}"
-    return True, 'OK'
-
-
-def _package_correct_rule_stats(ns: Dict, pkg: Optional[Dict], correct: str, filter_vec: List[float]) -> Dict:
-    """Kontrollerar varje regel i paketet mot testomgångens verkliga facitrad.
-
-    Det här är den viktigaste backtest-kontrollen för PM2K:
-    - Ja på alla regler => paketet släpper igenom rätt rad
-    - Nej på minst en regel => paketet dödar rätt rad
-
-    Detta är skilt från historisk 30/30-träff. En regel kan vara 30/30 på liknande historik men ändå missa testfacit.
-    """
-    if not pkg:
-        return {
-            'alla_filter_sitter_mot_rätt_rad': '',
-            'antal_filter_som_sitter_mot_rätt_rad': '',
-            'antal_filter_som_missar_rätt_rad': '',
-            'filter_mot_rätt_rad': '',
-            'missade_filter_mot_rätt_rad': '',
-            'första_miss_mot_rätt_rad': '',
-        }
-    rules = list(pkg.get('rules') or [])
-    if not rules:
-        return {
-            'alla_filter_sitter_mot_rätt_rad': '',
-            'antal_filter_som_sitter_mot_rätt_rad': 0,
-            'antal_filter_som_missar_rätt_rad': 0,
-            'filter_mot_rätt_rad': '',
-            'missade_filter_mot_rätt_rad': '',
-            'första_miss_mot_rätt_rad': '',
-        }
-    results = []
-    missed = []
-    first_miss = ''
-    for i, r in enumerate(rules, 1):
-        name = str(r.get('name', ''))
-        lo = r.get('lo')
-        hi = r.get('hi')
-        try:
-            val = ns['_pm2k_rule_value'](r, correct, filter_vec)
-            ok = bool(ns['_pm2k_rule_passes'](r, correct, filter_vec))
-        except Exception as e:
-            val = ''
-            ok = False
-            if not first_miss:
-                first_miss = f"Regel {i}: {name} · fel vid kontroll: {e}"
-        label = 'Ja' if ok else 'Nej'
-        results.append(f"R{i}:{label} ({val} i {lo}–{hi})")
-        if not ok:
-            miss_txt = f"R{i}: {name} · värde={val} · intervall={lo}–{hi}"
-            missed.append(miss_txt)
-            if not first_miss:
-                first_miss = miss_txt
-    pass_count = sum(1 for x in results if ':Ja ' in x)
-    miss_count = len(rules) - pass_count
-    return {
-        'alla_filter_sitter_mot_rätt_rad': 'Ja' if miss_count == 0 else 'Nej',
-        'antal_filter_som_sitter_mot_rätt_rad': int(pass_count),
-        'antal_filter_som_missar_rätt_rad': int(miss_count),
-        'filter_mot_rätt_rad': ' | '.join(results),
-        'missade_filter_mot_rätt_rad': ' || '.join(missed),
-        'första_miss_mot_rätt_rad': first_miss if first_miss else 'OK',
-    }
-
-
-
-
-# =========================================================
-# ROBUSTPACKAGERANK – mäter färdigt paket som helhet
-# =========================================================
-def _history_pairs_from_df(ns: Dict, df: pd.DataFrame, antal_matcher: int = 13) -> List[Tuple[str, List[float]]]:
-    """Returnerar (facitrad, prob_vector) från historik-DF.
-    Samma princip som PM2K:s lokala mask: regeln mäts på varje historisk facitrad
-    med den omgångens egen Prob_Vector.
-    """
-    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-        return []
-    norm = ns.get('normalize_single_row_text', lambda x: str(x or '').strip().upper())
-    out = []
-    for _, r in df.iterrows():
-        row = norm(r.get('Correct_Row', ''))
-        pv = r.get('Prob_Vector', [])
-        if len(row) == int(antal_matcher) and isinstance(pv, list) and len(pv) == int(antal_matcher) * 3:
-            out.append((row, list(pv)))
-    return out
-
-
-def _rule_passes_pair(rule: Dict, row: str, pv: List[float]) -> bool:
-    try:
-        fn = rule.get('feature', {}).get('fn')
-        if fn is None:
-            return False
-        val = float(fn(row, pv))
-        return bool(float(rule.get('lo')) <= val <= float(rule.get('hi')))
-    except Exception:
-        return False
-
-
-def _rule_mask_for_pairs(rule: Dict, pairs: List[Tuple[str, List[float]]]) -> np.ndarray:
-    if not pairs:
-        return np.array([], dtype=bool)
-    return np.array([_rule_passes_pair(rule, row, pv) for row, pv in pairs], dtype=bool)
-
-
-def _package_hist_mask_cached(pkg: Dict, pairs: List[Tuple[str, List[float]]], cache: Dict) -> np.ndarray:
-    if not pairs:
-        return np.array([], dtype=bool)
-    mask = np.ones(len(pairs), dtype=bool)
-    for r in (pkg.get('rules') or []):
-        key = (str(r.get('name','')), str(r.get('lo')), str(r.get('hi')), id(r.get('feature', {}).get('fn')))
-        if key not in cache:
-            cache[key] = _rule_mask_for_pairs(r, pairs)
-        mask = mask & cache[key]
-        if not mask.any():
-            break
-    return mask
-
-
-def _robust_row_score(rows: int, min_rows: int, max_rows: int, target_rows: int) -> float:
-    try:
-        # Min1-test: paket under målradantal ska inte straffas bara för att de är billiga.
-        # Robustheten ska avgöra först; därefter är färre rader positivt.
-        rows_f = float(rows)
-        target_f = float(target_rows)
-        if rows_f <= target_f:
-            return 100.0
-        span = max(1.0, float(max_rows) - target_f)
-        return max(0.0, 100.0 - 100.0 * (rows_f - target_f) / span)
-    except Exception:
-        return 0.0
-
-
-
-def _mask_pct(mask: np.ndarray) -> float:
-    try:
-        if mask is None or len(mask) == 0:
-            return 0.0
-        return 100.0 * float(np.asarray(mask, dtype=bool).sum()) / max(1, len(mask))
-    except Exception:
-        return 0.0
-
-
-def _mask_chunk_min_pct(mask: np.ndarray, chunks: int = 4) -> float:
-    """Sämsta överlevnad i kontrollblock. Lägre värde = paketet är ojämnt/skört."""
-    try:
-        arr = np.asarray(mask, dtype=bool)
-        n = len(arr)
-        if n == 0:
-            return 0.0
-        c = max(1, min(int(chunks), n))
-        vals = []
-        for part in np.array_split(arr, c):
-            if len(part):
-                vals.append(_mask_pct(part))
-        return float(min(vals)) if vals else 0.0
-    except Exception:
-        return 0.0
-
-
-def _wilson_lower_pct(hits: int, total: int, z: float = 1.15) -> float:
-    """Konservativ nedre träffgräns. Straffar små underlag och ojämn överlevnad."""
-    try:
-        n = int(total)
-        if n <= 0:
-            return 0.0
-        phat = float(hits) / float(n)
-        z2 = float(z) ** 2
-        denom = 1.0 + z2 / n
-        centre = phat + z2 / (2.0 * n)
-        adj = float(z) * math.sqrt((phat * (1.0 - phat) + z2 / (4.0 * n)) / n)
-        return max(0.0, min(100.0, 100.0 * (centre - adj) / denom))
-    except Exception:
-        return 0.0
-
-
-def _v33_rule_survival_risk(rule: Dict) -> float:
-    """Extra facitfri riskpoäng för regler som ofta ger kantmissar i svåra seeds."""
-    try:
-        name = str(rule.get('name', '') or '')
-        nl = name.lower()
-        lo = float(rule.get('lo', 0.0) or 0.0)
-        hi = float(rule.get('hi', 0.0) or 0.0)
-        red = float(rule.get('single_reduction_pct', 0.0) or 0.0)
-        width = hi - lo
-        risk = 0.0
-        zone_terms = ['favorit', 'favoriter', 'öppna', 'öppnaste', 'mitt', 'sista', 'första']
-        count_like = any(t in nl for t in [' i ', 'antal', 'sitter', 'faller', 'missar', 'under 20%', 'under 15%', 'värdetecken'])
-        if count_like and any(t in nl for t in zone_terms):
-            if lo <= 0 and hi <= 1:
-                risk += 4.0
-            elif lo <= 0 and hi <= 2:
-                risk += 3.0
-            elif lo <= 0 and hi <= 3:
-                risk += 2.0
-            elif lo <= 0 and hi <= 4:
-                risk += 1.5
-            if 0.0 < width <= 3.0:
-                risk += 1.0
-        if any(t in nl for t in ['strecksumma vald rad', 'strecksumma i hela raden', 'snittstreck i hela raden']):
-            risk += 3.5
-        if any(t in nl for t in ['x i favoriter', '2 i favoriter', 'under 20% i mitt', 'under 15% i mitt']):
-            risk += 2.5
-        if red >= 35.0:
-            risk += 2.0
-        elif red >= 25.0:
-            risk += 1.0
-        if str(rule.get('v3_margin_added', 'Nej')) == 'Ja':
-            risk -= 0.8
-        return max(0.0, float(risk))
-    except Exception:
-        return 0.0
-
-
-def _v33_package_survival_key(pkg: Dict, cap: int) -> Tuple:
-    """Lägre är bättre. V3.3 väljer efter paketöverlevnad, inte bara snittrobusthet."""
-    rows = int(pkg.get('rows') or 0)
-    if rows <= 0 or rows > int(cap):
-        return (999999,)
-    near = float(pkg.get('robust_near_pct', 0.0) or 0.0)
-    glob = float(pkg.get('robust_global_pct', 0.0) or 0.0)
-    minrob = min(near, glob)
-    chunk = float(pkg.get('survival_min_chunk_pct', 0.0) or 0.0)
-    wilson = float(pkg.get('survival_wilson_pct', 0.0) or 0.0)
-    hit = int(pkg.get('hit') or 0)
-    filters = int(pkg.get('filters') or 0)
-    edge = float(pkg.get('v3_edge_risk', 0.0) or 0.0)
-    survrisk = float(pkg.get('v33_survival_risk', 0.0) or 0.0)
-    danger = int(pkg.get('v2_danger_rules', 0) or 0)
-    score = float(pkg.get('robust_score', 0.0) or 0.0)
-
-    # Överlevnad först. 90+ i snitt räcker inte om sämsta kontrollblock är dåligt.
-    floor_bad = 0 if (minrob >= SURVIVAL_MINROB_FLOOR and chunk >= SURVIVAL_CHUNK_FLOOR and wilson >= SURVIVAL_WILSON_FLOOR) else 1
-    strong_survival = 0 if (minrob >= SURVIVAL_STRONG_FLOOR and chunk >= 82.0 and wilson >= 84.0) else 1
-
-    # 28 är ofta elastiskt, 29 starkt. 30 får inte vinna bara för 30/30 lokalt.
-    if hit == 28:
-        hit_pref = 0
-    elif hit == 29:
-        hit_pref = 0
-    elif hit == 30 and minrob >= 94.0 and chunk >= 82.0:
-        hit_pref = 1
-    elif hit == 27 and minrob >= 95.0 and chunk >= 85.0:
-        hit_pref = 2
-    elif hit == 30:
-        hit_pref = 3
-    elif hit == 27:
-        hit_pref = 4
-    else:
-        hit_pref = 9
-
-    # Radpress: alla billiga paket är med, men <1850 måste ha mycket bra survival.
-    if rows < 1850:
-        row_pen = 0 if (minrob >= 96.0 and chunk >= 88.0 and danger == 0 and survrisk <= 2.0) else 3
-    elif SURVIVAL_PREFER_ROWS_LOW <= rows <= SURVIVAL_PREFER_ROWS_HIGH:
-        row_pen = 0
-    elif 1850 <= rows < SURVIVAL_PREFER_ROWS_LOW:
-        row_pen = 1
-    elif SURVIVAL_PREFER_ROWS_HIGH < rows <= 3200:
-        row_pen = 1
-    elif 3200 < rows <= 3500:
-        row_pen = 2
-    elif 3500 < rows <= SURVIVAL_VERY_HARD_OVER_ROWS:
-        row_pen = 3
-    else:
-        row_pen = 4
-
-    over3300 = 1 if rows > SURVIVAL_HARD_OVER_ROWS else 0
-    over3700 = 1 if rows > SURVIVAL_VERY_HARD_OVER_ROWS else 0
-    risk_bucket = int(edge * 10 + survrisk * 10 + danger * 25)
-
-    return (
-        int(floor_bad),
-        int(strong_survival),
-        int(hit_pref),
-        int(row_pen),
-        int(over3700),
-        int(over3300),
-        int(risk_bucket),
-        -float(chunk),
-        -float(wilson),
-        -float(minrob),
-        -float(score),
-        int(rows),
-        int(filters),
-    )
-
-def _attach_robust_package_scores(ns: Dict, packages: List[Dict], near_df: pd.DataFrame, global_df: pd.DataFrame,
-                                  frame_total: int, min_rows: int, max_rows: int, target_rows: int) -> Dict:
-    """Beräknar paketträff utanför de 30 lokala träningsomgångarna.
-
-    Detta är kärnan: färdiga paket får near/global-träff baserat på ALLA regler tillsammans.
-    Enskilda 30/30-filter räcker inte; paketet måste överleva bredare historik.
-    """
-    near_pairs = _history_pairs_from_df(ns, near_df, ANTAL_MATCHER)
-    global_pairs = _history_pairs_from_df(ns, global_df, ANTAL_MATCHER)
-    near_cache = {}
-    global_cache = {}
-    for p in packages:
-        local_total = max(1, int(p.get('total') or TOP_N_SIMILAR))
-        local_hit = int(p.get('hit') or 0)
-        near_mask = _package_hist_mask_cached(p, near_pairs, near_cache) if near_pairs else np.array([], dtype=bool)
-        global_mask = _package_hist_mask_cached(p, global_pairs, global_cache) if global_pairs else np.array([], dtype=bool)
-        near_hit = int(near_mask.sum()) if len(near_mask) else 0
-        global_hit = int(global_mask.sum()) if len(global_mask) else 0
-        near_total = int(len(near_pairs))
-        global_total = int(len(global_pairs))
-        near_pct = 100.0 * near_hit / max(1, near_total)
-        global_pct = 100.0 * global_hit / max(1, global_total)
-        local_pct = 100.0 * local_hit / max(1, local_total)
-        near_chunk_pct = _mask_chunk_min_pct(near_mask, chunks=3) if len(near_mask) else 0.0
-        global_chunk_pct = _mask_chunk_min_pct(global_mask, chunks=4) if len(global_mask) else 0.0
-        survival_min_chunk_pct = min(float(near_chunk_pct), float(global_chunk_pct)) if (len(near_mask) or len(global_mask)) else 0.0
-        survival_hits = int(near_hit + global_hit)
-        survival_total = int(near_total + global_total)
-        survival_wilson_pct = _wilson_lower_pct(survival_hits, survival_total, z=1.15)
-        rows = int(p.get('rows') or 0)
-        red_pct = 100.0 - 100.0 * rows / max(1, int(frame_total or 1))
-        row_score = _robust_row_score(rows, min_rows, max_rows, target_rows)
-        gold = float(p.get('goldrank_score', 0.0) or 0.0)
-        # Paketstraff: många regler gör att flera 90%-filter kan bli svagt tillsammans.
-        filters = int(p.get('filters') or 0)
-        rules = list(p.get('rules') or [])
-        v2_danger_count = int(sum(1 for rr in rules if _v2_rule_is_dangerous(rr))) if bool(ROBUST_V2_ENABLED) else 0
-        v3_edge_risk = float(sum(_v3_rule_edge_risk(rr) for rr in rules)) if bool(ROBUST_V3_ENABLED) else 0.0
-        v33_survival_risk = float(sum(_v33_rule_survival_risk(rr) for rr in rules)) if bool(SURVIVAL_ENABLED) else 0.0
-        margin_count = int(sum(1 for rr in rules if str(rr.get('v3_margin_added', 'Nej')) == 'Ja')) if bool(ROBUST_V3_ENABLED) else 0
-        rule_penalty = max(0, filters - 5) * 1.80
-        danger_penalty = float(v2_danger_count) * float(ROBUST_V3_DANGER_PENALTY)
-        edge_penalty = float(v3_edge_risk) * float(ROBUST_V3_EDGE_PENALTY)
-        survival_penalty = float(v33_survival_risk) * float(SURVIVAL_EDGE_HEAVY_PENALTY)
-        min_robust_pct = min(float(near_pct), float(global_pct))
-        # Hög reducering är bra, men får inte vinna över robust träff. V3 väger minsta near/global hårdare.
-        robust_score = (
-            0.34 * near_pct +
-            0.25 * global_pct +
-            0.19 * min_robust_pct +
-            0.10 * local_pct +
-            0.05 * row_score +
-            0.04 * min(100.0, max(0.0, red_pct)) +
-            0.03 * min(100.0, max(0.0, gold / 8.0)) +
-            0.06 * survival_min_chunk_pct +
-            0.04 * survival_wilson_pct -
-            rule_penalty -
-            danger_penalty -
-            edge_penalty -
-            survival_penalty
-        )
-        p['robust_near_hit'] = near_hit
-        p['robust_near_total'] = near_total
-        p['robust_near_pct'] = round(float(near_pct), 2)
-        p['robust_global_hit'] = global_hit
-        p['robust_global_total'] = global_total
-        p['robust_global_pct'] = round(float(global_pct), 2)
-        p['robust_local_pct'] = round(float(local_pct), 2)
-        p['robust_reduction_pct'] = round(float(red_pct), 2)
-        p['robust_row_score'] = round(float(row_score), 2)
-        p['robust_score'] = round(float(robust_score), 3)
-        p['v2_danger_rules'] = int(v2_danger_count)
-        p['v3_edge_risk'] = round(float(v3_edge_risk), 2)
-        p['v33_survival_risk'] = round(float(v33_survival_risk), 2)
-        p['survival_near_chunk_pct'] = round(float(near_chunk_pct), 2)
-        p['survival_global_chunk_pct'] = round(float(global_chunk_pct), 2)
-        p['survival_min_chunk_pct'] = round(float(survival_min_chunk_pct), 2)
-        p['survival_wilson_pct'] = round(float(survival_wilson_pct), 2)
-        p['survival_hits'] = int(survival_hits)
-        p['survival_total'] = int(survival_total)
-        p['v3_margin_rules'] = int(margin_count)
-        p['v2_hit_preference'] = int(_v2_hit_preference(local_hit, near_pct, global_pct)) if bool(ROBUST_V2_ENABLED) else 0
-        p['v2_robust_floor_ok'] = 'Ja' if (near_pct >= float(ROBUST_V2_NEAR_FLOOR) and global_pct >= float(ROBUST_V2_GLOBAL_FLOOR)) else 'Nej'
-        # V2-ranking: robusthetsgolv först, sedan 29/30-prioritet, sedan paketets breddträff.
-        # Under målradantal räknas inte som negativt; låg radmängd är positivt först efter robusthet.
-        over_target = max(0, int(rows) - int(target_rows))
-        robust_floor_bad = 0 if p['v2_robust_floor_ok'] == 'Ja' else 1
-        p['_robust_rank'] = (
-            int(robust_floor_bad),
-            int(p['v2_hit_preference']),
-            # V3: välj inte paket som bygger på många kantkänsliga regler även om near/global är hög.
-            float(v3_edge_risk),
-            int(v2_danger_count),
-            -float(min(near_pct, global_pct)),
-            -float(p['robust_score']),
-            int(over_target),
-            int(rows),
-            int(filters),
-        )
-    packages.sort(key=lambda x: x.get('_robust_rank', (999999,)))
-    return {
-        'near_total': int(len(near_pairs)),
-        'global_total': int(len(global_pairs)),
-        'near_unique_rules_cached': int(len(near_cache)),
-        'global_unique_rules_cached': int(len(global_cache)),
-    }
-
-
-
-def _v31_row_band_penalty(rows: int, cap: int, min_robust_pct: float) -> int:
-    """Lägre är bättre. V3.1 pressar radantal men spärrar inte billiga paket."""
-    r = int(rows or 0)
-    cap_i = int(cap or BAND_MAX_ROWS)
-    mr = float(min_robust_pct or 0.0)
-    if r <= 0 or r > cap_i:
-        return 999
-    # Billiga superpaket ska kunna vinna, men bara om robustheten är hög nog.
-    if r < 1850:
-        return 0 if mr >= 94.0 else 2
-    if int(RADPRESS_GOOD_LOW) <= r <= int(RADPRESS_GOOD_HIGH):
-        return 0
-    if 1850 <= r < int(RADPRESS_GOOD_LOW):
-        return 1
-    if int(RADPRESS_GOOD_HIGH) < r <= 3200:
-        return 1
-    if 3200 < r <= 3500:
-        return 2
-    if 3500 < r <= 3700:
-        return 3
-    return 4
-
-
-def _v31_select_key(pkg: Dict, cap: int) -> Tuple:
-    """V3.3 Package Survival selection key. Function name kept for compatibility with existing exporter."""
-    if bool(SURVIVAL_ENABLED):
-        return _v33_package_survival_key(pkg, cap)
-    rows = int(pkg.get('rows') or 0)
-    if rows <= 0 or rows > int(cap):
-        return (999999,)
-    near = float(pkg.get('robust_near_pct', 0.0) or 0.0)
-    glob = float(pkg.get('robust_global_pct', 0.0) or 0.0)
-    minrob = min(near, glob)
-    hit = int(pkg.get('hit') or 0)
-    filters = int(pkg.get('filters') or 0)
-    edge = float(pkg.get('v3_edge_risk', 0.0) or 0.0)
-    danger = int(pkg.get('v2_danger_rules', 0) or 0)
-    score = float(pkg.get('robust_score', 0.0) or 0.0)
-    floor_bad = 0 if minrob >= float(ROBUST_V2_NEAR_FLOOR) else 1
-    if hit in (28, 29):
-        hit_pref = 0
-    elif hit == 27 and minrob >= 95.0:
-        hit_pref = 1
-    elif hit == 30 and minrob >= 94.0:
-        hit_pref = 1
-    elif hit == 27:
-        hit_pref = 3
-    elif hit == 30:
-        hit_pref = 3
-    else:
-        hit_pref = 9
-    row_pen = _v31_row_band_penalty(rows, cap, minrob)
-    over3300 = 1 if rows > 3300 else 0
-    over3700 = 1 if rows > 3700 else 0
-    return (
-        int(floor_bad), int(hit_pref), int(row_pen), int(over3700), int(over3300),
-        float(edge), int(danger), -float(minrob), -float(score), int(rows), int(filters)
-    )
-
-
-def _v31_select_package(packages: List[Dict], cap: int) -> Optional[Dict]:
-    candidates = [p for p in packages if int(p.get('rows') or 0) <= int(cap)]
-    if not candidates:
-        return None
-    return min(candidates, key=lambda p: _v31_select_key(p, cap))
-
-
-
-
-
-def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_rows=2500, min_rows=1, max_rows=4000, min_hit_floor=27, top_n=3, frame_adapt=False, progress_cb=None, global_db=None, pay_min=100000, pay_max=2500000, top_n_hist=30):
-    """PM2K Robust v3.3 Package Survival – liveappens kandidatmotor.
-
-    Bygger breda SuperInventor-regler, samlar många paket inom radbandet,
-    räknar near/global på bredare historik och väljer efter Package Survival.
-    """
-    global ANTAL_MATCHER, TOP_N_SIMILAR, BAND_MAX_ROWS, TARGET_ROWS
-    ANTAL_MATCHER = int(antal_matcher or 13)
-    TOP_N_SIMILAR = int(len(v_m) if hasattr(v_m, '__len__') else top_n_hist or 30)
-    BAND_MAX_ROWS = int(max_rows or 4000)
-    TARGET_ROWS = int(target_rows or 2500)
-    frame_rows = list(frame_rows or [])
-    frame_total = int(len(frame_rows))
-    htot = int(len(v_m)) if hasattr(v_m, '__len__') else 0
-    try:
-        if progress_cb:
-            progress_cb(2, 'Startar PM2K Robust v3.3 Package Survival...')
-    except Exception:
-        pass
-    if htot <= 0 or frame_total <= 0:
-        return None, {'status':'MÖNSTERMOTOR2K_INGET_UNDER_MAX', 'error':'saknar historik eller grundram'}, pd.DataFrame(), pd.DataFrame()
-
-    _pm2k_install_superinventor_once()
-    try:
-        if progress_cb:
-            progress_cb(8, 'Bygger SuperInventor-regler och paketpool...')
-    except Exception:
-        pass
-
-    packages, collect_meta, diag_df = _collect_pm2k_band_packages(
-        globals(), v_m, frame_rows, filter_vec,
-        min_rows=int(min_rows), max_rows=int(max_rows), target_rows=int(target_rows), min_hit_floor=int(min_hit_floor),
-        frame_adapt=bool(frame_adapt), max_depth=int(MAX_DEPTH), beam_width=int(BEAM_WIDTH), max_candidates=int(MAX_CANDIDATES),
-        min_single_reduction_pct=float(MIN_SINGLE_REDUCTION_PCT),
-    )
-    feat_diag = collect_meta.get('feature_diag') if isinstance(collect_meta, dict) else pd.DataFrame()
-    try:
-        if progress_cb:
-            progress_cb(62, f'Paketpool klar: {len(packages)} paket. Räknar near/global...')
-    except Exception:
-        pass
-
-    near_df = pd.DataFrame()
-    global_eval_df = pd.DataFrame()
-    if isinstance(global_db, pd.DataFrame) and not global_db.empty:
-        try:
-            wide_df = _similar_history_for_backtest(
-                global_db, filter_vec, int(antal_matcher),
-                top_n=max(int(ROBUST_TOP_N), int(TOP_N_SIMILAR) + 20),
-                pay_min=int(pay_min), pay_max=int(pay_max),
-                exclude_index=None, mode='leave-one-out', test_date=None,
-            )
-            global_wide_df = _similar_history_for_backtest(
-                global_db, filter_vec, int(antal_matcher),
-                top_n=int(GLOBAL_TOP_N), pay_min=int(pay_min), pay_max=int(pay_max),
-                exclude_index=None, mode='leave-one-out', test_date=None,
-            )
-            near_df = wide_df.iloc[int(TOP_N_SIMILAR):].copy() if isinstance(wide_df, pd.DataFrame) and len(wide_df) > int(TOP_N_SIMILAR) else pd.DataFrame()
-            global_eval_df = global_wide_df.iloc[int(TOP_N_SIMILAR):].copy() if isinstance(global_wide_df, pd.DataFrame) and len(global_wide_df) > int(TOP_N_SIMILAR) else pd.DataFrame()
-        except Exception:
-            near_df = pd.DataFrame(); global_eval_df = pd.DataFrame()
-    # Fallback: om full databas saknas, använd historikbasen som lokal robustkontroll.
-    if near_df.empty:
-        near_df = v_m.copy() if isinstance(v_m, pd.DataFrame) else pd.DataFrame()
-    if global_eval_df.empty:
-        global_eval_df = near_df.copy()
-
-    robust_meta = _attach_robust_package_scores(
-        globals(), packages, near_df, global_eval_df,
-        frame_total=int(frame_total), min_rows=int(min_rows), max_rows=int(max_rows), target_rows=int(target_rows),
-    ) if packages else {'near_total': len(near_df), 'global_total': len(global_eval_df)}
-
-    try:
-        if progress_cb:
-            progress_cb(82, 'Väljer paket med Package Survival-rankning...')
-    except Exception:
-        pass
-
-    usable = [p for p in packages if int(min_rows) <= int(p.get('rows', 0) or 0) <= int(max_rows)]
-    usable.sort(key=lambda p: _v31_select_key(p, int(max_rows)))
-    top_pkgs = usable[:max(1, int(top_n or 3))]
-
-    diag_rows = []
-    try:
-        if isinstance(diag_df, pd.DataFrame) and not diag_df.empty:
-            for _, rr in diag_df.iterrows():
-                diag_rows.append({
-                    'Variant': f"PM2K ROBUST v3.3 {rr.get('träffgolv','')}",
-                    'Typ': 'PM2K Robust v3.3',
-                    'Status': 'DIAGNOS',
-                    'Orsak': f"Package Survival · feature efter grind={collect_meta.get('feature_rules_after_grind','')} · paket={len(packages)} · near/global={len(near_df)}/{len(global_eval_df)}",
-                    'Paketträff': str(rr.get('bästa_faktisk_träff','')),
-                    'Paketrader': rr.get('bästa_radantal_i_band',''),
-                    'Filter totalt': '',
-                    'Budgetstatus': '',
-                })
-    except Exception:
-        pass
-
-    if top_pkgs:
+                # v12.0dg: på varje träffgolv ska beamet leta fram bästa reducering
+                # för just den nivån. Annars dominerar 30/30-stater även när vi söker
+                # 28/30 och billiga paket kan försvinna när maxrader höjs.
+                return (in_band, max(0, rows_left-int(max_rows)), rows_left, abs(hh-int(floor)), len(s['rules']), -pc, sc, -hh, abs(rows_left-int(target_rows)))
+            nxt.sort(key=state_rank)
+            beam = nxt[:beam_width]
+            # Fortsätt söka även efter första träff, så topp 3 kan bli bättre.
+            if best_under is not None and depth >= 8:
+                break
+
+        chosen_for_diag = best_under[1] if best_under is not None else (best_any[1] if best_any is not None else None)
+        if chosen_for_diag is not None:
+            rows_left = int(chosen_for_diag['frame_mask'].sum())
+            hh = int(chosen_for_diag['hist_mask'].sum())
+            status = 'UNDER_MAX' if int(min_rows) <= rows_left <= int(max_rows) else 'ÖVER_BUDGET'
+            diag_rows.append({
+                'Variant': f'MÖNSTERMOTOR2K {floor}/{htot}',
+                'Typ': 'Mönstermotor2K',
+                'Status': status,
+                'Orsak': f'egna dynamiska regler · kandidater={len(cand)} · feature-regler={len(rules)} · profil={int(chosen_for_diag.get("profile_count",0))} · struktur={int(chosen_for_diag.get("structure_count",0))}',
+                'Paketträff': f'{hh}/{htot}',
+                'Paketrader': rows_left,
+                'Filter totalt': len(chosen_for_diag['rules']),
+                'Budgetstatus': 'JA' if status == 'UNDER_MAX' else 'NEJ',
+            })
+            if best_under is not None:
+                all_under.append((best_under[0], chosen_for_diag, _state_summary(chosen_for_diag, floor, 'UNDER_MAX')))
+            elif best_any is not None:
+                all_near.append((best_any[0], chosen_for_diag, _state_summary(chosen_for_diag, floor, 'ÖVER_BUDGET')))
+        else:
+            diag_rows.append({
+                'Variant': f'MÖNSTERMOTOR2K {floor}/{htot}', 'Typ': 'Mönstermotor2K', 'Status': 'INGEN_KANDIDAT',
+                'Orsak': f'kandidater={len(cand)} · feature-regler={len(rules)}', 'Paketträff': f'0/{htot}', 'Paketrader': 0, 'Filter totalt': 0, 'Budgetstatus':'NEJ'
+            })
+
+    def _dedupe_options(items):
+        best = {}
+        for score, state, summ in items:
+            sig = _rule_signature(state)
+            old = best.get(sig)
+            if old is None or score < old[0]:
+                best[sig] = (score, state, summ)
+        return list(best.values())
+
+    # v12.0dg: bygg toppalternativ från både sökgolvets vinnare och bästa paket
+    # per faktisk träffnivå. Därmed syns t.ex. ett 1 861-raders 28/30-paket även
+    # när maxgränsen är 5 000 och 30/30/29/30 också finns inom gränsen.
+    under_seed = []
+    under_seed.extend(all_under)
+    under_seed.extend(list(best_under_by_hit.values()))
+    under = _dedupe_options(under_seed)
+    under.sort(key=lambda x: (-int(x[2].get('hit', 0)), int(x[2].get('rows', 10**9)), int(x[2].get('filters', 10**9)), -int(x[2].get('profile_filters', 0)), int(x[2].get('structure_filters', 10**9))))
+    if under:
+        top = under[:max(1, int(top_n or 3))]
         option_states = []
         option_summaries = []
-        for i, pkg in enumerate(top_pkgs, 1):
-            state = dict(pkg.get('_state') or {})
-            if not state:
-                state = {'rules': list(pkg.get('rules') or [])}
-            summ = {
-                'option': int(i),
-                'floor': int(pkg.get('floor_found', pkg.get('hit', 0)) or 0),
-                'rows': int(pkg.get('rows', 0) or 0),
-                'hit': int(pkg.get('hit', 0) or 0),
-                'total': int(pkg.get('total', htot) or htot),
-                'filters': int(pkg.get('filters', len(pkg.get('rules') or [])) or 0),
-                'profile_filters': int(pkg.get('profile_filters', 0) or 0),
-                'structure_filters': int(pkg.get('structure_filters', 0) or 0),
-                'status': 'PM2K_ROBUST_V33_SURVIVAL',
-                'robust_near_pct': pkg.get('robust_near_pct', ''),
-                'robust_global_pct': pkg.get('robust_global_pct', ''),
-                'survival_min_chunk_pct': pkg.get('survival_min_chunk_pct', ''),
-                'survival_wilson_pct': pkg.get('survival_wilson_pct', ''),
-                'v33_survival_risk': pkg.get('v33_survival_risk', ''),
-                'v3_edge_risk': pkg.get('v3_edge_risk', ''),
-                'robust_score': pkg.get('robust_score', ''),
-            }
-            state['_pm2k_option_summary'] = summ
-            state['_pm2k_package_meta'] = {k: v for k, v in pkg.items() if k not in ['_state']}
-            option_states.append(state)
-            option_summaries.append(summ)
+        for i, (_, state, summ) in enumerate(top, 1):
+            s2 = dict(state)
+            s2['_pm2k_option_summary'] = dict(summ, option=i)
+            option_states.append(s2)
+            option_summaries.append(dict(summ, option=i))
             diag_rows.append({
-                'Variant': f'PM2K ROBUST v3.3 TOPP {i}',
-                'Typ': 'PM2K Robust v3.3',
+                'Variant': f'MÖNSTERMOTOR2K TOPP {i}',
+                'Typ': 'Mönstermotor2K',
                 'Status': 'SPELBAR',
-                'Orsak': f"Package Survival · robust near/global={summ.get('robust_near_pct')}/{summ.get('robust_global_pct')} · survival={summ.get('survival_min_chunk_pct')} · edge={summ.get('v3_edge_risk')} · risk={summ.get('v33_survival_risk')}",
-                'Paketträff': f"{summ.get('hit')}/{summ.get('total')}",
+                'Orsak': f'toppalternativ {i} · profil={summ.get("profile_filters")} · struktur={summ.get("structure_filters")}',
+                'Paketträff': f'{summ.get("hit")}/{summ.get("total")}',
                 'Paketrader': int(summ.get('rows', 0)),
                 'Filter totalt': int(summ.get('filters', 0)),
                 'Budgetstatus': 'JA',
@@ -11071,45 +8953,37 @@ def _pm2k_search_package(v_m, frame_rows, filter_vec, antal_matcher=13, target_r
         chosen['_pm2k_alternatives'] = option_states
         meta = {
             'status': 'MÖNSTERMOTOR2K_VALD',
-            'engine': 'PM2K Robust v3.3 Package Survival',
             'rows': int(option_summaries[0]['rows']),
             'hit': int(option_summaries[0]['hit']),
             'total': int(htot),
-            'filters': int(option_summaries[0]['filters']),
-            'candidate_count': int(collect_meta.get('candidate_rules', 0) if isinstance(collect_meta, dict) else 0),
-            'feature_rule_count': int(collect_meta.get('feature_rules_after_grind', 0) if isinstance(collect_meta, dict) else 0),
-            'packages_found': int(len(packages)),
-            'robust_near_total': int(robust_meta.get('near_total', len(near_df)) if isinstance(robust_meta, dict) else len(near_df)),
-            'robust_global_total': int(robust_meta.get('global_total', len(global_eval_df)) if isinstance(robust_meta, dict) else len(global_eval_df)),
+            'candidate_count': len(cand),
+            'feature_rule_count': len(rules),
             'options': option_summaries,
             'target_rows': int(target_rows),
             'min_rows': int(min_rows),
             'max_rows': int(max_rows),
             'frame_adapt': bool(frame_adapt),
-            'min_single_reduction_pct': float(MIN_SINGLE_REDUCTION_PCT),
         }
         try:
             if progress_cb:
-                progress_cb(100, f'PM2K Robust v3.3 klar: {len(option_states)} alternativ. Bäst: {meta["rows"]} rader · {meta["hit"]}/{htot}.')
+                progress_cb(100, f'Mönstermotor klar: {len(option_states)} spelbara alternativ. Bäst: {meta["rows"]} rader · {meta["hit"]}/{htot}.')
         except Exception:
             pass
         return chosen, meta, pd.DataFrame(diag_rows), feat_diag
 
-    meta = {
-        'status':'MÖNSTERMOTOR2K_INGET_UNDER_MAX',
-        'engine': 'PM2K Robust v3.3 Package Survival',
-        'candidate_count': int(collect_meta.get('candidate_rules', 0) if isinstance(collect_meta, dict) else 0),
-        'feature_rule_count': int(collect_meta.get('feature_rules_after_grind', 0) if isinstance(collect_meta, dict) else 0),
-        'packages_found': int(len(packages)),
-        'target_rows': int(target_rows), 'min_rows': int(min_rows), 'max_rows': int(max_rows), 'frame_adapt': bool(frame_adapt),
-    }
+    # Inget under budget: returnera diagnos med bästa nära.
+    near = _dedupe_options(all_near)
+    near.sort(key=lambda x: x[0])
+    best_summary = near[0][2] if near else None
+    meta = {'status':'MÖNSTERMOTOR2K_INGET_UNDER_MAX','candidate_count':len(cand),'feature_rule_count':len(rules), 'target_rows': int(target_rows), 'min_rows': int(min_rows), 'max_rows': int(max_rows), 'frame_adapt': bool(frame_adapt)}
+    if best_summary:
+        meta.update({'best_rows': int(best_summary.get('rows',0)), 'best_hit': f"{best_summary.get('hit')}/{best_summary.get('total')}", 'best_filters': int(best_summary.get('filters',0))})
     try:
         if progress_cb:
-            progress_cb(100, 'PM2K Robust v3.3: inget paket inom valt radband.')
+            progress_cb(100, f'Mönstermotor klar: inget paket under {int(max_rows)}.')
     except Exception:
         pass
     return None, meta, pd.DataFrame(diag_rows), feat_diag
-
 
 def _pm2k_rule_value(rule, row, filter_vec):
     try:
@@ -11182,10 +9056,6 @@ def _pm2k_options_to_df(options):
             'Filter': int(summ.get('filters', 0)),
             'Profilfilter': int(summ.get('profile_filters', 0)),
             'Strukturfilter': int(summ.get('structure_filters', 0)),
-            'Nära %': summ.get('robust_near_pct', ''),
-            'Global %': summ.get('robust_global_pct', ''),
-            'Survival %': summ.get('survival_min_chunk_pct', ''),
-            'Risk': summ.get('v33_survival_risk', ''),
             'Status': summ.get('status', ''),
         })
     return pd.DataFrame(rows)
@@ -12477,7 +10347,7 @@ st.markdown(f"""
   <div class='v12-step'>Ren omstart</div>
   <div class='v12-title'>🎯 Tipset AI — Helgardering-lik filtercentral</div>
   <div class='v12-muted'>En grundram. Ett filter per rad. Av / Tvingat / Grupp. Statistik på varje filter när du öppnar info.</div>
-  <div><span class='v12-pill'>{APP_VERSION}</span><span class='v12-pill'>Manuell filtercentral</span><span class='v12-pill'>PM2K Robust v3.3</span></div>
+  <div><span class='v12-pill'>{APP_VERSION}</span><span class='v12-pill'>Manuell filtercentral</span><span class='v12-pill'>Mönstermotor2K</span></div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -12592,7 +10462,6 @@ if run_analysis:
         try:
             _db_path_now = find_local_database(spelform)
             _db_all_now = load_database(_db_path_now, antal_matcher) if _db_path_now else pd.DataFrame()
-            st.session_state['v12_global_db'] = _db_all_now.copy() if isinstance(_db_all_now, pd.DataFrame) else pd.DataFrame()
             _db_total_now = int(len(_db_all_now))
             _db_after_now = _db_total_now
             if isinstance(_db_all_now, pd.DataFrame) and not _db_all_now.empty and 'Payout' in _db_all_now.columns:
@@ -12814,18 +10683,18 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
     st.caption("När du ändrar träffmål i en filterkategori får filtren i kategorin nya startintervall. Struktur kan t.ex. sättas till 100% medan Värde & svårighet kan ligga på 95%.")
 
     with st.expander("🧠 Rekommenderade filterpaket", expanded=False):
-        st.caption("PM2K Robust v3.3 SNABBLÄGE är kvällens kandidatmotor: mindre kandidatpool för att Streamlit ska hinna klart före spelstopp. V3.3b/AutoProfile används inte.")
+        st.caption("Mönstermotor 2K är huvudspåret: den skapar egna dynamiska regler från de 30 liknande facitraderna och kan aktiveras som ett riktigt filterpaket i nästa filtrering/rättning.")
 
         st.divider()
-        st.markdown("**🧬 PM2K Robust v3.3 – valbar kandidatmotor**")
-        st.caption("Snabbläge: färre kandidater, beam 32, maxdjup 6, min egen reducering 10%. Rekommenderat i kväll: mål 2 800, min 1, max 4 000, Anpassa mot grundram På.")
+        st.markdown("**🧬 Mönstermotor 2K – valbar filtermotor**")
+        st.caption("Skapar egna regler för poäng, värde, skräll, favorit, zon och struktur. Maxrader är bara ett tak: topp 3 sorteras efter högsta träffsäkerhet och därefter lägst radantal/bäst reducering. Grundramsanpassning kan mjuka upp regler som ligger för nära veckans ram.")
         c_pm_a, c_pm_b, c_pm_c, c_pm_d = st.columns([1, 1, 1, 1])
         with c_pm_a:
-            pm_target_rows = st.number_input("Mål rader (diagnos)", min_value=1000, max_value=6000, value=int(st.session_state.get('v12_pm2k_target_rows', 2800)), step=50, key='v12_pm2k_target_rows')
+            pm_target_rows = st.number_input("Mål rader (diagnos)", min_value=1000, max_value=6000, value=int(st.session_state.get('v12_pm2k_target_rows', 2200)), step=50, key='v12_pm2k_target_rows')
         with c_pm_b:
-            pm_min_rows = st.number_input("Min spelbara rader", min_value=1, max_value=5000, value=int(st.session_state.get('v12_pm2k_min_rows', 1)), step=50, key='v12_pm2k_min_rows')
+            pm_min_rows = st.number_input("Min spelbara rader", min_value=500, max_value=5000, value=int(st.session_state.get('v12_pm2k_min_rows', 1850)), step=50, key='v12_pm2k_min_rows')
         with c_pm_c:
-            pm_max_rows = st.number_input("Max spelbara rader", min_value=1000, max_value=8000, value=int(st.session_state.get('v12_pm2k_max_rows', 4000)), step=50, key='v12_pm2k_max_rows')
+            pm_max_rows = st.number_input("Max spelbara rader", min_value=1000, max_value=8000, value=int(st.session_state.get('v12_pm2k_max_rows', 2500)), step=50, key='v12_pm2k_max_rows')
         with c_pm_d:
             pm_frame_adapt = st.checkbox(
                 "Anpassa mot grundram",
@@ -12856,7 +10725,6 @@ if st.session_state.get('v12_analysis_ready') and st.session_state.get('v12_fram
                     target_rows=int(pm_target_rows), min_rows=int(pm_min_rows), max_rows=int(pm_max_rows), min_hit_floor=27, top_n=3,
                     frame_adapt=bool(pm_frame_adapt),
                     progress_cb=_pm_progress,
-                    global_db=st.session_state.get('v12_global_db'), pay_min=int(pay_min), pay_max=int(pay_max), top_n_hist=int(top_n),
                 )
                 pm_progress.progress(100, text=f"Mönstermotor 2K klar på {_fmt_elapsed(time.time() - pm_start)}")
                 st.session_state['v12_pm2k_meta'] = pm_meta
